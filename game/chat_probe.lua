@@ -3,12 +3,18 @@ local core = (function()
 --[[HD2_CHAT_PROBE_CORE]]
 end)()
 
+local OBSERVE_ENABLED = false --[[HD2_CHAT_OBSERVER_ENABLED]]
+local observer_core = (function()
+--[[HD2_CHAT_OBSERVER_CORE]]
+end)()
+
 local function initialize_probe()
     local ffi = require("ffi")
     ffi.cdef[[
         typedef unsigned char HD2Probe_U8;
         typedef unsigned short HD2Probe_U16;
         typedef unsigned int HD2Probe_U32;
+        typedef unsigned long long HD2Probe_U64;
         typedef int HD2Probe_I32;
         typedef size_t HD2Probe_SIZE_T;
         typedef void *HD2Probe_HANDLE;
@@ -38,6 +44,13 @@ local function initialize_probe()
         int ReadFile(HD2Probe_HANDLE file, void *buffer, HD2Probe_U32 length, HD2Probe_U32 *bytes_read, void *overlapped);
         int CloseHandle(HD2Probe_HANDLE handle);
         int CreateDirectoryA(const char *path, void *security);
+        int CreateDirectoryW(const HD2Probe_U16 *path, void *security);
+        HD2Probe_U32 GetEnvironmentVariableW(const HD2Probe_U16 *name, HD2Probe_U16 *buffer, HD2Probe_U32 capacity);
+        HD2Probe_U64 GetTickCount64(void);
+        int WriteFile(HD2Probe_HANDLE file, const void *buffer, HD2Probe_U32 length, HD2Probe_U32 *bytes_written, void *overlapped);
+        int FlushFileBuffers(HD2Probe_HANDLE file);
+        int DeleteFileW(const HD2Probe_U16 *path);
+        int MoveFileExW(const HD2Probe_U16 *existing_path, const HD2Probe_U16 *new_path, HD2Probe_U32 flags);
 
         HD2Probe_I32 BCryptOpenAlgorithmProvider(HD2Probe_BCRYPT_ALG_HANDLE *algorithm, const HD2Probe_U16 *algorithm_id, const HD2Probe_U16 *implementation, HD2Probe_U32 flags);
         HD2Probe_I32 BCryptCreateHash(HD2Probe_BCRYPT_ALG_HANDLE algorithm, HD2Probe_BCRYPT_HASH_HANDLE *hash, HD2Probe_U8 *object_buffer, HD2Probe_U32 object_size, HD2Probe_U8 *secret, HD2Probe_U32 secret_size, HD2Probe_U32 flags);
@@ -264,6 +277,429 @@ local function initialize_probe()
         end
     end
 
+    local observer_read_budget = 0
+    local observer_now = 0
+    local observer_next_command_poll = 0
+    local observer_faulted = false
+    local observer_output_sequence = 0
+    local observer_session_time = os.time()
+    local observer_session_nonce = 0
+    local observer_active_cycle = nil
+    local observer_ids = {}
+    local observer_id_count = 0
+    local observer_next_id = 0
+    local observer_local_app
+    local observer_local_app_length
+    local observer_directory
+    local observer_directory_length
+    local observer_request_path
+
+    local MAX_OBSERVER_ADDRESS = 0x7fffffffffff
+    local MAX_OBSERVER_READ = 16 * 1024
+    local OBSERVER_IMAGE_SIZE = expected_image_size
+
+    local function append_wide_ascii(base, base_length, suffix)
+        if type(suffix) ~= "string" or suffix:find("[^%w_%.%-\\]") then return nil end
+        local length = base_length + #suffix
+        if length + 1 > 32768 then return nil end
+        local output = ffi.new("HD2Probe_U16[?]", length + 1)
+        if base_length > 0 then ffi.copy(output, base, base_length * 2) end
+        for index = 1, #suffix do output[base_length + index - 1] = suffix:byte(index) end
+        output[length] = 0
+        return output, length
+    end
+
+    local function prepare_observer_paths()
+        local name = u16_ascii("LOCALAPPDATA")
+        local buffer = ffi.new("HD2Probe_U16[32768]")
+        local length = kernel.GetEnvironmentVariableW(name, buffer, 32768)
+        if length == 0 or length >= 32768 then error("observer path unavailable") end
+        observer_local_app = buffer
+        observer_local_app_length = tonumber(length)
+
+        local parent, parent_length = append_wide_ascii(buffer, observer_local_app_length, "\\HD2ChatTranslate")
+        local directory, directory_length = append_wide_ascii(buffer, observer_local_app_length, "\\HD2ChatTranslate\\observe")
+        if not parent or not directory then error("observer path unavailable") end
+        kernel.CreateDirectoryW(parent, nil)
+        kernel.CreateDirectoryW(directory, nil)
+        observer_directory = directory
+        observer_directory_length = directory_length
+        observer_request_path = append_wide_ascii(directory, directory_length, "\\request.txt")
+        if not observer_request_path then error("observer path unavailable") end
+
+        local uptime = tonumber(kernel.GetTickCount64())
+        if not uptime or uptime < 0 then error("observer clock unavailable") end
+        observer_session_nonce = math.floor((uptime * 48271 + (observer_session_time % 2147483647)) % 2147483647)
+    end
+
+    local function observer_query_address(address)
+        if type(address) ~= "number" or address ~= address or address == math.huge or address == -math.huge
+            or address < 0x10000 or address > MAX_OBSERVER_ADDRESS or address ~= math.floor(address) then
+            return nil
+        end
+        local information = ffi.new("HD2Probe_MEMORY_BASIC_INFORMATION[1]")
+        local pointer = ffi.cast("const void *", ffi.cast("size_t", address))
+        local received = kernel.VirtualQuery(pointer, information, ffi.sizeof(information[0]))
+        if received ~= ffi.sizeof(information[0]) then return nil end
+        local item = information[0]
+        local region_base = tonumber(ffi.cast("size_t", item.BaseAddress))
+        local allocation_base = tonumber(ffi.cast("size_t", item.AllocationBase))
+        local region_size = tonumber(item.RegionSize)
+        if not region_base or not allocation_base or not region_size or region_size <= 0
+            or region_base < 0x10000 or region_base > MAX_OBSERVER_ADDRESS
+            or region_size > MAX_OBSERVER_ADDRESS - region_base + 1 then return nil end
+        return {
+            base = region_base,
+            finish = region_base + region_size,
+            allocation_base = allocation_base,
+            state = tonumber(item.State),
+            protect = tonumber(item.Protect),
+            type = tonumber(item.Type),
+        }
+    end
+
+    local function same_observer_region(left, right)
+        return left and right and left.base == right.base and left.finish == right.finish
+            and left.allocation_base == right.allocation_base and left.state == right.state
+            and left.protect == right.protect and left.type == right.type
+    end
+
+    local module_base_number = tonumber(module_base)
+
+    local function observer_region_allowed(region)
+        if not region or region.state ~= 0x1000 then return false end
+        if region.protect ~= 0x02 and region.protect ~= 0x04 and region.protect ~= 0x08 then return false end
+        if region.type == 0x20000 then return true end
+        return region.type == 0x1000000 and region.allocation_base == module_base_number
+    end
+
+    local function observer_read(address, length)
+        if type(length) ~= "number" or length ~= length or length ~= math.floor(length)
+            or length < 1 or length > 4096 or length > MAX_OBSERVER_READ - observer_read_budget then
+            return nil
+        end
+        observer_read_budget = observer_read_budget + length
+        if type(address) ~= "number" or address ~= address or address == math.huge or address == -math.huge
+            or address < 0x10000 or address > MAX_OBSERVER_ADDRESS or address ~= math.floor(address)
+            or length - 1 > MAX_OBSERVER_ADDRESS - address then return nil end
+
+        local finish = address + length
+        local cursor = address
+        local first_allocation = nil
+        local output = ffi.new("HD2Probe_U8[?]", length)
+        while cursor < finish do
+            local region = observer_query_address(cursor)
+            if not observer_region_allowed(region) then return nil end
+            if first_allocation == nil then first_allocation = region.allocation_base
+            elseif first_allocation ~= region.allocation_base then return nil end
+            if region.base > cursor or region.finish <= cursor then return nil end
+
+            local page_finish = (math.floor(cursor / 4096) + 1) * 4096
+            local chunk_finish = math.min(finish, region.finish, page_finish)
+            if chunk_finish <= cursor then return nil end
+            local verified = observer_query_address(cursor)
+            if not same_observer_region(region, verified) or not observer_region_allowed(verified)
+                or verified.allocation_base ~= first_allocation then return nil end
+
+            local chunk_length = chunk_finish - cursor
+            local bytes_read = ffi.new("HD2Probe_SIZE_T[1]")
+            local destination = output + (cursor - address)
+            local source = ffi.cast("const void *", ffi.cast("size_t", cursor))
+            if kernel.ReadProcessMemory(process, source, destination, chunk_length, bytes_read) == 0
+                or tonumber(bytes_read[0]) ~= chunk_length then return nil end
+            cursor = chunk_finish
+        end
+        return ffi.string(output, length)
+    end
+
+    local function observer_read_pointer(address)
+        local bytes = observer_read(address, 8)
+        if not bytes then return nil end
+        local value = ffi.new("HD2Probe_SIZE_T[1]")
+        ffi.copy(value, bytes, 8)
+        local number = tonumber(value[0])
+        if not number or number < 0x10000 or number > MAX_OBSERVER_ADDRESS or number ~= math.floor(number) then
+            return nil
+        end
+        return number
+    end
+
+    local function observer_u32(bytes, offset)
+        local a, b, c, d = bytes:byte(offset + 1, offset + 4)
+        if not d then return nil end
+        return a + b * 256 + c * 65536 + d * 16777216
+    end
+
+    local function observer_u64(bytes, offset)
+        if not bytes or offset < 0 or offset + 8 > #bytes then return nil end
+        local value = ffi.new("HD2Probe_SIZE_T[1]")
+        ffi.copy(value, bytes:sub(offset + 1, offset + 8), 8)
+        local number = tonumber(value[0])
+        if not number or number < 0 or number > MAX_OBSERVER_ADDRESS or number ~= math.floor(number) then return nil end
+        return number
+    end
+
+    local function observer_add(address, offset)
+        if type(address) ~= "number" or type(offset) ~= "number" or offset < 0
+            or offset ~= math.floor(offset) or address < 0x10000 or address > MAX_OBSERVER_ADDRESS
+            or offset > MAX_OBSERVER_ADDRESS - address then return nil end
+        return address + offset
+    end
+
+    local function observer_root_snapshot()
+        local root_address = observer_add(module_base_number, 0x347CEF0)
+        if not root_address then return nil end
+        local root = observer_read_pointer(root_address)
+        if not root then return nil end
+        local chat = observer_add(root, 0xC418)
+        if not chat then return nil end
+        local metadata_address = observer_add(chat, 0x9590)
+        if not metadata_address then return nil end
+        local metadata = observer_read(metadata_address, 8)
+        if not metadata then return nil end
+        local first = observer_u32(metadata, 0)
+        local count = observer_u32(metadata, 4)
+        if not first or not count or first >= 64 or count > 64 then return nil end
+        return root, chat, first, count
+    end
+
+    local function observer_same_cycle(cycle)
+        if not cycle then return false end
+        local root, chat, first, count = observer_root_snapshot()
+        return root == cycle.root and chat == cycle.chat and first == cycle.first and count == cycle.count
+    end
+
+    local function observer_anon_id(address)
+        local existing = observer_ids[address]
+        if existing then return existing end
+        if observer_id_count >= 256 then
+            observer_ids = {}
+            observer_id_count = 0
+        end
+        observer_next_id = observer_next_id + 1
+        observer_id_count = observer_id_count + 1
+        observer_ids[address] = observer_next_id
+        return observer_next_id
+    end
+
+    local function observer_begin_cycle()
+        observer_active_cycle = nil
+        local root, chat, first, count = observer_root_snapshot()
+        if not root then return nil end
+        local verify_root, verify_chat, verify_first, verify_count = observer_root_snapshot()
+        if root ~= verify_root or chat ~= verify_chat or first ~= verify_first or count ~= verify_count then return nil end
+        local cycle = {
+            root = root,
+            chat = chat,
+            first = first,
+            count = count,
+            owner_id = observer_anon_id(root),
+        }
+        observer_active_cycle = cycle
+        return {owner_id = cycle.owner_id, first = first, count = count}
+    end
+
+    local function observer_read_slot(slot)
+        local cycle = observer_active_cycle
+        if not cycle or type(slot) ~= "number" or slot ~= math.floor(slot) or slot < 0 or slot >= 64 then return nil end
+        local distance = (slot - cycle.first) % 64
+        if distance >= cycle.count or not observer_same_cycle(cycle) then return nil end
+        local slot_base = observer_add(cycle.chat, slot * 0x228)
+        if not slot_base then return nil end
+        local timestamp_address = observer_add(slot_base, 0xB90)
+        local body_address = observer_add(slot_base, 0xBA0)
+        local flags_address = observer_add(slot_base, 0xDA0)
+        if not timestamp_address or not body_address or not flags_address then return nil end
+        local timestamp = observer_read(timestamp_address, 8)
+        local body = observer_read(body_address, 513)
+        local flags = observer_read(flags_address, 8)
+        if not timestamp or not body or not flags then return nil end
+        return {identity = timestamp .. body:sub(1, 8), body = body, flags = flags}
+    end
+
+    local function observer_finish_cycle()
+        local cycle = observer_active_cycle
+        if not observer_same_cycle(cycle) then return nil end
+        observer_active_cycle = nil
+        return {owner_id = cycle.owner_id, first = cycle.first, count = cycle.count}
+    end
+
+    local function observer_path_with_suffix(suffix)
+        return append_wide_ascii(observer_directory, observer_directory_length, suffix)
+    end
+
+    local function observer_write_report(manifest)
+        local encoded = core.encode_json(manifest)
+        if type(encoded) ~= "string" or #encoded > 256 * 1024 then error("observer report limit") end
+        kernel.CreateDirectoryW(append_wide_ascii(observer_local_app, observer_local_app_length, "\\HD2ChatTranslate"), nil)
+        kernel.CreateDirectoryW(observer_directory, nil)
+
+        local final_suffix = string.format("\\chat-observe-%d-%08x.json", observer_session_time, observer_session_nonce)
+        local final_path = observer_path_with_suffix(final_suffix)
+        if not final_path then error("observer report path") end
+        local bytes = ffi.new("HD2Probe_U8[?]", #encoded)
+        if #encoded > 0 then ffi.copy(bytes, encoded, #encoded) end
+        local written = ffi.new("HD2Probe_U32[1]")
+        local file, temporary_path
+        for attempt = 1, 16 do
+            observer_output_sequence = observer_output_sequence + 1
+            local suffix = string.format("\\chat-observe-%d-%08x-%08x-%02d.tmp",
+                observer_session_time, observer_session_nonce, observer_output_sequence, attempt)
+            temporary_path = observer_path_with_suffix(suffix)
+            if not temporary_path then error("observer temporary path") end
+            file = kernel.CreateFileW(temporary_path, 0x40000000, 0, nil, 1, 0x80, nil)
+            if file ~= nil and file ~= invalid_handle then break end
+            file = nil
+        end
+        if not file then error("observer temporary file unavailable") end
+
+        local write_ok = kernel.WriteFile(file, bytes, #encoded, written, nil) ~= 0
+            and tonumber(written[0]) == #encoded
+        local flush_ok = write_ok and kernel.FlushFileBuffers(file) ~= 0
+        local close_ok = kernel.CloseHandle(file) ~= 0
+        if not write_ok or not flush_ok or not close_ok then
+            kernel.DeleteFileW(temporary_path)
+            error("observer report write failed")
+        end
+        if kernel.MoveFileExW(temporary_path, final_path, 0x1 + 0x8) == 0 then
+            kernel.DeleteFileW(temporary_path)
+            error("observer report replace failed")
+        end
+        return true
+    end
+
+    local function observer_take_command()
+        if observer_now < observer_next_command_poll then return nil end
+        observer_next_command_poll = observer_now + 250
+        local file = kernel.CreateFileW(observer_request_path, 0x80000000, 0x3, nil, 3, 0x80, nil)
+        if file == nil or file == invalid_handle then return nil end
+        local buffer = ffi.new("HD2Probe_U8[65]")
+        local received = ffi.new("HD2Probe_U32[1]")
+        local ok = kernel.ReadFile(file, buffer, 65, received, nil) ~= 0
+        kernel.CloseHandle(file)
+        if not ok then return nil end
+        if kernel.DeleteFileW(observer_request_path) == 0 then return nil end
+        local length = tonumber(received[0])
+        if not length or length < 1 or length > 64 then return nil end
+        local command = ffi.string(buffer, length)
+        if command:sub(-2) == "\r\n" then command = command:sub(1, -3)
+        elseif command:sub(-1) == "\n" then command = command:sub(1, -2) end
+        if command == "" or command:find("[^\0-\127]") or command:find("[\r\n\0]") then return nil end
+        if command == "startup" or command == "chat_closed" or command == "chat_open" or command == "chat_sent" then
+            return command
+        end
+        return nil
+    end
+
+    local function observer_ui_snapshot()
+        local owner_global = observer_add(module_base_number, 0x347CE28)
+        local dispatch_global = observer_add(module_base_number, 0x3326E68)
+        if not owner_global or not dispatch_global then return nil end
+        local owner = observer_read_pointer(owner_global)
+        if not owner then return nil end
+        local stack_address = observer_add(owner, 0x429C)
+        if not stack_address then return nil end
+        local stack_bytes = observer_read(stack_address, 24)
+        if not stack_bytes then return nil end
+        local depth = observer_u32(stack_bytes, 20)
+        if not depth or depth > 5 then return nil end
+        local screen_ids = {}
+        for index = 0, depth - 1 do
+            local screen_id = observer_u32(stack_bytes, index * 4)
+            if screen_id == nil then return nil end
+            screen_ids[#screen_ids + 1] = screen_id
+        end
+
+        local dispatch = observer_read_pointer(dispatch_global)
+        if not dispatch then return nil end
+        local count_address = observer_add(dispatch, 0x5740)
+        local rows_address = observer_add(dispatch, 0x5744)
+        if not count_address or not rows_address then return nil end
+        local count_bytes = observer_read(count_address, 4)
+        if not count_bytes then return nil end
+        local count = observer_u32(count_bytes, 0)
+        if not count or count > 64 then return nil end
+        local rows_bytes = ""
+        if count > 0 then
+            rows_bytes = observer_read(rows_address, count * 16)
+            if not rows_bytes then return nil end
+        end
+
+        local controllers = {}
+        for index = 0, count - 1 do
+            local row_offset = index * 16
+            local controller_address = observer_u64(rows_bytes, row_offset)
+            local kind = observer_u32(rows_bytes, row_offset + 8)
+            if not controller_address or kind == nil then return nil end
+            local vtable = observer_read_pointer(controller_address)
+            if not vtable then return nil end
+            local item = {
+                kind = kind,
+                object_id = observer_anon_id(controller_address),
+            }
+            if vtable >= module_base_number and vtable < module_base_number + OBSERVER_IMAGE_SIZE then
+                item.vtable_rva = vtable - module_base_number
+                local table_bytes = observer_read(vtable, 64)
+                if table_bytes then
+                    local functions = {}
+                    for function_index = 0, 7 do
+                        local address = observer_u64(table_bytes, function_index * 8)
+                        if address and address >= module_base_number + core.SECTION.rva
+                            and address < module_base_number + expected_section_end then
+                            functions[#functions + 1] = address - module_base_number
+                        end
+                    end
+                    if #functions > 0 then item.vtable_functions = functions end
+                end
+            end
+            controllers[#controllers + 1] = item
+        end
+
+        local owner_verify = observer_read_pointer(owner_global)
+        local stack_verify = observer_read(stack_address, 24)
+        local dispatch_verify = observer_read_pointer(dispatch_global)
+        local count_verify = observer_read(count_address, 4)
+        if owner_verify ~= owner or stack_verify ~= stack_bytes or dispatch_verify ~= dispatch
+            or not count_verify or observer_u32(count_verify, 0) ~= count then return nil end
+        local rows_verify = ""
+        if count > 0 then
+            rows_verify = observer_read(rows_address, count * 16)
+            if not rows_verify then return nil end
+        end
+        if rows_verify ~= rows_bytes then return nil end
+        return {screen_depth = depth, screen_ids = screen_ids, controllers = controllers}
+    end
+
+    local function make_observer_adapter()
+        prepare_observer_paths()
+        local adapter = {}
+        local function protect(callback)
+            return function(...)
+                if observer_faulted then return nil end
+                local ok, first, second = pcall(callback, ...)
+                if not ok then
+                    observer_faulted = true
+                    error("observer adapter failure")
+                end
+                return first, second
+            end
+        end
+        adapter.now_ms = protect(function()
+            observer_now = tonumber(kernel.GetTickCount64())
+            if not observer_now or observer_now < 0 or observer_now ~= math.floor(observer_now) then
+                error("observer clock failure")
+            end
+            return observer_now
+        end)
+        adapter.begin_cycle = protect(observer_begin_cycle)
+        adapter.read_slot = protect(observer_read_slot)
+        adapter.finish_cycle = protect(observer_finish_cycle)
+        adapter.ui_snapshot = protect(observer_ui_snapshot)
+        adapter.take_command = protect(observer_take_command)
+        adapter.output = protect(observer_write_report)
+        return adapter
+    end
+
     local adapter = {
         hash_file = hash_module_file,
         query = query,
@@ -272,21 +708,87 @@ local function initialize_probe()
         output = output_manifest,
     }
     local state = core.new(adapter)
+    local code_manifest_written = false
+    local code_scan_done = false
+    local observer_state = nil
+
+    local function observer_log_stopped()
+        pcall(print, "[HD2 Chat Probe] observer stopped after a sanitized failure")
+    end
+
+    local function observer_finish_with_error(reason)
+        if observer_state then
+            observer_state.done = true
+            observer_state.status = "observer_stopped"
+            observer_state.stop_reason = reason
+            observer_state.active_cycle = nil
+            local output_ok = pcall(observer_write_report, observer_core.manifest(observer_state))
+            if not output_ok then observer_log_stopped() end
+        else
+            observer_log_stopped()
+        end
+        return true
+    end
+
+    local function signatures_verified(manifest)
+        if type(manifest) ~= "table" or manifest.status ~= "scan_complete"
+            or type(manifest.known_signatures) ~= "table" or #manifest.known_signatures ~= 6 then return false end
+        for index = 1, 6 do
+            local item = manifest.known_signatures[index]
+            if type(item) ~= "table" or item.comparison ~= "true" then return false end
+        end
+        return true
+    end
+
+    local function start_observer()
+        local adapter_ok, observer_adapter = pcall(make_observer_adapter)
+        if not adapter_ok then
+            observer_log_stopped()
+            return false
+        end
+        local state_ok, created_state = pcall(observer_core.new, observer_adapter)
+        if not state_ok or type(created_state) ~= "table" then
+            observer_log_stopped()
+            return false
+        end
+        observer_state = created_state
+        return true
+    end
+
     local function one_probe_step()
-        local step_ok, done, manifest = pcall(core.step, state, core.BUDGET_PER_STEP)
-        if not step_ok then
-            state.done = true
-            state.status = "probe_error"
-            state.detail = "probe stopped after an internal error"
-            local output_ok = pcall(adapter.output, core.encode_json(core.manifest(state)))
-            if not output_ok then pcall(print, "[HD2 Chat Probe] failed to write research manifest") end
-            return true
+        if not code_scan_done then
+            local step_ok, done, manifest = pcall(core.step, state, core.BUDGET_PER_STEP)
+            if not step_ok then
+                state.done = true
+                state.status = "probe_error"
+                state.detail = "probe stopped after an internal error"
+                manifest = core.manifest(state)
+                done = true
+            end
+            if not done then return false end
+
+            code_scan_done = true
+            if not code_manifest_written then
+                code_manifest_written = true
+                local output_ok = pcall(adapter.output, core.encode_json(manifest or core.manifest(state)))
+                if not output_ok then pcall(print, "[HD2 Chat Probe] failed to write research manifest") end
+            end
+
+            if not OBSERVE_ENABLED or not signatures_verified(manifest) then return true end
+            if not observer_core or type(observer_core.new) ~= "function"
+                or type(observer_core.step) ~= "function" or type(observer_core.manifest) ~= "function" then
+                observer_log_stopped()
+                return true
+            end
+            if not start_observer() then return true end
         end
-        if done then
-            local output_ok = pcall(adapter.output, core.encode_json(manifest))
-            if not output_ok then pcall(print, "[HD2 Chat Probe] failed to write research manifest") end
-        end
-        return done
+
+        if not observer_state then return true end
+        observer_read_budget = 0
+        local step_ok, done = pcall(observer_core.step, observer_state)
+        if not step_ok then return observer_finish_with_error("internal_error") end
+        if observer_faulted then return observer_finish_with_error("adapter_error") end
+        return done == true
     end
     return one_probe_step
 end

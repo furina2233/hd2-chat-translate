@@ -3,11 +3,13 @@ param(
     [string]$GameDirectory = "E:/SteamLibrary/steamapps/common/Helldivers 2",
     [switch]$DryRun,
     [switch]$Rollback,
-    [switch]$Followup
+    [switch]$Followup,
+    [switch]$Observe
 )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
+if ($Followup -and $Observe) { throw "Followup 与 Observe 不能同时指定。" }
 
 $script:ProjectRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot ".."))
 $script:ExpectedGameSha256 = "2e2c3b7c2500646dadd5f2b4c6e0504dbb7e7896139f64cddc0d1813c718f51e"
@@ -21,6 +23,12 @@ if ($Followup) {
     $script:ExpectedProbeZipSha256 = "7e562cda0307d5db679e9d3a8c57073044c25247c03581ecf29f35c7459f2334"
     $script:ProbeZipName = "HD2ChatProbeFollowup.zip"
     $script:ExpectedProbePatchLength = 44448L
+}
+# 观察器独立打包并固定指纹，避免覆盖仍可回滚的补充版来源。
+if ($Observe) {
+    $script:ExpectedProbeZipSha256 = "e27eb79ac770a6064604ce5c4ec0826bd9e6043a7631d4e6d6482e4aad7b55e2"
+    $script:ProbeZipName = "HD2ChatObserve.zip"
+    $script:ExpectedProbePatchLength = 89824L
 }
 $script:LoaderResourceId = [Convert]::ToUInt64("7251fdd9bb62480a", 16)
 $script:ProbeResourceId = [Convert]::ToUInt64("c509c11199f753c2", 16)

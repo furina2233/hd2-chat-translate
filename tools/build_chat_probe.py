@@ -18,8 +18,11 @@ ARCHIVE_NAME = "9ba626afa44a3aa3.patch_0"
 RESOURCE_TYPE = 0xA14E8DFA2CD117E2
 ADDON_GUID = "a741d044-972b-4dc5-b08e-1a68441e1d7f"
 CORE_MARKER = b"--[[HD2_CHAT_PROBE_CORE]]"
+OBSERVE_MARKER = b"--[[HD2_CHAT_OBSERVER_CORE]]"
+OBSERVE_FLAG = b"local OBSERVE_ENABLED = false --[[HD2_CHAT_OBSERVER_ENABLED]]"
 MAX_SOURCE_BYTES = 512 * 1024
 DEFAULT_OUTPUT = ROOT / "artifacts" / "HD2ChatProbe.zip"
+OBSERVE_OUTPUT = ROOT / "artifacts" / "HD2ChatObserve.zip"
 DEPLOYMENT_RECEIPT = ROOT / ".local" / "chat-probe-deployment.json"
 
 
@@ -77,8 +80,9 @@ def make_single_resource_archive(name_hash: int, resource: bytes) -> bytes:
     return bytes(archive)
 
 
-def entry_source(source: bytes, core_source: bytes) -> bytes:
-    if len(source) > MAX_SOURCE_BYTES or len(core_source) > MAX_SOURCE_BYTES:
+def entry_source(source: bytes, core_source: bytes, observer_source: bytes | None = None) -> bytes:
+    sources = (source, core_source) if observer_source is None else (source, core_source, observer_source)
+    if any(len(item) > MAX_SOURCE_BYTES for item in sources):
         raise ValueError("Lua 源文件超过构建大小上限")
     if source.startswith((b"\xef\xbb\xbf", b"\x1b")) or b"\0" in source:
         raise ValueError("入口必须是无 BOM、无字节码标记的 UTF-8 Lua 文本")
@@ -86,9 +90,18 @@ def entry_source(source: bytes, core_source: bytes) -> bytes:
         raise ValueError("核心必须是无 BOM、无字节码标记的 UTF-8 Lua 文本")
     source.decode("utf-8")
     core_source.decode("utf-8")
+    if observer_source is not None:
+        if observer_source.startswith((b"\xef\xbb\xbf", b"\x1b")) or b"\0" in observer_source:
+            raise ValueError("观察核心必须是无 BOM、无字节码标记的 UTF-8 Lua 文本")
+        observer_source.decode("utf-8")
     if source.count(CORE_MARKER) != 1:
         raise ValueError("入口必须恰好包含一个扫描核心嵌入标记")
     embedded = source.replace(CORE_MARKER, core_source.rstrip() + b"\n", 1)
+    if source.count(OBSERVE_MARKER) != 1 or source.count(OBSERVE_FLAG) != 1:
+        raise ValueError("入口必须恰好包含一个观察核心标记及默认关闭标记")
+    embedded = embedded.replace(OBSERVE_MARKER, (observer_source or b"return nil").rstrip() + b"\n", 1)
+    if observer_source is not None:
+        embedded = embedded.replace(OBSERVE_FLAG, OBSERVE_FLAG.replace(b"= false", b"= true"), 1)
     if embedded.startswith(b"-- HD2-Addon:"):
         _, separator, embedded = embedded.partition(b"\n")
         if not separator:
@@ -96,16 +109,23 @@ def entry_source(source: bytes, core_source: bytes) -> bytes:
     declaration = ("-- HD2-Addon: " + RESOURCE_NAME + "\n").encode("utf-8")
     if len(declaration) > 256:
         raise ValueError("addon 声明超过 256 字节")
+    if len(declaration + embedded) > MAX_SOURCE_BYTES:
+        raise ValueError("嵌入后的 Lua 源文件超过构建大小上限")
     return declaration + embedded
 
 
-def addon_files(entry: bytes) -> dict[str, bytes]:
+def addon_files(entry: bytes, observe: bool = False) -> dict[str, bytes]:
     resource = struct.pack("<II", len(entry), 2) + entry
     archive = make_single_resource_archive(resource_hash(RESOURCE_NAME), resource)
     description = (
         "只读研究探针：验证指定 game.dll 构建并导出候选字节，不连接聊天或调用游戏函数。"
         "需要 Bingus Shared Loader v15+ / API 1。"
     )
+    if observe:
+        description = (
+            "只读聊天观察器：校验指定构建后读取有界历史和 UI 元数据，只报告固定测试消息是否出现。"
+            "不保存普通聊天，不调用游戏函数、不写游戏内存、不连接大模型。需要 Bingus Shared Loader v15+ / API 1。"
+        )
     manifest = {
         "Version": 1,
         "Guid": str(uuid.UUID(ADDON_GUID)),
@@ -139,7 +159,7 @@ def _protect_deployed_source(output_path: Path) -> None:
     if not DEPLOYMENT_RECEIPT.exists():
         return
 
-    is_default = _same_path(output_path, DEFAULT_OUTPUT)
+    is_default = any(_same_path(output_path, item) for item in (DEFAULT_OUTPUT, OBSERVE_OUTPUT))
     try:
         receipt = json.loads(DEPLOYMENT_RECEIPT.read_text(encoding="utf-8"))
     except (OSError, UnicodeError, json.JSONDecodeError) as error:
@@ -186,15 +206,18 @@ def _protect_deployed_source(output_path: Path) -> None:
         raise ValueError("部署收据的来源路径不完整，拒绝覆盖默认输出；请先核实并回滚部署。")
 
 
-def build_artifact(output: Path | str | None = None) -> Path:
+def build_artifact(output: Path | str | None = None, observe: bool = False) -> Path:
     entry_path = ROOT / "game" / "chat_probe.lua"
     core_path = ROOT / "game" / "chat_probe_core.lua"
-    output_path = Path(output) if output is not None else DEFAULT_OUTPUT
+    observer_path = ROOT / "game" / "chat_observe_core.lua"
+    output_path = Path(output) if output is not None else (OBSERVE_OUTPUT if observe else DEFAULT_OUTPUT)
     _protect_deployed_source(output_path)
-    if output_path.resolve() in (entry_path.resolve(), core_path.resolve()):
+    if output_path.resolve() in (entry_path.resolve(), core_path.resolve(), observer_path.resolve()):
         raise ValueError("输出不能覆盖 Lua 源文件")
-    packaged_entry = entry_source(entry_path.read_bytes(), core_path.read_bytes())
-    files = addon_files(packaged_entry)
+    packaged_entry = entry_source(
+        entry_path.read_bytes(), core_path.read_bytes(), observer_path.read_bytes() if observe else None
+    )
+    files = addon_files(packaged_entry, observe)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     with zipfile.ZipFile(output_path, "w", compression=zipfile.ZIP_DEFLATED) as package:
         for name, content in sorted(files.items()):
@@ -208,9 +231,10 @@ def build_artifact(output: Path | str | None = None) -> Path:
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output", type=Path, help="ZIP 输出路径，默认 artifacts/HD2ChatProbe.zip")
+    parser.add_argument("--observe", action="store_true", help="构建持续只读观察器，默认输出 artifacts/HD2ChatObserve.zip")
     args = parser.parse_args()
     try:
-        result = build_artifact(args.output)
+        result = build_artifact(args.output, args.observe)
     except (OSError, ValueError) as error:
         parser.error(str(error))
     print(f"已构建研究探针：{result}")

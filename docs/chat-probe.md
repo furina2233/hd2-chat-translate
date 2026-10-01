@@ -98,8 +98,44 @@ pwsh -NoProfile -File tools/deploy_probe.ps1 -Followup
 pwsh -NoProfile -File tools/deploy_probe.ps1 -Followup -Rollback
 ```
 
-补充 ZIP SHA-256 为 `7e562cda0307d5db679e9d3a8c57073044c25247c03581ecf29f35c7459f2334`，主 patch 条目 44,448 字节。原 `HD2ChatProbe.zip` 已保留；构建器会拒绝覆盖当前部署收据引用的来源 ZIP，以保留回滚依据。补充版已部署，真实游戏采集仍待重新启动。
+补充 ZIP SHA-256 为 `7e562cda0307d5db679e9d3a8c57073044c25247c03581ecf29f35c7459f2334`，主 patch 条目 44,448 字节。原 `HD2ChatProbe.zip` 已保留；构建器会拒绝覆盖当前部署收据引用的来源 ZIP，以保留回滚依据。补充版已部署并完成真实游戏采集。
 
 补充版独立验收：24/24 测试通过、零跳过（10.078 秒）；三份 ZIP CRC 与固定指纹通过。隔离 TEMP 副本验证补充版部署、幂等及实际回滚，正好新增/移除六文件；由于真实游戏仍运行，副本中的进程守卫使用不操作进程的测试桩，生产守卫保持原样。真实目录只读检查确认首版六文件匹配，回滚预演通过，补充模式遇到首版收据会拒绝覆盖。未改真实收据或已部署文件。
 
 2026-10-01 用户再次正常退出游戏后，确认进程关闭，按首版收据实际回滚六个文件，再部署补充探针到 `patch_21`、加载器到 `patch_22`。新收据指向补充 ZIP；六个文件摘要通过，探针主 patch SHA-256 为 `e0cba668afa2017cf4f0a887f4092f83f31de0c8ba8d85baeca79bd11fa51a17`。部署前后原有 `patch_0`–`patch_20` 的 21 个主文件摘要全部相同，补充模式重复部署预演与回滚预演通过。后续移除应使用 `-Followup -Rollback`，首版扫描报告已保留。
+
+本次重启后，加载器日志于北京时间 21:07:20 确认探针加载；21:07:47 生成完整报告 `chat-probe-1790860067-02eb8f00-abe000000007ECE2FE0-01.json`，SHA-256 为 `2d3cd8bf3323f7cd875260c0c00abed1a3cdaa1b3e3622aa63a5d8097459b655`。分析器校验通过：扫描 34,667,155 字节，跳过/读取失败/候选不可读/截断均为零；30 个窗口共 15,360 字节，十个补充窗口全部在列，六处已知签名仍全匹配。副本及二进制窗口保存在忽略的 `artifacts/probe-followup-analysis/`；尚未读取或替换聊天正文。
+
+### 持续只读观察器
+
+```pwsh
+python tools/build_chat_probe.py --observe
+# 正常退出游戏后，移除现有补充探针，再追加观察器。
+pwsh -NoProfile -File tools/deploy_probe.ps1 -Followup -Rollback
+pwsh -NoProfile -File tools/deploy_probe.ps1 -Observe
+# 观察器移除命令。
+pwsh -NoProfile -File tools/deploy_probe.ps1 -Observe -Rollback
+```
+
+观察器输出为 `artifacts/HD2ChatObserve.zip`，仅该构建启用 `game/chat_observe_core.lua`。普通探针构建保持观察器关闭。先完成同样的构建核验和代码扫描，只有六处已知签名全部匹配才观察历史对象。新扫描另加入六个固定窗口，跟踪派发函数的下游调用；各项读取预算和候选上限不变。
+
+本机观察器包 19,737 字节，SHA-256 为 `e27eb79ac770a6064604ce5c4ec0826bd9e6043a7631d4e6d6482e4aad7b55e2`；主 patch 89,824 字节，SHA-256 为 `4163f473ddfda15fe469fd80d99e7e0a31c9d6a76fd749c2f309772006fa0c22`。两次独立构建摘要一致，ZIP CRC 通过。隔离 TEMP 目录中的部署、幂等和实际回滚通过，正好新增/移除六文件，原有测试 patch 摘要不变；生产进程守卫原样运行，未用测试桩替换。
+
+这是诊断工具，尚未执行翻译或原文字替换。它读取固定全局槽指向的聊天环形对象，每步最多八项、每 500 ms 开始一轮，最多运行 30 分钟。正文窗口为 513 字节，严格检查 NUL 和 UTF-8；两次条目快照及整轮元数据必须一致，否则丢弃整轮。读取 timestamp 与正文头形成临时 identity，不读取 `+0xB98` 的值或跟随玩家指针。周期之间重复观察同一消息，因此匹配次数是成功观察次数，不代表唯一消息数。
+
+每步所有对象读取（包括失败尝试）合计不超过 16 KiB，单次不超过 4 KiB。逐页复核 `VirtualQuery`，只接受已提交的私有数据页或属于当前 `game.dll` 的映像数据页，保护必须为 READONLY/READWRITE/WRITECOPY；拒绝可执行、guard、noaccess 页和其他模块。读取仅使用游戏内的当前进程句柄，不从外部连接游戏进程，不写内存、不调用游戏函数。
+
+报告保存在 `%LOCALAPPDATA%/HD2ChatTranslate/observe/chat-observe-<会话>.json`，每五秒以及测试消息/标签变化时原子更新同一文件。最多 256 KiB，路径通过 Windows 宽字符 API 处理。报告只含计数、字节长度汇总、两条固定消息的是否命中，以及最多 32 份 UI 数字元数据快照；不输出普通聊天正文、正文散列、身份字节、绝对地址或 API Key，也不联网。
+
+游戏启动、扫描完成后，在聊天框手动发送：
+
+```text
+HD2CT_PROBE_ASCII_01
+HD2CT_PROBE_中文_02
+```
+
+报告的 `seen_ascii`、`seen_cjk` 用于确认正文定位和 UTF-8。可以在聊天框关闭、打开、发送后分别向固定文件 `observe/request.txt` 写入 `chat_closed`、`chat_open`、`chat_sent`，请求一份带标签的 UI 快照。最多读取 65 字节，只接受上述固定 ASCII 标签或 `startup`，不会把内容当代码、路径或聊天消息。该请求文件消费后删除；UI 深度最多五、controller 最多 64，只保存 kind、匿名 object ID、当前 DLL 内的 vtable RVA 及最多八个代码节内函数 RVA。它们用于比较 UI 状态，不能直接认定哪个对象是聊天行。
+
+2026-10-01 观察器独立验收：35/35 测试通过、零跳过（10.208 秒）。新增 11 项覆盖核心、构建及从生产入口抽取的适配器动态模拟；模拟内核只访问测试 VM 自己分配的缓冲区。`compileall`、Git 空白检查与 PowerShell 语法解析通过。Windows 宽字符报告的实际写入、真实历史布局及 UI 行为仍需游戏运行核验。
+
+验收后确认游戏关闭，实际回滚补充版的六个文件，再把观察器部署到 `patch_21`、加载器部署到 `patch_22`。新收据指向观察器 ZIP，六个文件摘要均通过；原有 `patch_0`–`patch_20` 的 21 个主文件摘要全部相同。观察模式的重复部署与回滚预演通过。当前安装的是观察器，移除请使用 `-Observe -Rollback`；尚未取得这版游戏内报告。

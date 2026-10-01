@@ -270,6 +270,13 @@ local FOLLOWUP = {
     {label = "followup_20bbc88", rva = 0x20bbc88},
     {label = "followup_143a1b0", rva = 0x143a1b0},
     {label = "followup_143a3b0", rva = 0x143a3b0},
+    -- 0x12f2f60 的直接调用链；用于区分事件派发与实际聊天行显示。
+    {label = "dispatch_1382650", rva = 0x1382650},
+    {label = "dispatch_1382850", rva = 0x1382850},
+    {label = "dispatch_185d6e0", rva = 0x185d6e0},
+    {label = "dispatch_185d8e0", rva = 0x185d8e0},
+    {label = "dispatch_185f470", rva = 0x185f470},
+    {label = "dispatch_185f670", rva = 0x185f670},
 }
 
 local function append_reason(candidate, reason)
