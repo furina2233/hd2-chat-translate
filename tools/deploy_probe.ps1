@@ -4,12 +4,15 @@ param(
     [switch]$DryRun,
     [switch]$Rollback,
     [switch]$Followup,
-    [switch]$Observe
+    [switch]$Observe,
+    [switch]$ObserveFix
 )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
-if ($Followup -and $Observe) { throw "Followup 与 Observe 不能同时指定。" }
+if (($Followup -and ($Observe -or $ObserveFix)) -or ($Observe -and $ObserveFix)) {
+    throw "Followup、Observe 与 ObserveFix 只能指定一个。"
+}
 
 $script:ProjectRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot ".."))
 $script:ExpectedGameSha256 = "2e2c3b7c2500646dadd5f2b4c6e0504dbb7e7896139f64cddc0d1813c718f51e"
@@ -29,6 +32,12 @@ if ($Observe) {
     $script:ExpectedProbeZipSha256 = "e27eb79ac770a6064604ce5c4ec0826bd9e6043a7631d4e6d6482e4aad7b55e2"
     $script:ProbeZipName = "HD2ChatObserve.zip"
     $script:ExpectedProbePatchLength = 89824L
+}
+# 修订包保留旧观察包与收据的回滚能力，修复命令解析并补采显示调用链。
+if ($ObserveFix) {
+    $script:ExpectedProbeZipSha256 = "0adb6ab1743a50713f2032e16de1fd945daa3294b94039832367b4a83d2114be"
+    $script:ProbeZipName = "HD2ChatObserveFix.zip"
+    $script:ExpectedProbePatchLength = 90528L
 }
 $script:LoaderResourceId = [Convert]::ToUInt64("7251fdd9bb62480a", 16)
 $script:ProbeResourceId = [Convert]::ToUInt64("c509c11199f753c2", 16)

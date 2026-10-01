@@ -277,6 +277,11 @@ local FOLLOWUP = {
     {label = "dispatch_185d8e0", rva = 0x185d8e0},
     {label = "dispatch_185f470", rva = 0x185f470},
     {label = "dispatch_185f670", rva = 0x185f670},
+    -- 0x185f470将文本记录交给下游；继续核对显示记录的所有权与更新方式。
+    {label = "display_1860b00", rva = 0x1860b00},
+    {label = "display_1860d00", rva = 0x1860d00},
+    {label = "display_185f170", rva = 0x185f170},
+    {label = "display_185f370", rva = 0x185f370},
 }
 
 local function append_reason(candidate, reason)

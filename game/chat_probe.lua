@@ -584,7 +584,12 @@ local function initialize_probe()
         local command = ffi.string(buffer, length)
         if command:sub(-2) == "\r\n" then command = command:sub(1, -3)
         elseif command:sub(-1) == "\n" then command = command:sub(1, -2) end
-        if command == "" or command:find("[^\0-\127]") or command:find("[\r\n\0]") then return nil end
+        if command == "" then return nil end
+        -- 按字节拒绝非ASCII、NUL和多行内容，避免Lua 5.1含NUL模式解析异常。
+        for index = 1, #command do
+            local byte = command:byte(index)
+            if byte == 0 or byte == 10 or byte == 13 or byte > 0x7f then return nil end
+        end
         if command == "startup" or command == "chat_closed" or command == "chat_open" or command == "chat_sent" then
             return command
         end
@@ -630,29 +635,32 @@ local function initialize_probe()
             local row_offset = index * 16
             local controller_address = observer_u64(rows_bytes, row_offset)
             local kind = observer_u32(rows_bytes, row_offset + 8)
-            if not controller_address or kind == nil then return nil end
-            local vtable = observer_read_pointer(controller_address)
-            if not vtable then return nil end
-            local item = {
-                kind = kind,
-                object_id = observer_anon_id(controller_address),
-            }
-            if vtable >= module_base_number and vtable < module_base_number + OBSERVER_IMAGE_SIZE then
-                item.vtable_rva = vtable - module_base_number
-                local table_bytes = observer_read(vtable, 64)
-                if table_bytes then
-                    local functions = {}
-                    for function_index = 0, 7 do
-                        local address = observer_u64(table_bytes, function_index * 8)
-                        if address and address >= module_base_number + core.SECTION.rva
-                            and address < module_base_number + expected_section_end then
-                            functions[#functions + 1] = address - module_base_number
+            if kind == nil then return nil end
+            -- 控制器表的空指针或非法地址跳过；vptr只作可选只读采样。
+            if controller_address and controller_address >= 0x10000 then
+                local item = {
+                    kind = kind,
+                    object_id = observer_anon_id(controller_address),
+                }
+                local vtable = observer_read_pointer(controller_address)
+                if vtable and vtable >= module_base_number
+                    and vtable < module_base_number + OBSERVER_IMAGE_SIZE then
+                    item.vtable_rva = vtable - module_base_number
+                    local table_bytes = observer_read(vtable, 64)
+                    if table_bytes then
+                        local functions = {}
+                        for function_index = 0, 7 do
+                            local address = observer_u64(table_bytes, function_index * 8)
+                            if address and address >= module_base_number + core.SECTION.rva
+                                and address < module_base_number + expected_section_end then
+                                functions[#functions + 1] = address - module_base_number
+                            end
                         end
+                        if #functions > 0 then item.vtable_functions = functions end
                     end
-                    if #functions > 0 then item.vtable_functions = functions end
                 end
+                controllers[#controllers + 1] = item
             end
-            controllers[#controllers + 1] = item
         end
 
         local owner_verify = observer_read_pointer(owner_global)

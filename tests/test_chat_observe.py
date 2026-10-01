@@ -182,17 +182,24 @@ local OBSERVER_IMAGE_SIZE = expected_image_size
 local expected_section_end = 4096 + 34667155
 local core = {SECTION = {rva = 4096, size = 34667155}}
 local MAX_OBSERVER_ADDRESS = 0x7fffffffffff
-local MAX_OBSERVER_READ = 16 * 1024
+local MAX_OBSERVER_READ = __MAX_OBSERVER_READ__
 local observer_read_budget = 0
 local observer_active_cycle = nil
 local observer_ids = {}
 local observer_id_count = 0
 local observer_next_id = 0
 local process = ffi.cast("void *", 1)
+local invalid_handle = ffi.cast("HD2Probe_HANDLE", -1)
 local regions = {}
 local query_calls, read_calls = 0, 0
 local query_mutation, read_mutation
 local read_counts = {}
+local observer_now, observer_next_command_poll = 0, 0
+local observer_request_path = ffi.new("HD2Probe_U16[32]")
+local request_bytes = ""
+local request_available, request_read_success, request_delete_success = true, true, true
+local create_file_calls, file_read_calls, file_close_calls, delete_file_calls = 0, 0, 0, 0
+local fake_file_handle = ffi.cast("HD2Probe_HANDLE", 0x1234)
 
 local function add_region(base, size, allocation_base, kind, protect, state)
     local region = {
@@ -256,6 +263,44 @@ function kernel.ReadProcessMemory(_, source, destination, length, bytes_read)
     return 1
 end
 
+function kernel.CreateFileW(_, access, share_mode, _, creation, attributes, _)
+    create_file_calls = create_file_calls + 1
+    assert(access == 0x80000000 and share_mode == 0x3 and creation == 3 and attributes == 0x80)
+    if not request_available then return invalid_handle end
+    return fake_file_handle
+end
+
+function kernel.ReadFile(file, buffer, length, received, _)
+    file_read_calls = file_read_calls + 1
+    assert(file == fake_file_handle and length == 65)
+    if not request_read_success then return 0 end
+    local count = math.min(#request_bytes, length)
+    if count > 0 then ffi.copy(buffer, request_bytes, count) end
+    received[0] = count
+    return 1
+end
+
+function kernel.CloseHandle(file)
+    file_close_calls = file_close_calls + 1
+    assert(file == fake_file_handle)
+    return 1
+end
+
+function kernel.DeleteFileW(_)
+    delete_file_calls = delete_file_calls + 1
+    if request_delete_success then request_available = false; return 1 end
+    return 0
+end
+
+local function reset_request(bytes, available, read_success, delete_success)
+    observer_now, observer_next_command_poll = 0, 0
+    request_bytes = bytes or ""
+    request_available = available ~= false
+    request_read_success = read_success ~= false
+    request_delete_success = delete_success ~= false
+    create_file_calls, file_read_calls, file_close_calls, delete_file_calls = 0, 0, 0, 0
+end
+
 local function reset_counters()
     query_calls, read_calls = 0, 0
     read_counts = {}
@@ -263,6 +308,7 @@ local function reset_counters()
 end
 
 __OBSERVER_ADAPTER__
+__OBSERVER_TAKE_COMMAND__
 
 -- 跨4KiB页并跨两个同AllocationBase区域的读取应成功，且每页做两次查询。
 local same_a = add_region(0x20000, 4096, 0x20000, 0x20000, 0x04)
@@ -296,6 +342,42 @@ assert(query_calls == 1 and read_calls == 0 and observer_read_budget == 24)
 reset_counters(); observer_read_budget = MAX_OBSERVER_READ - 8
 assert(observer_read(0x20000, 16) == nil)
 assert(query_calls == 0 and read_calls == 0 and observer_read_budget == MAX_OBSERVER_READ - 8)
+
+-- 命令读取使用固定白名单，只在读取成功且文件删除成功后返回标签。
+local function check_command(bytes, expected)
+    reset_request(bytes, true, true, true)
+    local value = observer_take_command()
+    assert(value == expected, "unexpected command result")
+    assert(create_file_calls == 1 and file_read_calls == 1 and file_close_calls == 1 and delete_file_calls == 1)
+end
+for _, label in ipairs({"startup", "chat_closed", "chat_open", "chat_sent"}) do
+    check_command(label, label)
+    check_command(label .. "\n", label)
+    check_command(label .. "\r\n", label)
+end
+check_command("unknown_label", nil)
+check_command(string.char(0x73, 0x74, 0x61, 0x72, 0x74, 0, 0x75), nil)
+check_command("startup" .. string.char(0xe4, 0xb8, 0xad), nil)
+check_command("chat_open\r\nstartup", nil)
+check_command(string.rep("x", 64), nil)
+check_command(string.rep("x", 65), nil)
+check_command("", nil)
+
+reset_request("startup", true, false, true)
+assert(observer_take_command() == nil)
+assert(create_file_calls == 1 and file_read_calls == 1 and file_close_calls == 1 and delete_file_calls == 0)
+reset_request("chat_open", true, true, false)
+assert(observer_take_command() == nil)
+assert(create_file_calls == 1 and file_read_calls == 1 and file_close_calls == 1 and delete_file_calls == 1)
+
+-- 250ms轮询间隔从上一次检查时刻起算，窗口前不重复打开文件。
+reset_request("chat_sent", false, true, true)
+assert(observer_take_command() == nil and create_file_calls == 1)
+request_available = true
+observer_now = 249
+assert(observer_take_command() == nil and create_file_calls == 1)
+observer_now = 250
+assert(observer_take_command() == "chat_sent" and create_file_calls == 2)
 
 -- 建立假的只读模块页与聊天对象；root指针和history首槽按64槽环绕。
 local module_global_page = math.floor((tonumber(module_base) + 0x347CE28) / 4096) * 4096
@@ -338,10 +420,11 @@ assert(observer_read_slot(62) == nil and observer_finish_cycle() == nil)
 write_bytes(metadata, pack32(62) .. pack32(4))
 
 -- UI snapshot记录净化结构；stack和rows在结束复核时变化则拒绝整份快照。
-local owner, dispatch, controller = 0x200000, 0x300000, 0x400000
+local owner, dispatch, controller, controller_bad = 0x200000, 0x300000, 0x400000, 0x410000
 add_region(owner, 0x10000, owner, 0x20000, 0x04)
 add_region(dispatch, 0x10000, dispatch, 0x20000, 0x04)
 add_region(controller, 4096, controller, 0x20000, 0x04)
+add_region(controller_bad, 4096, controller_bad, 0x20000, 0x04)
 local dispatch_global_page = math.floor((tonumber(module_base) + 0x3326E68) / 4096) * 4096
 add_region(dispatch_global_page, 4096, tonumber(module_base), 0x1000000, 0x02)
 local vtable = tonumber(module_base) + 0x3000000
@@ -354,9 +437,13 @@ local stack = pack32(11) .. pack32(22) .. string.rep("\0", 12) .. pack32(2)
 write_bytes(owner_global, pack64(owner))
 write_bytes(stack_address, stack)
 write_bytes(tonumber(module_base) + 0x3326E68, pack64(dispatch))
-write_bytes(dispatch_count, pack32(1))
-write_bytes(dispatch_rows, pack64(controller) .. pack32(0x1234) .. pack32(0))
+write_bytes(dispatch_count, pack32(4))
+write_bytes(dispatch_rows, pack64(controller) .. pack32(0x1234) .. pack32(0)
+    .. pack64(0) .. pack32(0x2345) .. pack32(0)
+    .. pack64(1) .. pack32(0x3456) .. pack32(0)
+    .. pack64(controller_bad) .. pack32(0x4567) .. pack32(0))
 write_bytes(controller, pack64(vtable))
+write_bytes(controller_bad, pack64(0x710000))
 write_bytes(vtable, pack64(tonumber(module_base) + 0x1000) .. pack64(tonumber(module_base) + 0x2000) .. string.rep("\0", 48))
 reset_counters(); observer_read_budget = 0
 local snapshot = observer_ui_snapshot()
@@ -365,6 +452,10 @@ assert(snapshot and snapshot.screen_depth == 2 and snapshot.screen_ids[1] == 11 
 assert(snapshot.controllers[1].kind == 0x1234 and snapshot.controllers[1].object_id ~= controller)
 assert(snapshot.controllers[1].vtable_rva == 0x3000000)
 assert(#snapshot.controllers[1].vtable_functions == 2)
+assert(#snapshot.controllers == 2, "null and low-address rows should be skipped")
+assert(snapshot.controllers[2].kind == 0x4567 and snapshot.controllers[2].object_id ~= controller_bad)
+assert(snapshot.controllers[2].vtable_rva == nil and snapshot.controllers[2].vtable_functions == nil)
+assert(observer_read_budget <= MAX_OBSERVER_READ, "mixed UI snapshot exceeded the read budget")
 
 reset_counters(); observer_read_budget = 0
 local stack_changed = pack32(11) .. pack32(99) .. string.rep("\0", 12) .. pack32(2)
@@ -619,13 +710,20 @@ class ObserveBuilderAndAdapterTests(unittest.TestCase):
         source = (ROOT / "game" / "chat_probe.lua").read_text(encoding="utf-8")
         declaration = re.search(r"ffi\.cdef\[\[(.*?)\]\]", source, re.S)
         self.assertIsNotNone(declaration)
+        read_budget = re.search(r"local MAX_OBSERVER_READ = ([^\r\n]+)", source)
+        self.assertIsNotNone(read_budget)
+        self.assertEqual(read_budget.group(1).strip(), "16 * 1024")
         adapter_start = source.index("    local function observer_query_address(address)")
         adapter_end = source.index("    local function observer_path_with_suffix", adapter_start)
+        command_start = source.index("    local function observer_take_command()")
+        command_end = source.index("    local function observer_ui_snapshot()", command_start)
         ui_start = source.index("    local function observer_ui_snapshot()")
         ui_end = source.index("    local function make_observer_adapter()", ui_start)
         adapter = source[adapter_start:adapter_end] + "\n" + source[ui_start:ui_end]
         script = LUA_OBSERVER_ADAPTER_HARNESS.replace("__FFI_DECL__", declaration.group(1)).replace(
             "__OBSERVER_ADAPTER__", adapter
+        ).replace("__OBSERVER_TAKE_COMMAND__", source[command_start:command_end]).replace(
+            "__MAX_OBSERVER_READ__", read_budget.group(1).strip()
         )
         self.assertEqual(self.lua.run(script), "adapter fake-kernel mocks ok")
 

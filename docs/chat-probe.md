@@ -139,3 +139,28 @@ HD2CT_PROBE_中文_02
 2026-10-01 观察器独立验收：35/35 测试通过、零跳过（10.208 秒）。新增 11 项覆盖核心、构建及从生产入口抽取的适配器动态模拟；模拟内核只访问测试 VM 自己分配的缓冲区。`compileall`、Git 空白检查与 PowerShell 语法解析通过。Windows 宽字符报告的实际写入、真实历史布局及 UI 行为仍需游戏运行核验。
 
 验收后确认游戏关闭，实际回滚补充版的六个文件，再把观察器部署到 `patch_21`、加载器部署到 `patch_22`。新收据指向观察器 ZIP，六个文件摘要均通过；原有 `patch_0`–`patch_20` 的 21 个主文件摘要全部相同。观察模式的重复部署与回滚预演通过。当前安装的是观察器，移除请使用 `-Observe -Rollback`；尚未取得这版游戏内报告。
+
+### 首次正文观察与诊断命令错误
+
+2026-10-01 用户启动游戏，Bingus 日志确认 addon 加载。23:33:18 生成第三轮代码报告 `chat-probe-1790868798-0335da88-abe000000007ECED3B0-01.json`，SHA-256 为 `1ade5087699ac91ad79d7cabe4c06a1a66e5f12c09a53847f68974ef222dec3c`；新增派发窗口已取得。
+
+用户发送固定 ASCII 消息后，观察报告 `seen_ascii=true`，正文长度为 20 字节，历史读取、双读、元数据、NUL 与 UTF-8 校验均无错误。留存快照 `artifacts/observer-runtime/ascii-confirmed.json` 的 SHA-256 为 `5499fdd3babf9afe372f239815108d21a9ddc9504916f87831a1a671edf2f2f2`；其中 396 轮完成，350 次重复观察命中。中文样本因游戏输入框限制无法输入，故不能声称已验证真实中文正文编码。
+
+随后写入固定 `startup` 请求时，诊断命令处理抛出错误，观察器按设计停止，`stop_reason=adapter_error`；快照尝试次数仍为一，说明本次请求未进入 UI 采样。停止报告副本 `artifacts/observer-runtime/command-stopped.json` SHA-256 为 `d6e2d4eb363ee3fe0a38f8562c1f59114badfe75860a197bef89c1d1302ad528`。原先离线测试遗漏了该命令路径，本轮补测并修复。
+
+UI 启动快照也未成功，但无异常。公开模组的 root、stack、dispatch 表布局与适配器一致；公开实现先筛 kind，只解引用匹配项，没有证明每种 controller 的首字都必然是 vtable。观察器原先要求每项都有可读 vtable，过于严格。修订版保留整表二读一致性，仅跳过非法/null controller 行，并把 vtable 探测作为可选字段；不扩大读取范围或放宽页保护。[公开的 controller 定位实现](https://github.com/CowboyBingus/ClickableScrollbars/blob/main/src/clickable_scrollbars.lua#L2799-L2917)
+
+旧命令模式已在私有 LuaJIT state 精确复现 `malformed pattern (missing ']')`。修复为最多 64 字节的逐字节检查，再匹配白名单；读取失败保留请求，删除失败不返回标签。全量 35 项测试通过、零跳过（10.291 秒），新增情形纳入已有适配器动态测试：四种标签及 LF/CRLF、NUL/高字节/内嵌换行、64/65 字节边界、读取/删除失败、250 ms 轮询，以及混合有效/null/坏 vptr 的 UI 行。不读取真实游戏或真实请求文件。
+
+修订包为 `artifacts/HD2ChatObserveFix.zip`，20,086 字节，SHA-256 `0adb6ab1743a50713f2032e16de1fd945daa3294b94039832367b4a83d2114be`；主 patch 90,528 字节、SHA-256 `d4138aaffb88830582574bf19529334aad6f8946fb642cea14e3dbe631a9021f`，ZIP CRC 通过。它另加入下游 `0x1860B00`、`0x185F170` 与各自 `+0x200` 的四个代码窗口。旧观察器 ZIP 与已部署文件均保留，尚未部署修订包；真实游戏仍在运行。固定来源指纹与隔离目录部署预演通过。
+
+```pwsh
+python tools/build_chat_probe.py --observe --output artifacts/HD2ChatObserveFix.zip
+# 正常退出游戏后，回滚旧观察器，再部署修订包。
+pwsh -NoProfile -File tools/deploy_probe.ps1 -Observe -Rollback
+pwsh -NoProfile -File tools/deploy_probe.ps1 -ObserveFix
+# 修订包运行完毕后的移除命令。
+pwsh -NoProfile -File tools/deploy_probe.ps1 -ObserveFix -Rollback
+```
+
+已部署包不能被构建工具覆盖，直到正常回滚完成。安装修订包需要重启以重新加载 addon；不向运行中游戏热替换文件。下一轮可先只发送 ASCII 测试消息，再比较聊天框关闭/打开时的 UI 快照，中文样本暂记未验证。
