@@ -5,13 +5,14 @@ param(
     [switch]$Rollback,
     [switch]$Followup,
     [switch]$Observe,
-    [switch]$ObserveFix
+    [switch]$ObserveFix,
+    [switch]$ObserveDiag
 )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
-if (($Followup -and ($Observe -or $ObserveFix)) -or ($Observe -and $ObserveFix)) {
-    throw "Followup、Observe 与 ObserveFix 只能指定一个。"
+if (@(@($Followup, $Observe, $ObserveFix, $ObserveDiag) | Where-Object { $_.IsPresent }).Count -gt 1) {
+    throw "Followup、Observe、ObserveFix 与 ObserveDiag 只能指定一个。"
 }
 
 $script:ProjectRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot ".."))
@@ -38,6 +39,12 @@ if ($ObserveFix) {
     $script:ExpectedProbeZipSha256 = "0adb6ab1743a50713f2032e16de1fd945daa3294b94039832367b4a83d2114be"
     $script:ProbeZipName = "HD2ChatObserveFix.zip"
     $script:ExpectedProbePatchLength = 90528L
+}
+# 阶段诊断包只增加有限原因码和固定代码窗口，保持旧包来源与回滚指纹。
+if ($ObserveDiag) {
+    $script:ExpectedProbeZipSha256 = "834d4b6bf8cf9a5956d61c6a989f25ad43495179b3e3d4e6fbf748f365a4a178"
+    $script:ProbeZipName = "HD2ChatObserveDiag.zip"
+    $script:ExpectedProbePatchLength = 98544L
 }
 $script:LoaderResourceId = [Convert]::ToUInt64("7251fdd9bb62480a", 16)
 $script:ProbeResourceId = [Convert]::ToUInt64("c509c11199f753c2", 16)

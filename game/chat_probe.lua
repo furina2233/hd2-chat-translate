@@ -335,19 +335,19 @@ local function initialize_probe()
     local function observer_query_address(address)
         if type(address) ~= "number" or address ~= address or address == math.huge or address == -math.huge
             or address < 0x10000 or address > MAX_OBSERVER_ADDRESS or address ~= math.floor(address) then
-            return nil
+            return nil, "invalid_address"
         end
         local information = ffi.new("HD2Probe_MEMORY_BASIC_INFORMATION[1]")
         local pointer = ffi.cast("const void *", ffi.cast("size_t", address))
         local received = kernel.VirtualQuery(pointer, information, ffi.sizeof(information[0]))
-        if received ~= ffi.sizeof(information[0]) then return nil end
+        if received ~= ffi.sizeof(information[0]) then return nil, "virtual_query_failed" end
         local item = information[0]
         local region_base = tonumber(ffi.cast("size_t", item.BaseAddress))
         local allocation_base = tonumber(ffi.cast("size_t", item.AllocationBase))
         local region_size = tonumber(item.RegionSize)
         if not region_base or not allocation_base or not region_size or region_size <= 0
             or region_base < 0x10000 or region_base > MAX_OBSERVER_ADDRESS
-            or region_size > MAX_OBSERVER_ADDRESS - region_base + 1 then return nil end
+            or region_size > MAX_OBSERVER_ADDRESS - region_base + 1 then return nil, "malformed_region" end
         return {
             base = region_base,
             finish = region_base + region_size,
@@ -355,7 +355,7 @@ local function initialize_probe()
             state = tonumber(item.State),
             protect = tonumber(item.Protect),
             type = tonumber(item.Type),
-        }
+        }, nil
     end
 
     local function same_observer_region(left, right)
@@ -367,61 +367,76 @@ local function initialize_probe()
     local module_base_number = tonumber(module_base)
 
     local function observer_region_allowed(region)
-        if not region or region.state ~= 0x1000 then return false end
-        if region.protect ~= 0x02 and region.protect ~= 0x04 and region.protect ~= 0x08 then return false end
+        if not region then return false, "malformed_region" end
+        if region.state ~= 0x1000 then return false, "not_committed" end
+        if region.protect ~= 0x02 and region.protect ~= 0x04 and region.protect ~= 0x08 then
+            return false, "protection_denied"
+        end
         if region.type == 0x20000 then return true end
-        return region.type == 0x1000000 and region.allocation_base == module_base_number
+        if region.type == 0x1000000 and region.allocation_base == module_base_number then return true end
+        return false, "allocation_denied"
     end
 
     local function observer_read(address, length)
         if type(length) ~= "number" or length ~= length or length ~= math.floor(length)
-            or length < 1 or length > 4096 or length > MAX_OBSERVER_READ - observer_read_budget then
-            return nil
+            or length < 1 or length > 4096 then
+            return nil, "invalid_length"
+        end
+        if length > MAX_OBSERVER_READ - observer_read_budget then
+            return nil, "budget_exhausted"
         end
         observer_read_budget = observer_read_budget + length
         if type(address) ~= "number" or address ~= address or address == math.huge or address == -math.huge
-            or address < 0x10000 or address > MAX_OBSERVER_ADDRESS or address ~= math.floor(address)
-            or length - 1 > MAX_OBSERVER_ADDRESS - address then return nil end
+            or address ~= math.floor(address) then return nil, "invalid_address" end
+        if address < 0x10000 or address > MAX_OBSERVER_ADDRESS
+            or length - 1 > MAX_OBSERVER_ADDRESS - address then return nil, "pointer_range" end
 
         local finish = address + length
         local cursor = address
         local first_allocation = nil
         local output = ffi.new("HD2Probe_U8[?]", length)
         while cursor < finish do
-            local region = observer_query_address(cursor)
-            if not observer_region_allowed(region) then return nil end
+            local region, query_reason = observer_query_address(cursor)
+            if not region then return nil, query_reason end
+            local allowed, allowed_reason = observer_region_allowed(region)
+            if not allowed then return nil, allowed_reason end
             if first_allocation == nil then first_allocation = region.allocation_base
-            elseif first_allocation ~= region.allocation_base then return nil end
-            if region.base > cursor or region.finish <= cursor then return nil end
+            elseif first_allocation ~= region.allocation_base then return nil, "allocation_changed" end
+            if region.base > cursor or region.finish <= cursor then return nil, "region_bounds" end
 
             local page_finish = (math.floor(cursor / 4096) + 1) * 4096
             local chunk_finish = math.min(finish, region.finish, page_finish)
-            if chunk_finish <= cursor then return nil end
-            local verified = observer_query_address(cursor)
-            if not same_observer_region(region, verified) or not observer_region_allowed(verified)
-                or verified.allocation_base ~= first_allocation then return nil end
+            if chunk_finish <= cursor then return nil, "region_bounds" end
+            local verified, verified_reason = observer_query_address(cursor)
+            if not verified then return nil, verified_reason end
+            local verified_allowed, verified_allowed_reason = observer_region_allowed(verified)
+            if not verified_allowed then return nil, verified_allowed_reason end
+            if not same_observer_region(region, verified) then return nil, "region_changed" end
+            if verified.allocation_base ~= first_allocation then return nil, "allocation_changed" end
 
             local chunk_length = chunk_finish - cursor
             local bytes_read = ffi.new("HD2Probe_SIZE_T[1]")
             local destination = output + (cursor - address)
             local source = ffi.cast("const void *", ffi.cast("size_t", cursor))
-            if kernel.ReadProcessMemory(process, source, destination, chunk_length, bytes_read) == 0
-                or tonumber(bytes_read[0]) ~= chunk_length then return nil end
+            if kernel.ReadProcessMemory(process, source, destination, chunk_length, bytes_read) == 0 then
+                return nil, "read_failed"
+            end
+            if tonumber(bytes_read[0]) ~= chunk_length then return nil, "short_read" end
             cursor = chunk_finish
         end
-        return ffi.string(output, length)
+        return ffi.string(output, length), nil
     end
 
     local function observer_read_pointer(address)
-        local bytes = observer_read(address, 8)
-        if not bytes then return nil end
+        local bytes, reason = observer_read(address, 8)
+        if not bytes then return nil, reason end
         local value = ffi.new("HD2Probe_SIZE_T[1]")
         ffi.copy(value, bytes, 8)
         local number = tonumber(value[0])
-        if not number or number < 0x10000 or number > MAX_OBSERVER_ADDRESS or number ~= math.floor(number) then
-            return nil
-        end
-        return number
+        if not number or number ~= math.floor(number) then return nil, "malformed_bytes" end
+        if number == 0 then return nil, "null_pointer" end
+        if number < 0x10000 or number > MAX_OBSERVER_ADDRESS then return nil, "pointer_range" end
+        return number, nil
     end
 
     local function observer_u32(bytes, offset)
@@ -596,38 +611,62 @@ local function initialize_probe()
         return nil
     end
 
+    local function observer_ui_failure(stage, reason, read_size)
+        if type(read_size) ~= "number" or read_size < 0 or read_size > 4096 then read_size = 0 end
+        if type(reason) ~= "string" then reason = "read_failed" end
+        return nil, {
+            version = 1,
+            stage = stage,
+            reason = reason,
+            read_size = read_size,
+            budget_used = observer_read_budget,
+        }
+    end
+
     local function observer_ui_snapshot()
         local owner_global = observer_add(module_base_number, 0x347CE28)
-        local dispatch_global = observer_add(module_base_number, 0x3326E68)
-        if not owner_global or not dispatch_global then return nil end
-        local owner = observer_read_pointer(owner_global)
-        if not owner then return nil end
+        if not owner_global then return observer_ui_failure("owner_ptr", "pointer_range", 0) end
+        local owner, owner_reason = observer_read_pointer(owner_global)
+        if not owner then return observer_ui_failure("owner_ptr", owner_reason, 8) end
         local stack_address = observer_add(owner, 0x429C)
-        if not stack_address then return nil end
-        local stack_bytes = observer_read(stack_address, 24)
-        if not stack_bytes then return nil end
+        if not stack_address then return observer_ui_failure("stack_read", "pointer_range", 0) end
+        local stack_bytes, stack_reason = observer_read(stack_address, 24)
+        if not stack_bytes then return observer_ui_failure("stack_read", stack_reason, 24) end
         local depth = observer_u32(stack_bytes, 20)
-        if not depth or depth > 5 then return nil end
+        if depth == nil then return observer_ui_failure("screen_depth", "malformed_bytes", 24) end
+        if depth > 5 then return observer_ui_failure("screen_depth", "value_out_of_range", 24) end
         local screen_ids = {}
         for index = 0, depth - 1 do
             local screen_id = observer_u32(stack_bytes, index * 4)
-            if screen_id == nil then return nil end
+            if screen_id == nil then
+                return observer_ui_failure("screen_id_decode", "malformed_bytes", 24)
+            end
             screen_ids[#screen_ids + 1] = screen_id
         end
 
-        local dispatch = observer_read_pointer(dispatch_global)
-        if not dispatch then return nil end
+        local dispatch_global = observer_add(module_base_number, 0x3326E68)
+        if not dispatch_global then return observer_ui_failure("dispatch_ptr", "pointer_range", 0) end
+        local dispatch, dispatch_reason = observer_read_pointer(dispatch_global)
+        if not dispatch then return observer_ui_failure("dispatch_ptr", dispatch_reason, 8) end
         local count_address = observer_add(dispatch, 0x5740)
-        local rows_address = observer_add(dispatch, 0x5744)
-        if not count_address or not rows_address then return nil end
-        local count_bytes = observer_read(count_address, 4)
-        if not count_bytes then return nil end
+        if not count_address then return observer_ui_failure("count_read", "pointer_range", 0) end
+        local count_bytes, count_reason = observer_read(count_address, 4)
+        if not count_bytes then return observer_ui_failure("count_read", count_reason, 4) end
         local count = observer_u32(count_bytes, 0)
-        if not count or count > 64 then return nil end
+        if count == nil then return observer_ui_failure("dispatch_count", "malformed_bytes", 4) end
+        if count > 64 then return observer_ui_failure("dispatch_count", "value_out_of_range", 4) end
+
         local rows_bytes = ""
+        local rows_address
         if count > 0 then
-            rows_bytes = observer_read(rows_address, count * 16)
-            if not rows_bytes then return nil end
+            rows_address = observer_add(dispatch, 0x5744)
+            if not rows_address then
+                return observer_ui_failure("rows_read", "pointer_range", 0)
+            end
+            rows_bytes, count_reason = observer_read(rows_address, count * 16)
+            if not rows_bytes then
+                return observer_ui_failure("rows_read", count_reason, count * 16)
+            end
         end
 
         local controllers = {}
@@ -635,7 +674,9 @@ local function initialize_probe()
             local row_offset = index * 16
             local controller_address = observer_u64(rows_bytes, row_offset)
             local kind = observer_u32(rows_bytes, row_offset + 8)
-            if kind == nil then return nil end
+            if kind == nil then
+                return observer_ui_failure("row_decode", "malformed_bytes", count * 16)
+            end
             -- 控制器表的空指针或非法地址跳过；vptr只作可选只读采样。
             if controller_address and controller_address >= 0x10000 then
                 local item = {
@@ -663,19 +704,44 @@ local function initialize_probe()
             end
         end
 
-        local owner_verify = observer_read_pointer(owner_global)
-        local stack_verify = observer_read(stack_address, 24)
-        local dispatch_verify = observer_read_pointer(dispatch_global)
-        local count_verify = observer_read(count_address, 4)
-        if owner_verify ~= owner or stack_verify ~= stack_bytes or dispatch_verify ~= dispatch
-            or not count_verify or observer_u32(count_verify, 0) ~= count then return nil end
+        local owner_verify, verify_reason = observer_read_pointer(owner_global)
+        if not owner_verify then return observer_ui_failure("verify_owner", verify_reason, 8) end
+        if owner_verify ~= owner then
+            return observer_ui_failure("verify_owner", "value_changed", 8)
+        end
+        local stack_verify
+        stack_verify, verify_reason = observer_read(stack_address, 24)
+        if not stack_verify then return observer_ui_failure("verify_stack", verify_reason, 24) end
+        if stack_verify ~= stack_bytes then
+            return observer_ui_failure("verify_stack", "value_changed", 24)
+        end
+        local dispatch_verify
+        dispatch_verify, verify_reason = observer_read_pointer(dispatch_global)
+        if not dispatch_verify then return observer_ui_failure("verify_dispatch", verify_reason, 8) end
+        if dispatch_verify ~= dispatch then
+            return observer_ui_failure("verify_dispatch", "value_changed", 8)
+        end
+        local count_verify
+        count_verify, verify_reason = observer_read(count_address, 4)
+        if not count_verify then return observer_ui_failure("verify_count", verify_reason, 4) end
+        local verified_count = observer_u32(count_verify, 0)
+        if verified_count == nil then
+            return observer_ui_failure("verify_count", "malformed_bytes", 4)
+        end
+        if verified_count ~= count then
+            return observer_ui_failure("verify_count", "value_changed", 4)
+        end
         local rows_verify = ""
         if count > 0 then
-            rows_verify = observer_read(rows_address, count * 16)
-            if not rows_verify then return nil end
+            rows_verify, verify_reason = observer_read(rows_address, count * 16)
+            if not rows_verify then
+                return observer_ui_failure("verify_rows", verify_reason, count * 16)
+            end
         end
-        if rows_verify ~= rows_bytes then return nil end
-        return {screen_depth = depth, screen_ids = screen_ids, controllers = controllers}
+        if rows_verify ~= rows_bytes then
+            return observer_ui_failure("verify_rows", "value_changed", count * 16)
+        end
+        return {screen_depth = depth, screen_ids = screen_ids, controllers = controllers}, nil
     end
 
     local function make_observer_adapter()

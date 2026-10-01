@@ -166,3 +166,32 @@ pwsh -NoProfile -File tools/deploy_probe.ps1 -ObserveFix -Rollback
 已部署包不能被构建工具覆盖，直到正常回滚完成。安装修订包需要重启以重新加载 addon；不向运行中游戏热替换文件。下一轮可先只发送 ASCII 测试消息，再比较聊天框关闭/打开时的 UI 快照，中文样本暂记未验证。
 
 用户正常退出游戏后，本轮确认进程关闭。先完成修订模式在隔离 TEMP 目录中的实际部署、幂等和回滚，再在真实目录按旧收据回滚六个文件，部署修订观察器至 `patch_21`、加载器至 `patch_22`。新收据指向 `HD2ChatObserveFix.zip`；六文件摘要全部通过，原有 `patch_0`–`patch_20` 的 21 个主文件摘要全部不变。真实目录的重复部署预演及回滚预演通过，未执行新包回滚。**当前安装的是修订观察器，移除请使用 `-ObserveFix -Rollback`。** 尚待重启后的修订版报告验证。
+
+### 修订版运行结果
+
+修订版重启后成功捕获 ASCII 测试消息，`seen_ascii=true`，正文为 20 字节；读取、双读、元数据、UTF-8 和终止符计数均无错误。`startup` 与用户确认输入框打开后的 `chat_open` 请求均被消费，观察器持续运行，`adapter_errors=0`，原诊断命令异常已修复。留存 `artifacts/observer-fix-runtime/command-and-open.json` SHA-256 为 `12c58eae98e69b2b2887f5f61dcfe43eac175e9a73375103f5a9033c9e2d5aa5`；该样本完成 1,334 轮，累计 1,274 次重复 ASCII 命中。
+
+但三次 UI 采样均失败，报告没有具体阶段，不能确定根指针、页属性、布局范围或复核漂移哪一项触发拒绝。下一版将添加最多 32 条固定阶段/原因枚举诊断，保留现有读取范围、页保护和预算；不再仅凭失败计数猜测修复。中文正文仍未验证，也未连接大模型或替换原聊天行。
+
+第四轮代码扫描同时完成，报告 `chat-probe-1790870167-02c0b258-abe000000007ECD7BC0-01.json` SHA-256 为 `563a71775a37492cbeb73ad71a851b49a243302e1dc721f36aa9da6a5e5d5afd`。完整代码节扫描、40 个窗口和六处签名比较通过，具体控件正文属性路径见 [研究记录](native-chat-research.md#控件正文属性路径)。
+
+### 有限阶段诊断包
+
+`ui_snapshot` 失败时返回固定阶段/原因枚举，core 只保存白名单字段到 `ui_diagnostics`：version、可信 label、at_ms、stage、reason、read_size（0–4096）与 budget_used（0–16384）。最多 32 条，超限使用饱和 dropped 计数；未知枚举、非法数字和额外字段均净化，不记录绝对地址、任意错误文本或聊天正文。原有快照次数/失败统计不变。
+
+阶段包括根槽、stack、dispatch、count、rows、解码与各处二次复核；原因区分空指针、范围、页查询、提交/保护/归属拒绝、预算、完整读取失败和元数据变化。reader 只增加第二返回值原因，旧正文读取仍使用第一个返回值；所有内存与时间限制保持不变。
+
+独立验收：`python -m unittest discover -s tests -v` 全部 36 项通过、零跳过（10.255 秒）；观察器专项 12 项通过。测试覆盖第二返回值、诊断净化/32 项上限/饱和，以及 fake-kernel 的 owner/dispatch 空指针、保护/归属拒绝、depth=6/count=65、五处复核变动、VirtualQuery/RPM/短读与预算失败。`compileall`、Git 空白检查与 PowerShell 语法解析通过。
+
+包为 `artifacts/HD2ChatObserveDiag.zip`，21,549 字节，SHA-256 为 `834d4b6bf8cf9a5956d61c6a989f25ad43495179b3e3d4e6fbf748f365a4a178`。主 patch 98,544 字节，SHA-256 为 `c7225d45b2df028f74a147b849254b128389a10fb77596b932eab3978dd14c0f`。ZIP CRC 和源码/封装精确比较通过；固定来源的隔离目录部署预演通过，混用版本模式被拒绝。另加入四个函数各两段、共八个固定代码窗口，详见研究记录。准备阶段保留了正在使用的修订包及其回滚来源。
+
+```pwsh
+python tools/build_chat_probe.py --observe --output artifacts/HD2ChatObserveDiag.zip
+# 正常退出游戏后，回滚当前修订包，再部署阶段诊断包。
+pwsh -NoProfile -File tools/deploy_probe.ps1 -ObserveFix -Rollback
+pwsh -NoProfile -File tools/deploy_probe.ps1 -ObserveDiag
+# 阶段诊断包的移除命令。
+pwsh -NoProfile -File tools/deploy_probe.ps1 -ObserveDiag -Rollback
+```
+
+准备完成后检测到游戏进程已经关闭，按既有诊断部署授权继续。本轮先通过阶段诊断模式在隔离 TEMP 目录的实际部署、幂等和回滚，再按真实旧收据回滚修订包，部署阶段诊断 addon 至 `patch_21`、加载器至 `patch_22`。新收据指向 `HD2ChatObserveDiag.zip`；六文件摘要全部通过，部署前后原有 21 个主 patch 摘要不变。真实目录重复部署与回滚预演通过。**当前安装的是阶段诊断观察器，移除模式为 `-ObserveDiag -Rollback`。** 尚待启动后的新报告。

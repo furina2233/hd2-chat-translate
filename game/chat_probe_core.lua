@@ -282,6 +282,15 @@ local FOLLOWUP = {
     {label = "display_1860d00", rva = 0x1860d00},
     {label = "display_185f170", rva = 0x185f170},
     {label = "display_185f370", rva = 0x185f370},
+    -- 控件正文属性接口、格式化辅助和后续更新；核对复制/借用语义后再接译文。
+    {label = "property_1441ca0", rva = 0x1441ca0},
+    {label = "property_1441ea0", rva = 0x1441ea0},
+    {label = "format_13006a0", rva = 0x13006a0},
+    {label = "format_13008a0", rva = 0x13008a0},
+    {label = "text_173c360", rva = 0x173c360},
+    {label = "text_173c560", rva = 0x173c560},
+    {label = "refresh_1861010", rva = 0x1861010},
+    {label = "refresh_1861210", rva = 0x1861210},
 }
 
 local function append_reason(candidate, reason)

@@ -29,6 +29,47 @@ local COMMANDS = {
     chat_sent = true,
 }
 
+local UI_DIAGNOSTIC_STAGES = {
+    owner_ptr = true,
+    stack_read = true,
+    screen_depth = true,
+    screen_id_decode = true,
+    dispatch_ptr = true,
+    count_read = true,
+    dispatch_count = true,
+    rows_read = true,
+    row_decode = true,
+    verify_owner = true,
+    verify_stack = true,
+    verify_dispatch = true,
+    verify_count = true,
+    verify_rows = true,
+    sanitize = true,
+    callback_error = true,
+}
+
+local UI_DIAGNOSTIC_REASONS = {
+    null_pointer = true,
+    pointer_range = true,
+    invalid_address = true,
+    invalid_length = true,
+    budget_exhausted = true,
+    virtual_query_failed = true,
+    malformed_region = true,
+    not_committed = true,
+    protection_denied = true,
+    allocation_denied = true,
+    region_bounds = true,
+    allocation_changed = true,
+    region_changed = true,
+    read_failed = true,
+    short_read = true,
+    value_out_of_range = true,
+    value_changed = true,
+    malformed_bytes = true,
+    callback_error = true,
+}
+
 local function new_array()
     return setmetatable({}, {__json_array = true})
 end
@@ -57,14 +98,14 @@ local function safe_call(state, name, ...)
     local callback = state.adapter[name]
     if type(callback) ~= "function" then
         bump(state, "adapter_errors")
-        return false, nil
+        return false, nil, nil
     end
-    local ok, result = pcall(callback, ...)
+    local ok, result, second = pcall(callback, ...)
     if not ok then
         bump(state, "adapter_errors")
-        return false, nil
+        return false, nil, nil
     end
-    return true, result
+    return true, result, second
 end
 
 local function valid_metadata(value)
@@ -201,6 +242,55 @@ local function sanitize_snapshot(value, label, now_ms)
     }
 end
 
+local function sanitize_ui_diagnostic(value, label, now_ms)
+    local clean = {
+        version = 1,
+        label = COMMANDS[label] and label or "startup",
+        at_ms = is_integer(now_ms) and now_ms or 0,
+    }
+    local valid = type(value) == "table"
+    if valid then
+        valid = value.version == 1
+            and UI_DIAGNOSTIC_STAGES[value.stage] == true
+            and UI_DIAGNOSTIC_REASONS[value.reason] == true
+    end
+
+    local read_size = type(value) == "table" and value.read_size or nil
+    local budget_used = type(value) == "table" and value.budget_used or nil
+    local valid_read_size = is_integer(read_size) and read_size <= 4096
+    local valid_budget = is_integer(budget_used) and budget_used <= 16 * 1024
+    if not valid_read_size or not valid_budget then valid = false end
+
+    if valid then
+        clean.stage = value.stage
+        clean.reason = value.reason
+    else
+        clean.stage = "sanitize"
+        clean.reason = "malformed_bytes"
+    end
+    if valid_read_size then clean.read_size = read_size end
+    if valid_budget then clean.budget_used = budget_used end
+    return clean
+end
+
+local function record_ui_diagnostic(state, label, now_ms, value)
+    local ok, clean = pcall(sanitize_ui_diagnostic, value, label, now_ms)
+    if not ok then
+        clean = {
+            version = 1,
+            label = COMMANDS[label] and label or "startup",
+            at_ms = is_integer(now_ms) and now_ms or 0,
+            stage = "sanitize",
+            reason = "malformed_bytes",
+        }
+    end
+    if #state.ui_diagnostics < M.MAX_UI_SNAPSHOTS then
+        state.ui_diagnostics[#state.ui_diagnostics + 1] = clean
+    else
+        state.ui_diagnostics_dropped = add_saturated(state.ui_diagnostics_dropped, 1)
+    end
+end
+
 local function stop_observer(state, reason)
     if state.active_cycle then
         state.active_cycle = nil
@@ -225,14 +315,33 @@ local function capture_snapshot(state, label, now_ms)
         return false
     end
     state.snapshot_attempts = state.snapshot_attempts + 1
-    local ok, raw = safe_call(state, "ui_snapshot")
+    local ok, raw, diagnostic = safe_call(state, "ui_snapshot")
     if not ok then
         bump(state, "snapshot_failures")
+        record_ui_diagnostic(state, label, now_ms, {
+            version = 1,
+            stage = "callback_error",
+            reason = "callback_error",
+            read_size = 0,
+            budget_used = 0,
+        })
+        return false
+    end
+    if raw == nil then
+        bump(state, "snapshot_failures")
+        record_ui_diagnostic(state, label, now_ms, diagnostic)
         return false
     end
     local clean = sanitize_snapshot(raw, label, now_ms)
     if not clean then
         bump(state, "snapshot_failures")
+        record_ui_diagnostic(state, label, now_ms, {
+            version = 1,
+            stage = "sanitize",
+            reason = "malformed_bytes",
+            read_size = 0,
+            budget_used = 0,
+        })
         return false
     end
     state.ui_snapshots[#state.ui_snapshots + 1] = clean
@@ -409,6 +518,8 @@ function M.new(adapter)
         seen_cjk = false,
         last_owner_anon_id = nil,
         ui_snapshots = new_array(),
+        ui_diagnostics = new_array(),
+        ui_diagnostics_dropped = 0,
         snapshot_count = 0,
         snapshot_attempts = 0,
         last_manifest = nil,
@@ -497,6 +608,8 @@ function M.manifest(state)
         invalid_commands = state.counters.invalid_commands or 0,
         clock_failures = state.counters.clock_failures or 0,
         ui_snapshots = state.ui_snapshots,
+        ui_diagnostics = state.ui_diagnostics,
+        ui_diagnostics_dropped = state.ui_diagnostics_dropped,
     }
 end
 

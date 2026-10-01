@@ -74,10 +74,15 @@ local function run_case(config)
 
     local adapter = {
         now_ms = function() return now end,
-        ui_snapshot = function() return config.ui or {screen_depth = 0, screen_ids = {}, controllers = {}} end,
+        ui_snapshot = function()
+            if config.ui_throw then error(config.ui_throw) end
+            if config.ui_nil then return nil, config.ui_diagnostic end
+            if config.ui ~= nil then return config.ui, config.ui_diagnostic end
+            return {screen_depth = 0, screen_ids = {}, controllers = {}}, config.ui_diagnostic
+        end,
         take_command = function()
             command_index = command_index + 1
-            if command_index <= (config.command_count or 0) then return "chat_open" end
+            if command_index <= (config.command_count or 0) then return config.command_name or "chat_open" end
             return nil
         end,
         begin_cycle = function() return metadata_copy(false) end,
@@ -108,6 +113,13 @@ local function run_case(config)
     }
 
     local state = core.new(adapter)
+    for index = 1, (config.prefill_diagnostics or 0) do
+        state.ui_diagnostics[index] = {
+            version = 1, label = "startup", at_ms = 0, stage = "owner_ptr",
+            reason = "null_pointer", read_size = 8, budget_used = 8,
+        }
+    end
+    state.ui_diagnostics_dropped = config.initial_dropped or 0
     local times = config.times or {}
     local step_count = config.steps or #times
     if step_count == 0 then step_count = 1 end
@@ -161,6 +173,41 @@ local cases = {
     snapshot_cap = run_case({count = 0, steps = 41, command_count = 40}),
     runtime_limit = run_case({count = 0, times = {0, 1800000}}),
     clock_backwards = run_case({count = 0, times = {1000, 1500, 1499}}),
+    diagnostic_valid = run_case({count = 0, ui_nil = true, ui_diagnostic = {
+        version = 1, stage = "owner_ptr", reason = "null_pointer", read_size = 8, budget_used = 8,
+        raw_address = "PRIVATE_DIAGNOSTIC_ADDRESS", extra = "PRIVATE_DIAGNOSTIC_EXTRA",
+    }}),
+    diagnostic_bad_enum = run_case({count = 0, ui_nil = true, ui_diagnostic = {
+        version = 1, stage = "PRIVATE_STAGE", reason = "null_pointer", read_size = 8, budget_used = 8,
+    }}),
+    diagnostic_bad_numbers = run_case({count = 0, ui_nil = true, ui_diagnostic = {
+        version = 1, stage = "owner_ptr", reason = "null_pointer", read_size = -1, budget_used = "PRIVATE_NUMBER",
+    }}),
+    diagnostic_invalid_snapshot = run_case({count = 0, ui = {
+        screen_depth = 6, screen_ids = {}, controllers = {},
+    }, ui_diagnostic = {
+        version = 1, stage = "owner_ptr", reason = "null_pointer", read_size = 8, budget_used = 8,
+    }}),
+    diagnostic_callback_error = run_case({count = 0, ui_throw = "PRIVATE_CALLBACK_ERROR"}),
+    diagnostic_label_startup = run_case({count = 0, ui_nil = true, ui_diagnostic = {
+        version = 1, stage = "owner_ptr", reason = "null_pointer", read_size = 8, budget_used = 8,
+    }, command_count = 1, command_name = "startup"}),
+    diagnostic_label_closed = run_case({count = 0, ui_nil = true, ui_diagnostic = {
+        version = 1, stage = "owner_ptr", reason = "null_pointer", read_size = 8, budget_used = 8,
+    }, command_count = 1, command_name = "chat_closed"}),
+    diagnostic_label_open = run_case({count = 0, ui_nil = true, ui_diagnostic = {
+        version = 1, stage = "owner_ptr", reason = "null_pointer", read_size = 8, budget_used = 8,
+    }, command_count = 1, command_name = "chat_open"}),
+    diagnostic_label_sent = run_case({count = 0, ui_nil = true, ui_diagnostic = {
+        version = 1, stage = "owner_ptr", reason = "null_pointer", read_size = 8, budget_used = 8,
+    }, command_count = 1, command_name = "chat_sent"}),
+    diagnostic_bad_label = run_case({count = 0, ui_nil = true, ui_diagnostic = {
+        version = 1, stage = "owner_ptr", reason = "null_pointer", read_size = 8, budget_used = 8,
+    }, command_count = 1, command_name = "PRIVATE_EVENT_LABEL"}),
+    diagnostic_overflow = run_case({count = 0, ui_nil = true, ui_diagnostic = {
+        version = 1, stage = "owner_ptr", reason = "null_pointer", read_size = 8, budget_used = 8,
+    }, command_count = 1, command_name = "chat_open", prefill_diagnostics = 32,
+       initial_dropped = 9007199254740990}),
 }
 RESULT = json_core.encode_json(cases)
 '''
@@ -193,6 +240,7 @@ local invalid_handle = ffi.cast("HD2Probe_HANDLE", -1)
 local regions = {}
 local query_calls, read_calls = 0, 0
 local query_mutation, read_mutation
+local query_fail_address, rpm_fail_on_call, rpm_short_on_call
 local read_counts = {}
 local observer_now, observer_next_command_poll = 0, 0
 local observer_request_path = ffi.new("HD2Probe_U16[32]")
@@ -239,6 +287,7 @@ local kernel = {}
 function kernel.VirtualQuery(address, information, _)
     query_calls = query_calls + 1
     local numeric_address = tonumber(ffi.cast("size_t", address))
+    if query_fail_address == numeric_address then return 0 end
     local region = find_region(numeric_address)
     if not region then return 0 end
     if query_mutation and query_calls == query_mutation.call then query_mutation.fn(region) end
@@ -256,10 +305,12 @@ function kernel.ReadProcessMemory(_, source, destination, length, bytes_read)
     local address = tonumber(ffi.cast("size_t", source))
     read_counts[address] = (read_counts[address] or 0) + 1
     if read_mutation then read_mutation(address, read_counts[address]) end
+    if rpm_fail_on_call == read_calls then return 0 end
     local region = find_region(address)
     if not region or address + length > region.base + region.size then return 0 end
-    ffi.copy(destination, region.data + (address - region.base), length)
-    bytes_read[0] = length
+    local copied = rpm_short_on_call == read_calls and math.max(0, length - 1) or length
+    ffi.copy(destination, region.data + (address - region.base), copied)
+    bytes_read[0] = copied
     return 1
 end
 
@@ -305,6 +356,7 @@ local function reset_counters()
     query_calls, read_calls = 0, 0
     read_counts = {}
     query_mutation, read_mutation = nil, nil
+    query_fail_address, rpm_fail_on_call, rpm_short_on_call = nil, nil, nil
 end
 
 __OBSERVER_ADAPTER__
@@ -381,7 +433,7 @@ assert(observer_take_command() == "chat_sent" and create_file_calls == 2)
 
 -- 建立假的只读模块页与聊天对象；root指针和history首槽按64槽环绕。
 local module_global_page = math.floor((tonumber(module_base) + 0x347CE28) / 4096) * 4096
-add_region(module_global_page, 4096, tonumber(module_base), 0x1000000, 0x02)
+local owner_global_region = add_region(module_global_page, 4096, tonumber(module_base), 0x1000000, 0x02)
 local root_global = tonumber(module_base) + 0x347CEF0
 local owner_global = tonumber(module_base) + 0x347CE28
 local context, chat = 0x100000, 0x100000 + 0xC418
@@ -421,12 +473,12 @@ write_bytes(metadata, pack32(62) .. pack32(4))
 
 -- UI snapshot记录净化结构；stack和rows在结束复核时变化则拒绝整份快照。
 local owner, dispatch, controller, controller_bad = 0x200000, 0x300000, 0x400000, 0x410000
-add_region(owner, 0x10000, owner, 0x20000, 0x04)
-add_region(dispatch, 0x10000, dispatch, 0x20000, 0x04)
+local owner_region = add_region(owner, 0x10000, owner, 0x20000, 0x04)
+local dispatch_region = add_region(dispatch, 0x10000, dispatch, 0x20000, 0x04)
 add_region(controller, 4096, controller, 0x20000, 0x04)
 add_region(controller_bad, 4096, controller_bad, 0x20000, 0x04)
 local dispatch_global_page = math.floor((tonumber(module_base) + 0x3326E68) / 4096) * 4096
-add_region(dispatch_global_page, 4096, tonumber(module_base), 0x1000000, 0x02)
+local dispatch_global_region = add_region(dispatch_global_page, 4096, tonumber(module_base), 0x1000000, 0x02)
 local vtable = tonumber(module_base) + 0x3000000
 local vtable_page = math.floor(vtable / 4096) * 4096
 add_region(vtable_page, 4096, tonumber(module_base), 0x1000000, 0x02)
@@ -471,6 +523,118 @@ read_mutation = function(address, count)
     if address == dispatch_rows and count == 2 then write_bytes(dispatch_rows, changed_rows) end
 end
 assert(observer_ui_snapshot() == nil)
+-- 每次诊断夹具都恢复只读模块页和本进程模拟页的状态。
+local function prepare_ui_case()
+    owner_global_region.protect = 0x02
+    owner_global_region.type = 0x1000000
+    owner_global_region.allocation_base = tonumber(module_base)
+    dispatch_global_region.protect = 0x02
+    dispatch_global_region.type = 0x1000000
+    dispatch_global_region.allocation_base = tonumber(module_base)
+    owner_region.protect = 0x04
+    owner_region.type = 0x20000
+    owner_region.allocation_base = owner
+    dispatch_region.protect = 0x04
+    dispatch_region.type = 0x20000
+    dispatch_region.allocation_base = dispatch
+    write_bytes(owner_global, pack64(owner))
+    write_bytes(stack_address, stack)
+    write_bytes(tonumber(module_base) + 0x3326E68, pack64(dispatch))
+    write_bytes(dispatch_count, pack32(0))
+    reset_counters()
+    observer_read_budget = 0
+end
+
+local function expect_ui_failure(expected_stage, expected_reason, expected_read_size)
+    local snapshot, diagnostic = observer_ui_snapshot()
+    assert(snapshot == nil and type(diagnostic) == "table", "missing sanitized UI diagnostic")
+    assert(diagnostic.version == 1 and diagnostic.stage == expected_stage and diagnostic.reason == expected_reason,
+        "unexpected UI diagnostic stage/reason")
+    assert(diagnostic.read_size == expected_read_size and diagnostic.read_size >= 0
+        and diagnostic.read_size <= 4096, "diagnostic read_size escaped its bound")
+    assert(diagnostic.budget_used >= 0 and diagnostic.budget_used <= MAX_OBSERVER_READ,
+        "diagnostic budget_used escaped its bound")
+    return diagnostic
+end
+
+prepare_ui_case()
+write_bytes(owner_global, pack64(0))
+expect_ui_failure("owner_ptr", "null_pointer", 8)
+
+prepare_ui_case()
+write_bytes(tonumber(module_base) + 0x3326E68, pack64(0))
+expect_ui_failure("dispatch_ptr", "null_pointer", 8)
+
+prepare_ui_case()
+owner_global_region.protect = 0x20
+expect_ui_failure("owner_ptr", "protection_denied", 8)
+
+prepare_ui_case()
+owner_global_region.allocation_base = tonumber(module_base) + 0x1000
+expect_ui_failure("owner_ptr", "allocation_denied", 8)
+
+prepare_ui_case()
+write_bytes(stack_address, pack32(1) .. pack32(2) .. pack32(3) .. pack32(4) .. pack32(5) .. pack32(6))
+expect_ui_failure("screen_depth", "value_out_of_range", 24)
+
+prepare_ui_case()
+write_bytes(dispatch_count, pack32(65))
+expect_ui_failure("dispatch_count", "value_out_of_range", 4)
+
+prepare_ui_case()
+read_mutation = function(address, count)
+    if address == owner_global and count == 2 then write_bytes(owner_global, pack64(0x210000)) end
+end
+expect_ui_failure("verify_owner", "value_changed", 8)
+
+prepare_ui_case()
+read_mutation = function(address, count)
+    if address == stack_address and count == 2 then
+        write_bytes(stack_address, pack32(11) .. pack32(99) .. string.rep("\0", 12) .. pack32(2))
+    end
+end
+expect_ui_failure("verify_stack", "value_changed", 24)
+
+prepare_ui_case()
+read_mutation = function(address, count)
+    if address == tonumber(module_base) + 0x3326E68 and count == 2 then
+        write_bytes(tonumber(module_base) + 0x3326E68, pack64(0x310000))
+    end
+end
+expect_ui_failure("verify_dispatch", "value_changed", 8)
+
+prepare_ui_case()
+read_mutation = function(address, count)
+    if address == dispatch_count and count == 2 then write_bytes(dispatch_count, pack32(1)) end
+end
+expect_ui_failure("verify_count", "value_changed", 4)
+
+prepare_ui_case()
+write_bytes(dispatch_count, pack32(1))
+write_bytes(dispatch_rows, pack64(0) .. pack32(0x1234) .. pack32(0))
+read_mutation = function(address, count)
+    if address == dispatch_rows and count == 2 then
+        write_bytes(dispatch_rows, pack64(0) .. pack32(0x5678) .. pack32(0))
+    end
+end
+expect_ui_failure("verify_rows", "value_changed", 16)
+
+prepare_ui_case()
+query_fail_address = owner_global
+expect_ui_failure("owner_ptr", "virtual_query_failed", 8)
+
+prepare_ui_case()
+rpm_fail_on_call = 1
+expect_ui_failure("owner_ptr", "read_failed", 8)
+
+prepare_ui_case()
+rpm_short_on_call = 1
+expect_ui_failure("owner_ptr", "short_read", 8)
+
+prepare_ui_case()
+observer_read_budget = MAX_OBSERVER_READ - 4
+expect_ui_failure("owner_ptr", "budget_exhausted", 8)
+assert(query_calls == 0 and read_calls == 0, "budget refusal reached the fake kernel")
 RESULT = "adapter fake-kernel mocks ok"
 '''
 
@@ -601,6 +765,72 @@ class ObserveLuaCoreTests(unittest.TestCase):
         self.assertEqual(backwards["stop_reason"], "clock_not_monotonic")
         self.assertEqual(backwards["clock_failures"], 1)
 
+    def test_ui_diagnostics_are_forwarded_sanitized_labeled_and_bounded(self):
+        results = self.run_mock_cases()
+
+        valid_result = results["diagnostic_valid"]
+        valid_manifest = valid_result["manifest"]
+        self.assertEqual(valid_manifest["snapshot_failures"], 1)
+        diagnostic = valid_manifest["ui_diagnostics"][0]
+        self.assertEqual(
+            diagnostic,
+            {
+                "version": 1,
+                "label": "startup",
+                "at_ms": 0,
+                "stage": "owner_ptr",
+                "reason": "null_pointer",
+                "read_size": 8,
+                "budget_used": 8,
+            },
+        )
+        self.assertNotIn("PRIVATE_DIAGNOSTIC_ADDRESS", valid_result["output_json"])
+        self.assertNotIn("PRIVATE_DIAGNOSTIC_EXTRA", valid_result["output_json"])
+
+        invalid_enum = results["diagnostic_bad_enum"]["manifest"]["ui_diagnostics"][0]
+        self.assertEqual(invalid_enum["stage"], "sanitize")
+        self.assertEqual(invalid_enum["reason"], "malformed_bytes")
+        self.assertNotIn("PRIVATE_STAGE", json.dumps(invalid_enum))
+
+        invalid_numbers = results["diagnostic_bad_numbers"]["manifest"]["ui_diagnostics"][0]
+        self.assertEqual(invalid_numbers["stage"], "sanitize")
+        self.assertEqual(invalid_numbers["reason"], "malformed_bytes")
+        self.assertNotIn("read_size", invalid_numbers)
+        self.assertNotIn("budget_used", invalid_numbers)
+
+        invalid_snapshot = results["diagnostic_invalid_snapshot"]["manifest"]["ui_diagnostics"][0]
+        self.assertEqual(invalid_snapshot["stage"], "sanitize")
+        self.assertEqual(invalid_snapshot["reason"], "malformed_bytes")
+        self.assertEqual(invalid_snapshot["read_size"], 0)
+        self.assertEqual(invalid_snapshot["budget_used"], 0)
+
+        callback_error = results["diagnostic_callback_error"]["manifest"]
+        self.assertEqual(callback_error["adapter_errors"], 1)
+        self.assertEqual(callback_error["ui_diagnostics"][0]["stage"], "callback_error")
+        self.assertEqual(callback_error["ui_diagnostics"][0]["reason"], "callback_error")
+        self.assertNotIn("PRIVATE_CALLBACK_ERROR", results["diagnostic_callback_error"]["output_json"])
+
+        expected_labels = {
+            "diagnostic_label_startup": "startup",
+            "diagnostic_label_closed": "chat_closed",
+            "diagnostic_label_open": "chat_open",
+            "diagnostic_label_sent": "chat_sent",
+        }
+        for name, label in expected_labels.items():
+            with self.subTest(label=label):
+                labels = [item["label"] for item in results[name]["manifest"]["ui_diagnostics"]]
+                self.assertEqual(labels[1], label)
+                self.assertEqual(results[name]["manifest"]["ui_diagnostics"][1]["at_ms"], 0)
+
+        bad_label = results["diagnostic_bad_label"]["manifest"]
+        self.assertEqual(len(bad_label["ui_diagnostics"]), 1)
+        self.assertEqual(bad_label["invalid_commands"], 1)
+        self.assertNotIn("PRIVATE_EVENT_LABEL", results["diagnostic_bad_label"]["output_json"])
+
+        overflow = results["diagnostic_overflow"]["manifest"]
+        self.assertEqual(len(overflow["ui_diagnostics"]), 32)
+        self.assertEqual(overflow["ui_diagnostics_dropped"], 9007199254740991)
+
 
 class ObserveBuilderAndAdapterTests(unittest.TestCase):
     """检查两种构建模式、来源包保护及无需游戏进程的适配器静态边界。"""
@@ -717,7 +947,7 @@ class ObserveBuilderAndAdapterTests(unittest.TestCase):
         adapter_end = source.index("    local function observer_path_with_suffix", adapter_start)
         command_start = source.index("    local function observer_take_command()")
         command_end = source.index("    local function observer_ui_snapshot()", command_start)
-        ui_start = source.index("    local function observer_ui_snapshot()")
+        ui_start = source.index("    local function observer_ui_failure(")
         ui_end = source.index("    local function make_observer_adapter()", ui_start)
         adapter = source[adapter_start:adapter_end] + "\n" + source[ui_start:ui_end]
         script = LUA_OBSERVER_ADAPTER_HARNESS.replace("__FFI_DECL__", declaration.group(1)).replace(
