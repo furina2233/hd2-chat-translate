@@ -2,7 +2,8 @@
 param(
     [string]$GameDirectory = "E:/SteamLibrary/steamapps/common/Helldivers 2",
     [switch]$DryRun,
-    [switch]$Rollback
+    [switch]$Rollback,
+    [switch]$Followup
 )
 
 Set-StrictMode -Version Latest
@@ -13,6 +14,14 @@ $script:ExpectedGameSha256 = "2e2c3b7c2500646dadd5f2b4c6e0504dbb7e7896139f64cddc
 $script:ExpectedGameSize = 15522408L
 $script:ExpectedLoaderZipSha256 = "53af5698aeacfb27b98dfa00054923d11dc854e1e67b4af14798877812a93ba6"
 $script:ExpectedProbeZipSha256 = "10d7f2ae692be43430327b90eb834697393c7b9b90bf0edf593eac8db292b941"
+$script:ProbeZipName = "HD2ChatProbe.zip"
+$script:ExpectedProbePatchLength = 43424L
+# 补充探针使用独立来源包；原包保留以回滚首次部署。
+if ($Followup) {
+    $script:ExpectedProbeZipSha256 = "7e562cda0307d5db679e9d3a8c57073044c25247c03581ecf29f35c7459f2334"
+    $script:ProbeZipName = "HD2ChatProbeFollowup.zip"
+    $script:ExpectedProbePatchLength = 44448L
+}
 $script:LoaderResourceId = [Convert]::ToUInt64("7251fdd9bb62480a", 16)
 $script:ProbeResourceId = [Convert]::ToUInt64("c509c11199f753c2", 16)
 $script:ArchiveMagic = [Convert]::ToUInt32("F0000011", 16)
@@ -133,7 +142,7 @@ function Get-VerifiedPayloads {
     Add-Type -AssemblyName System.IO.Compression
     Add-Type -AssemblyName System.IO.Compression.FileSystem
     $loaderZip = Join-Path $script:ProjectRoot "artifacts/Bingus-Shared-Loader-v18.zip"
-    $probeZip = Join-Path $script:ProjectRoot "artifacts/HD2ChatProbe.zip"
+    $probeZip = Join-Path $script:ProjectRoot ("artifacts/" + $script:ProbeZipName)
     foreach ($zipPath in @($loaderZip, $probeZip)) {
         if (-not (Test-Path -LiteralPath $zipPath -PathType Leaf)) { throw "缺少固定来源 ZIP：$zipPath" }
     }
@@ -148,7 +157,7 @@ function Get-VerifiedPayloads {
             ZipPath = $probeZip
             ZipSha256 = $probeHash
             Entries = @(
-                [pscustomobject]@{ Suffix = ""; EntryPath = "Addon/9ba626afa44a3aa3.patch_0"; ExpectedLength = 43424L }
+                [pscustomobject]@{ Suffix = ""; EntryPath = "Addon/9ba626afa44a3aa3.patch_0"; ExpectedLength = $script:ExpectedProbePatchLength }
                 [pscustomobject]@{ Suffix = ".stream"; EntryPath = "Addon/9ba626afa44a3aa3.patch_0.stream"; ExpectedLength = 0L }
                 [pscustomobject]@{ Suffix = ".gpu_resources"; EntryPath = "Addon/9ba626afa44a3aa3.patch_0.gpu_resources"; ExpectedLength = 0L }
             )

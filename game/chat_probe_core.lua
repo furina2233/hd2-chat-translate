@@ -256,6 +256,22 @@ local KNOWN = {
     {label = "set_string_arg_143c950", rva = 0x143c950, hex = "40534883ec20488bd94881c110010000"},
 }
 
+-- 已采集指令的直接 call 目标是 0x12f2f60、0x20bba88、0x143a1b0。
+-- 前四个候选的窗口从 0x10976e0、0x10978e0、0x1097c20、0x1097e20 开始，接续发送/历史区域。
+-- 后三组中的第二项分别是直接 call 目标后移 0x200 的窗口续段。
+local FOLLOWUP = {
+    {label = "followup_1097760", rva = 0x1097760},
+    {label = "followup_1097960", rva = 0x1097960},
+    {label = "followup_1097ca0", rva = 0x1097ca0},
+    {label = "followup_1097ea0", rva = 0x1097ea0},
+    {label = "followup_12f2f60", rva = 0x12f2f60},
+    {label = "followup_12f3160", rva = 0x12f3160},
+    {label = "followup_20bba88", rva = 0x20bba88},
+    {label = "followup_20bbc88", rva = 0x20bbc88},
+    {label = "followup_143a1b0", rva = 0x143a1b0},
+    {label = "followup_143a3b0", rva = 0x143a3b0},
+}
+
 local function append_reason(candidate, reason)
     if not candidate.reason_set[reason] then
         candidate.reason_set[reason] = true
@@ -337,6 +353,14 @@ local function prepare(state)
     for _, known in ipairs(KNOWN) do
         local expected = from_hex(known.hex)
         add_candidate(state, known.rva, "known RVA lead " .. known.label .. "; not a verified function", #expected)
+    end
+    for _, lead in ipairs(FOLLOWUP) do
+        add_candidate(
+            state,
+            lead.rva,
+            "follow-up code window " .. lead.label .. "; not a verified function",
+            1
+        )
     end
     state.known_index = 1
     state.phase = "known"

@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 from pathlib import Path
 import struct
 import uuid
@@ -18,6 +19,8 @@ RESOURCE_TYPE = 0xA14E8DFA2CD117E2
 ADDON_GUID = "a741d044-972b-4dc5-b08e-1a68441e1d7f"
 CORE_MARKER = b"--[[HD2_CHAT_PROBE_CORE]]"
 MAX_SOURCE_BYTES = 512 * 1024
+DEFAULT_OUTPUT = ROOT / "artifacts" / "HD2ChatProbe.zip"
+DEPLOYMENT_RECEIPT = ROOT / ".local" / "chat-probe-deployment.json"
 
 
 def resource_hash(name: str) -> int:
@@ -124,10 +127,70 @@ def addon_files(entry: bytes) -> dict[str, bytes]:
     }
 
 
+def _same_path(left: Path, right: Path) -> bool:
+    """按本机路径规则比较绝对路径，避免大小写或相对路径绕过保护。"""
+    return os.path.normcase(str(left.expanduser().resolve())) == os.path.normcase(
+        str(right.expanduser().resolve())
+    )
+
+
+def _protect_deployed_source(output_path: Path) -> None:
+    """部署收据仍引用旧 ZIP 时，拒绝覆盖可用于回滚的来源包。"""
+    if not DEPLOYMENT_RECEIPT.exists():
+        return
+
+    is_default = _same_path(output_path, DEFAULT_OUTPUT)
+    try:
+        receipt = json.loads(DEPLOYMENT_RECEIPT.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as error:
+        if is_default:
+            raise ValueError(
+                "无法读取部署收据；为保护可能仍在使用的旧来源 ZIP，拒绝覆盖默认输出。"
+                "请先核实并回滚部署，或指定新的 --output 路径。"
+            ) from error
+        return
+
+    if not isinstance(receipt, dict):
+        if is_default:
+            raise ValueError("部署收据格式无效，拒绝覆盖默认输出；请先核实并回滚部署。")
+        return
+    source_zips = receipt.get("sourceZips")
+    if not isinstance(source_zips, dict):
+        if is_default:
+            raise ValueError("部署收据缺少 sourceZips，拒绝覆盖默认输出；请先核实并回滚部署。")
+        return
+
+    source_paths: list[Path] = []
+    malformed_sources = not all(
+        isinstance(source_zips.get(role), dict)
+        and isinstance(source_zips[role].get("path"), str)
+        and bool(source_zips[role]["path"].strip())
+        for role in ("probe", "loader")
+    )
+    for source in source_zips.values():
+        if not isinstance(source, dict):
+            malformed_sources = True
+            continue
+        source_path = source.get("path")
+        if not isinstance(source_path, str) or not source_path.strip():
+            malformed_sources = True
+            continue
+        path = Path(source_path)
+        source_paths.append(path)
+        if _same_path(output_path, path):
+            raise ValueError(
+                "输出路径仍被部署收据引用为来源 ZIP，拒绝覆盖；"
+                "请先回滚部署，或指定新的 --output 路径。"
+            )
+    if (malformed_sources or not source_paths) and is_default:
+        raise ValueError("部署收据的来源路径不完整，拒绝覆盖默认输出；请先核实并回滚部署。")
+
+
 def build_artifact(output: Path | str | None = None) -> Path:
     entry_path = ROOT / "game" / "chat_probe.lua"
     core_path = ROOT / "game" / "chat_probe_core.lua"
-    output_path = Path(output) if output is not None else ROOT / "artifacts" / "HD2ChatProbe.zip"
+    output_path = Path(output) if output is not None else DEFAULT_OUTPUT
+    _protect_deployed_source(output_path)
     if output_path.resolve() in (entry_path.resolve(), core_path.resolve()):
         raise ValueError("输出不能覆盖 Lua 源文件")
     packaged_entry = entry_source(entry_path.read_bytes(), core_path.read_bytes())
@@ -146,7 +209,10 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output", type=Path, help="ZIP 输出路径，默认 artifacts/HD2ChatProbe.zip")
     args = parser.parse_args()
-    result = build_artifact(args.output)
+    try:
+        result = build_artifact(args.output)
+    except (OSError, ValueError) as error:
+        parser.error(str(error))
     print(f"已构建研究探针：{result}")
 
 

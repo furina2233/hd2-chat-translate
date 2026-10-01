@@ -22,7 +22,7 @@ ModOptionsMenu 的文本控件包含 label ID 和格式参数，使用 `#COUNT` 
 
 ## 已获得的地址线索
 
-以下地址均为 `game.dll` 相对地址（RVA），不是本进程绝对地址，也未在本次运行态验证。
+以下地址均为 `game.dll` 相对地址（RVA），不是本进程绝对地址。2026-10-01 已在本机运行态确认六处已知签名的字节一致；函数语义与聊天显示接入仍需继续验证。
 
 | 候选位置 | RVA / 字段偏移 | 来源与待确认内容 |
 | --- | --- | --- |
@@ -61,8 +61,26 @@ call 0x1097560
 
 [HD2Runtime 的 `capture_snapshot`](https://github.com/SkyeShade/HD2Runtime/blob/master/api/snapshot_capture.lua) 捕获全进程的可读区域，[文档预计 6–12 GiB](https://github.com/SkyeShade/HD2Runtime/blob/master/docs/snapshots.md)。它会包含无关运行时数据，不适合直接用于这次函数研究。公开 `hd2.read` 只接受已编目的语义目标，也不是任意地址 reader。
 
-本项目改为单独的 LuaJIT FFI 只读探针，借鉴 [Windows 只读适配器](https://github.com/SkyeShade/HD2Runtime/blob/master/runtime/windows_readonly.lua) 的页属性检查。探针仅采集指定 DLL 主代码节中的短代码窗口，不读取聊天对象、玩家信息或堆，不调用聊天发送/文本 setter，不写游戏内存。游戏尚未运行，本次无法取得真实运行态代码，探针的游戏内加载与采集结果需要另行验证。
+本项目改为单独的 LuaJIT FFI 只读探针，借鉴 [Windows 只读适配器](https://github.com/SkyeShade/HD2Runtime/blob/master/runtime/windows_readonly.lua) 的页属性检查。探针仅采集指定 DLL 主代码节中的短代码窗口，不读取聊天对象、玩家信息或堆，不调用聊天发送/文本 setter，不写游戏内存。已取得首份真实运行态报告，详情见下文。
 
 磁盘 `game.dll` SHA-256：`2e2c3b7c2500646dadd5f2b4c6e0504dbb7e7896139f64cddc0d1813c718f51e`；PE timestamp `1790161983`；SizeOfImage `74727424`。主代码节 RVA `0x1000`、virtual size `34667155`、raw size `8718336`，节标志 `0x60000020`。该节没有可用名称，不能依赖 `.text` 名称定位。
 
 独立核验：探针资源名 `mods/hd2chat/chat_probe` 的构建器 hash 与本机 SDK 的 Murmur64 计算结果均为 `0xC509C11199F753C2`。将本机磁盘 DLL 前 64 KiB 作为测试头、其余代码读取替换为模拟数据，在本机 LuaJIT 下成功通过 PE 检查并进入扫描阶段。这验证了真实节表的解析，未加载 `game.dll` 或读取游戏进程，也未验证聊天签名。
+
+## 首次真实运行态结果
+
+2026-10-01 20:37:38（北京时间），Bingus v18 日志记录 `mods/hd2chat/chat_probe: loaded`。20:38:05 完成报告 `chat-probe-1790858285-02f9a860-abe000000007ECC6D20-01.json`，SHA-256 为 `e7365016a94314146ebca8aadfb6b10be34fb4a8813ce4450d0a0a1a24a8e13a`。磁盘 DLL、PE 标识与代码节范围全通过检查；完整扫描 34,667,155 字节，跳过、读取失败、不可读候选和截断均为零。20 个候选窗口共 10,240 字节，分析器校验通过；六处已知签名比较全部为 `true`。
+
+报告和导出窗口保存在本机忽略的 `artifacts/probe-analysis/`。原始报告只含代码与扫描信息，不包含聊天正文。`function_verification` 仍为 `none`：字节匹配不能直接证明函数用途、控件类型或可写接口。
+
+根据窗口中的明确指令，可以进一步确认以下结构关系。这里的对象基址是对应指令中的 `RDI`，尚未读取实际聊天对象。
+
+| 指令证据 RVA | 可复核的关系 | 仍未确认的内容 |
+| --- | --- | --- |
+| `0x1097A7C`–`0x1097AAD` | 读取 `+0x9590` 与 `+0x9594`，以 `(first + count) & 63` 选槽；满 64 条则递增 first，否则递增 count | 消息稳定标识及对象生命周期 |
+| `0x1097ABC`、`0x1097B42` | 槽位步长为 `0x228`；在对象 `+0xB90 + slot*0x228` 写入 8 字节数值 | 数值的单位和消息身份用途 |
+| `0x1097BBB`–`0x1097BE4` | 目标地址为 `+0xBA0 + slot*0x228`，向 `0x20BBA88` 传入该地址、`0x201` 及 R13 | 完整复制函数、编码和容量契约；另一分支尚不完整 |
+| `0x1097020`–`0x10970AF` | 按 first/count 遍历环形记录，检查 `+0xDA2`–`+0xDA5`，随后将 `+0xBA0` 地址与 `+0xB98` 值传给 `0x12F2F60` | 这些标志和被调用函数的语义，不能直接当作 UI 刷新 |
+| `0x143C950`–`0x143C965` | string argument setter 把 widget `+0x110` 传给 `0x143A1B0`，返回值决定是否继续标脏 | 是否复制字符串，以及聊天行是否使用这种 widget |
+
+后续采集优先补足发送/历史窗口的截断尾部，并取得 `0x12F2F60`、`0x20BBA88` 和 `0x143A1B0` 的短代码窗口；在确认正文布局和显示更新之前，继续保持只读。
