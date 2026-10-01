@@ -195,3 +195,24 @@ pwsh -NoProfile -File tools/deploy_probe.ps1 -ObserveDiag -Rollback
 ```
 
 准备完成后检测到游戏进程已经关闭，按既有诊断部署授权继续。本轮先通过阶段诊断模式在隔离 TEMP 目录的实际部署、幂等和回滚，再按真实旧收据回滚修订包，部署阶段诊断 addon 至 `patch_21`、加载器至 `patch_22`。新收据指向 `HD2ChatObserveDiag.zip`；六文件摘要全部通过，部署前后原有 21 个主 patch 摘要不变。真实目录重复部署与回滚预演通过。**当前安装的是阶段诊断观察器，移除模式为 `-ObserveDiag -Rollback`。** 尚待启动后的新报告。
+
+### 阶段诊断结果与偏移修正
+
+2026-10-02 用户再次启动游戏。阶段诊断观察器持续运行，启动与重复 `startup` 采样均在 `dispatch_count/value_out_of_range` 处停止，读取预算为 44 字节、当前读取为 4 字节，adapter 异常为零。留存 `artifacts/observer-diag-runtime/startup-repeated.json` 的 SHA-256 为 `22c43b566c3a83b4c384c316a88bc4efe0c5fce3312511b587ee12c62814c425`。本轮尚未发送新测试消息，不能把此报告的未命中当作正文读取失效。
+
+核对公开原文后发现探针的进制错误：[ClickableScrollbars](https://github.com/CowboyBingus/ClickableScrollbars/blob/main/src/clickable_scrollbars.lua#L2820-L2825) 与 [ArmoryPreviewCache](https://github.com/CowboyBingus/ArmoryPreviewCache/blob/main/src/native.lua#L917-L930) 都使用十进制 `dispatch + 5740`、`dispatch + 5744`，即 `+0x166C/+0x1670`。此前适配器错误写成 `+0x5740/+0x5744`，读的是另一位置；其越界结果不能用于判断真实 registry 数量。stack 的 `+0x429C` 与深度的十进制 `20` 核对一致。
+
+修正只更改两个字段偏移，保留最多 64 项、原页保护、二读校验与每步 16 KiB 预算。超限诊断另可输出已有读取值 `observed_count`，仅允许有效的 `dispatch_count/value_out_of_range` 情形及 u32 整数；不增加内存读取或保存地址/正文。测试会在旧错误地址安置干扰值，验证适配器实际使用正确字段。新的来源 ZIP 独立保存，不覆盖当前部署收据引用的阶段诊断包。
+
+偏移修正版 `artifacts/HD2ChatObserveOffset.zip` 为 21,791 字节，SHA-256 为 `746d1dd4403a5b10d225593504396a2aa01680a843c0f1a7ed6746ff175d7f9e`；主 patch 为 99,328 字节，SHA-256 为 `4fd24a8a82b9bbb08b0d92fc1eb035cc23d33af0ce2d7b303dcdf325e1450ec8`。ZIP CRC 通过；另增加两段固定格式化窗口。最终 36 项测试全部通过、零跳过（10.801 秒），PowerShell 语法、compileall 与空白检查通过。
+
+```pwsh
+python tools/build_chat_probe.py --observe --output artifacts/HD2ChatObserveOffset.zip
+# 正常退出游戏后，回滚阶段诊断包，再部署偏移修正版。
+pwsh -NoProfile -File tools/deploy_probe.ps1 -ObserveDiag -Rollback
+pwsh -NoProfile -File tools/deploy_probe.ps1 -ObserveOffset
+# 偏移修正版的移除命令。
+pwsh -NoProfile -File tools/deploy_probe.ps1 -ObserveOffset -Rollback
+```
+
+用户确认正常退出后，本轮确认游戏进程关闭。新模式在隔离 TEMP 目录完成实际部署、幂等与回滚，六个新增文件全部移除，基线文件集合保留。随后回滚真实目录的阶段诊断包，部署偏移修正版至 `patch_21`、加载器至 `patch_22`。六文件摘要通过、原有 21 个主 patch 摘要全部不变；真实目录重复部署与回滚预演通过。**当前安装偏移修正版，移除模式为 `-ObserveOffset -Rollback`。** 修正后的真实 UI 快照尚未验证，翻译与原聊天行替换也尚未接入。

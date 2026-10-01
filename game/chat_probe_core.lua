@@ -291,6 +291,9 @@ local FOLLOWUP = {
     {label = "text_173c560", rva = 0x173c560},
     {label = "refresh_1861010", rva = 0x1861010},
     {label = "refresh_1861210", rva = 0x1861210},
+    -- 0x13006a0的直接格式化调用目标，用于核对属性表到显示文本的转换。
+    {label = "format_map_1300b90", rva = 0x1300b90},
+    {label = "format_map_1300d90", rva = 0x1300d90},
 }
 
 local function append_reason(candidate, reason)

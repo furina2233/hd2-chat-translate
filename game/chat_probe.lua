@@ -611,16 +611,21 @@ local function initialize_probe()
         return nil
     end
 
-    local function observer_ui_failure(stage, reason, read_size)
+    local function observer_ui_failure(stage, reason, read_size, observed_count)
         if type(read_size) ~= "number" or read_size < 0 or read_size > 4096 then read_size = 0 end
         if type(reason) ~= "string" then reason = "read_failed" end
-        return nil, {
+        local diagnostic = {
             version = 1,
             stage = stage,
             reason = reason,
             read_size = read_size,
             budget_used = observer_read_budget,
         }
+        if type(observed_count) == "number" and observed_count == math.floor(observed_count)
+            and observed_count >= 0 and observed_count <= 0xffffffff then
+            diagnostic.observed_count = observed_count
+        end
+        return nil, diagnostic
     end
 
     local function observer_ui_snapshot()
@@ -648,18 +653,21 @@ local function initialize_probe()
         if not dispatch_global then return observer_ui_failure("dispatch_ptr", "pointer_range", 0) end
         local dispatch, dispatch_reason = observer_read_pointer(dispatch_global)
         if not dispatch then return observer_ui_failure("dispatch_ptr", dispatch_reason, 8) end
-        local count_address = observer_add(dispatch, 0x5740)
+        -- 文档中的5740与5744是十进制偏移，按原始数值读取。
+        local count_address = observer_add(dispatch, 5740)
         if not count_address then return observer_ui_failure("count_read", "pointer_range", 0) end
         local count_bytes, count_reason = observer_read(count_address, 4)
         if not count_bytes then return observer_ui_failure("count_read", count_reason, 4) end
         local count = observer_u32(count_bytes, 0)
         if count == nil then return observer_ui_failure("dispatch_count", "malformed_bytes", 4) end
-        if count > 64 then return observer_ui_failure("dispatch_count", "value_out_of_range", 4) end
+        if count > 64 then
+            return observer_ui_failure("dispatch_count", "value_out_of_range", 4, count)
+        end
 
         local rows_bytes = ""
         local rows_address
         if count > 0 then
-            rows_address = observer_add(dispatch, 0x5744)
+            rows_address = observer_add(dispatch, 5744)
             if not rows_address then
                 return observer_ui_failure("rows_read", "pointer_range", 0)
             end

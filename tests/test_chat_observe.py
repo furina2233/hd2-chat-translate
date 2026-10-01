@@ -179,6 +179,7 @@ local cases = {
     }}),
     diagnostic_bad_enum = run_case({count = 0, ui_nil = true, ui_diagnostic = {
         version = 1, stage = "PRIVATE_STAGE", reason = "null_pointer", read_size = 8, budget_used = 8,
+        observed_count = 65,
     }}),
     diagnostic_bad_numbers = run_case({count = 0, ui_nil = true, ui_diagnostic = {
         version = 1, stage = "owner_ptr", reason = "null_pointer", read_size = -1, budget_used = "PRIVATE_NUMBER",
@@ -189,6 +190,35 @@ local cases = {
         version = 1, stage = "owner_ptr", reason = "null_pointer", read_size = 8, budget_used = 8,
     }}),
     diagnostic_callback_error = run_case({count = 0, ui_throw = "PRIVATE_CALLBACK_ERROR"}),
+    diagnostic_observed_count = run_case({count = 0, ui_nil = true, ui_diagnostic = {
+        version = 1, stage = "dispatch_count", reason = "value_out_of_range",
+        read_size = 4, budget_used = 44, observed_count = 65,
+        extra = "PRIVATE_COUNT_EXTRA",
+    }}),
+    diagnostic_observed_count_max = run_case({count = 0, ui_nil = true, ui_diagnostic = {
+        version = 1, stage = "dispatch_count", reason = "value_out_of_range",
+        read_size = 4, budget_used = 44, observed_count = 4294967295,
+    }}),
+    diagnostic_observed_wrong_stage = run_case({count = 0, ui_nil = true, ui_diagnostic = {
+        version = 1, stage = "owner_ptr", reason = "null_pointer",
+        read_size = 8, budget_used = 8, observed_count = 65,
+    }}),
+    diagnostic_observed_wrong_reason = run_case({count = 0, ui_nil = true, ui_diagnostic = {
+        version = 1, stage = "dispatch_count", reason = "malformed_bytes",
+        read_size = 4, budget_used = 44, observed_count = 65,
+    }}),
+    diagnostic_observed_invalid = run_case({count = 0, ui_nil = true, ui_diagnostic = {
+        version = 1, stage = "dispatch_count", reason = "value_out_of_range",
+        read_size = 4, budget_used = 44, observed_count = 4294967296,
+    }}),
+    diagnostic_observed_fractional = run_case({count = 0, ui_nil = true, ui_diagnostic = {
+        version = 1, stage = "dispatch_count", reason = "value_out_of_range",
+        read_size = 4, budget_used = 44, observed_count = 65.5,
+    }}),
+    diagnostic_observed_wrong_version = run_case({count = 0, ui_nil = true, ui_diagnostic = {
+        version = 2, stage = "dispatch_count", reason = "value_out_of_range",
+        read_size = 4, budget_used = 44, observed_count = 65,
+    }}),
     diagnostic_label_startup = run_case({count = 0, ui_nil = true, ui_diagnostic = {
         version = 1, stage = "owner_ptr", reason = "null_pointer", read_size = 8, budget_used = 8,
     }, command_count = 1, command_name = "startup"}),
@@ -483,8 +513,10 @@ local vtable = tonumber(module_base) + 0x3000000
 local vtable_page = math.floor(vtable / 4096) * 4096
 add_region(vtable_page, 4096, tonumber(module_base), 0x1000000, 0x02)
 local stack_address = owner + 0x429C
-local dispatch_rows = dispatch + 0x5744
-local dispatch_count = dispatch + 0x5740
+local dispatch_count = dispatch + 5740
+local dispatch_rows = dispatch + 5744
+local old_hex_dispatch_count = dispatch + 0x5740
+local old_hex_dispatch_rows = dispatch + 0x5744
 local stack = pack32(11) .. pack32(22) .. string.rep("\0", 12) .. pack32(2)
 write_bytes(owner_global, pack64(owner))
 write_bytes(stack_address, stack)
@@ -541,6 +573,9 @@ local function prepare_ui_case()
     write_bytes(stack_address, stack)
     write_bytes(tonumber(module_base) + 0x3326E68, pack64(dispatch))
     write_bytes(dispatch_count, pack32(0))
+    -- 旧错误偏移放入过界数量与异常行数据，正确布局不应访问这些陷阱。
+    write_bytes(old_hex_dispatch_count, pack32(65))
+    write_bytes(old_hex_dispatch_rows, string.rep(string.char(0xa5), 64))
     reset_counters()
     observer_read_budget = 0
 end
@@ -556,6 +591,16 @@ local function expect_ui_failure(expected_stage, expected_reason, expected_read_
         "diagnostic budget_used escaped its bound")
     return diagnostic
 end
+
+-- 正确十进制 count 为零时，即使旧十六进制偏移藏有 count=65，也应读取为空表快照。
+prepare_ui_case()
+local trap_snapshot = observer_ui_snapshot()
+assert(trap_snapshot and trap_snapshot.screen_depth == 2 and #trap_snapshot.controllers == 0,
+    "legacy hexadecimal dispatch trap affected the snapshot")
+assert(observer_read_budget == 88 and read_counts[dispatch_count] == 2,
+    "zero-count snapshot used an unexpected read budget")
+assert(read_counts[dispatch_rows] == nil and read_counts[old_hex_dispatch_count] == nil
+    and read_counts[old_hex_dispatch_rows] == nil, "dispatch read touched legacy trap offsets or rows")
 
 prepare_ui_case()
 write_bytes(owner_global, pack64(0))
@@ -579,7 +624,21 @@ expect_ui_failure("screen_depth", "value_out_of_range", 24)
 
 prepare_ui_case()
 write_bytes(dispatch_count, pack32(65))
-expect_ui_failure("dispatch_count", "value_out_of_range", 4)
+local over_count_diag = expect_ui_failure("dispatch_count", "value_out_of_range", 4)
+assert(over_count_diag.observed_count == 65, "diagnostic omitted the out-of-range u32 count")
+assert(over_count_diag.budget_used == 44 and observer_read_budget == 44,
+    "over-count rejection changed the reader budget")
+assert(read_counts[dispatch_count] == 1 and read_counts[dispatch_rows] == nil,
+    "over-count path read dispatch rows")
+
+prepare_ui_case()
+write_bytes(dispatch_count, pack32(0xffffffff))
+local max_count_diag = expect_ui_failure("dispatch_count", "value_out_of_range", 4)
+assert(max_count_diag.observed_count == 4294967295, "diagnostic lost the maximum u32 count")
+assert(max_count_diag.budget_used == 44 and observer_read_budget == 44,
+    "maximum-count rejection changed the reader budget")
+assert(read_counts[dispatch_count] == 1 and read_counts[dispatch_rows] == nil,
+    "maximum-count path read dispatch rows")
 
 prepare_ui_case()
 read_mutation = function(address, count)
@@ -791,12 +850,32 @@ class ObserveLuaCoreTests(unittest.TestCase):
         self.assertEqual(invalid_enum["stage"], "sanitize")
         self.assertEqual(invalid_enum["reason"], "malformed_bytes")
         self.assertNotIn("PRIVATE_STAGE", json.dumps(invalid_enum))
+        self.assertNotIn("observed_count", invalid_enum)
 
         invalid_numbers = results["diagnostic_bad_numbers"]["manifest"]["ui_diagnostics"][0]
         self.assertEqual(invalid_numbers["stage"], "sanitize")
         self.assertEqual(invalid_numbers["reason"], "malformed_bytes")
         self.assertNotIn("read_size", invalid_numbers)
         self.assertNotIn("budget_used", invalid_numbers)
+
+        observed = results["diagnostic_observed_count"]["manifest"]["ui_diagnostics"][0]
+        self.assertEqual(observed["stage"], "dispatch_count")
+        self.assertEqual(observed["reason"], "value_out_of_range")
+        self.assertEqual(observed["observed_count"], 65)
+        self.assertNotIn("PRIVATE_COUNT_EXTRA", results["diagnostic_observed_count"]["output_json"])
+        observed_max = results["diagnostic_observed_count_max"]["manifest"]["ui_diagnostics"][0]
+        self.assertEqual(observed_max["observed_count"], 4294967295)
+
+        for name in (
+            "diagnostic_observed_wrong_stage",
+            "diagnostic_observed_wrong_reason",
+            "diagnostic_observed_invalid",
+            "diagnostic_observed_fractional",
+            "diagnostic_observed_wrong_version",
+        ):
+            with self.subTest(observed_count=name):
+                item = results[name]["manifest"]["ui_diagnostics"][0]
+                self.assertNotIn("observed_count", item)
 
         invalid_snapshot = results["diagnostic_invalid_snapshot"]["manifest"]["ui_diagnostics"][0]
         self.assertEqual(invalid_snapshot["stage"], "sanitize")

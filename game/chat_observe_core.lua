@@ -270,6 +270,10 @@ local function sanitize_ui_diagnostic(value, label, now_ms)
     end
     if valid_read_size then clean.read_size = read_size end
     if valid_budget then clean.budget_used = budget_used end
+    if valid and value.stage == "dispatch_count" and value.reason == "value_out_of_range"
+        and is_u32(value.observed_count) then
+        clean.observed_count = value.observed_count
+    end
     return clean
 end
 
