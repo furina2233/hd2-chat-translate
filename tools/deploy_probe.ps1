@@ -7,13 +7,14 @@ param(
     [switch]$Observe,
     [switch]$ObserveFix,
     [switch]$ObserveDiag,
-    [switch]$ObserveOffset
+    [switch]$ObserveOffset,
+    [switch]$ObserveWidget
 )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
-if (@(@($Followup, $Observe, $ObserveFix, $ObserveDiag, $ObserveOffset) | Where-Object { $_.IsPresent }).Count -gt 1) {
-    throw "Followup、Observe、ObserveFix、ObserveDiag 与 ObserveOffset 只能指定一个。"
+if (@(@($Followup, $Observe, $ObserveFix, $ObserveDiag, $ObserveOffset, $ObserveWidget) | Where-Object { $_.IsPresent }).Count -gt 1) {
+    throw "Followup、Observe、ObserveFix、ObserveDiag、ObserveOffset 与 ObserveWidget 只能指定一个。"
 }
 
 $script:ProjectRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot ".."))
@@ -52,6 +53,12 @@ if ($ObserveOffset) {
     $script:ExpectedProbeZipSha256 = "746d1dd4403a5b10d225593504396a2aa01680a843c0f1a7ed6746ff175d7f9e"
     $script:ProbeZipName = "HD2ChatObserveOffset.zip"
     $script:ExpectedProbePatchLength = 99328L
+}
+# 控件属性定位包仍只读，独立来源用于保留偏移修正版的回滚能力。
+if ($ObserveWidget) {
+    $script:ExpectedProbeZipSha256 = "a488ed3ec7030a27eb9bf765606bb9474c82df25bbe3f5455664b3787ca04410"
+    $script:ProbeZipName = "HD2ChatObserveWidget.zip"
+    $script:ExpectedProbePatchLength = 113776L
 }
 $script:LoaderResourceId = [Convert]::ToUInt64("7251fdd9bb62480a", 16)
 $script:ProbeResourceId = [Convert]::ToUInt64("c509c11199f753c2", 16)

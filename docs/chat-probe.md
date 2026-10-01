@@ -216,3 +216,34 @@ pwsh -NoProfile -File tools/deploy_probe.ps1 -ObserveOffset -Rollback
 ```
 
 用户确认正常退出后，本轮确认游戏进程关闭。新模式在隔离 TEMP 目录完成实际部署、幂等与回滚，六个新增文件全部移除，基线文件集合保留。随后回滚真实目录的阶段诊断包，部署偏移修正版至 `patch_21`、加载器至 `patch_22`。六文件摘要通过、原有 21 个主 patch 摘要全部不变；真实目录重复部署与回滚预演通过。**当前安装偏移修正版，移除模式为 `-ObserveOffset -Rollback`。** 修正后的真实 UI 快照尚未验证，翻译与原聊天行替换也尚未接入。
+
+### 偏移修正版的真实核验
+
+2026-10-02 重启后，启动、用户确认关闭输入框后的 `chat_closed`、确认打开后的 `chat_open` 三份快照全部成功，失败与 adapter 异常均为零。三种状态都是 screen depth 为零，controller kind 为 `288/290/220/67`，同会话匿名 ID 也相同；可选 vtable 未取得。由此确认偏移修正恢复了有界枚举，但仅凭这些快照不能认定聊天 controller。用户可关闭输入框，后续沿已确认的具体正文属性表继续定位。
+
+本轮再次成功识别固定 ASCII 测试消息，长度为 20 字节，无正文读取、双读、终止符或 UTF-8 错误。保存的 `artifacts/observer-offset-runtime/chat-open.json` SHA-256 为 `2540ede60d27e1a908738e55d106fef71d4c32a5d9ddfd358951b531ee428363`。中文样本仍未验证。
+
+第六轮代码报告包含 50 个窗口、25,600 字节，完整代码节扫描无跳过或读取失败，六处签名匹配。报告保存为 `artifacts/probe-format-analysis/runtime-report.json`，SHA-256 为 `d86277068cd418ebd8062b4965af1c9da3756c0e3861f646cc2219f3daab4a9a`。所有函数仍是静态研究候选，没有执行原生函数或翻译替换。
+
+### 控件正文属性的有限定位
+
+新观察器在历史中首次识别任一固定测试消息后，利用历史采样空闲的 step 扫描具体控件槽，每步最多一个、总计最多 128 个非 deferred 槽次，槽游标对 64 回绕。剩余预算少于 4096 字节时不读、不推进；仍共享每步 16 KiB、单次最多 4096 字节和原页保护门禁。
+
+读取 `0x346D538` 根对象下的事件环与控件 manager；属性表只接受 count 不大于 14，查找唯一正文 key，重复 key 拒绝。值指针必须精确等于某条活动事件记录的 `+0xB4`，事件 code 必须匹配聊天路径，正文读取限于 `0x400` 字节。根指针、环 cursor/count、属性 count/entries、event code 和正文全部二读一致；复核根变化立即拒绝，不继续追随新根。正文只有遇到 NUL 且精确等于固定测试消息时才记录匹配。
+
+报告增加 `widget_probe`，只含固定状态、饱和状态计数、最多 128 次尝试与最多 64 条净化匹配。匹配仅含控件槽号、事件槽号、根匿名 ID 和 ASCII/中文布尔标志，不输出正文、其他属性 key、地址或任意错误文本。两轮匹配可以重复，不代表唯一消息。此诊断只用于验证槽位对应，不证明异步译文回写的身份或最终刷新契约。
+
+独立包 `artifacts/HD2ChatObserveWidget.zip` 为 24,442 字节，SHA-256 为 `a488ed3ec7030a27eb9bf765606bb9474c82df25bbe3f5455664b3787ca04410`；主 patch 为 113,776 字节，SHA-256 为 `6b0d5de5da467474fec812ac3018627676dce3495edb2b1d9577b3994be7cf88`。包内源码精确比对和 ZIP CRC 通过；独立模式在隔离 TEMP 目录完成实际部署、幂等与回滚，基线文件集合与摘要不变，版本模式混用被拒绝。准备期间保留了已安装偏移修正版的来源和收据。
+
+```pwsh
+python tools/build_chat_probe.py --observe --output artifacts/HD2ChatObserveWidget.zip
+# 正常退出游戏后回滚偏移修正版，再部署属性定位包。
+pwsh -NoProfile -File tools/deploy_probe.ps1 -ObserveOffset -Rollback
+pwsh -NoProfile -File tools/deploy_probe.ps1 -ObserveWidget
+# 属性定位包的移除命令。
+pwsh -NoProfile -File tools/deploy_probe.ps1 -ObserveWidget -Rollback
+```
+
+最终回归全部 38 项通过、零跳过（10.485 秒）；新增两个持久化测试在私有 LuaJIT 的 fake-kernel 与 pure core 中验证真实生产片段，覆盖 14/15 项边界、精确指针、活动环槽、根/元数据/属性/正文漂移、缺 NUL、预算 defer、每步一个槽、128 上限、64 条匹配上限及输出净化。未读取真实游戏或请求文件。PowerShell 语法、compileall 与空白检查通过。
+
+验收期间检测到游戏已退出，确认进程为零后按既有诊断部署授权继续：回滚偏移修正版的六个文件，安装控件定位版至 `patch_21`、加载器至 `patch_22`。六文件摘要全部通过，原有 21 个主 patch 摘要全部不变；真实目录重复部署与回滚预演通过。**当前安装控件定位观察器，回滚模式为 `-ObserveWidget -Rollback`。** 新版控件槽匹配尚待游戏内验证；它没有连接大模型或调用文本 setter。

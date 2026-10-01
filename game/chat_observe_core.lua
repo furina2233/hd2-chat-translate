@@ -21,6 +21,38 @@ local CODE_SECTION_START = 0x1000
 local CODE_SECTION_END = CODE_SECTION_START + 34667155
 local TEST_ASCII = "HD2CT_PROBE_ASCII_01"
 local TEST_CJK = "HD2CT_PROBE_中文_02"
+local WIDGET_SLOT_COUNT = 64
+local WIDGET_MAX_ATTEMPTS = 128
+local WIDGET_MAX_MATCHES = 64
+
+local WIDGET_STATUS_LIST = {
+    "deferred",
+    "empty",
+    "key_missing",
+    "count_out_of_range",
+    "pointer_outside",
+    "inactive",
+    "event_type_mismatch",
+    "read_failed",
+    "unstable",
+    "missing_terminator",
+    "no_match",
+    "ascii",
+    "cjk",
+    "ambiguous_key",
+}
+
+local WIDGET_STATUSES = {}
+for _, name in ipairs(WIDGET_STATUS_LIST) do WIDGET_STATUSES[name] = true end
+
+local WIDGET_PROBE_STATES = {
+    waiting = true,
+    searching = true,
+    deferred = true,
+    complete = true,
+    reader_error = true,
+    disabled = true,
+}
 
 local COMMANDS = {
     startup = true,
@@ -92,6 +124,19 @@ end
 
 local function bump(state, name, amount)
     state.counters[name] = add_saturated(state.counters[name] or 0, amount or 1)
+end
+
+local function new_widget_probe(adapter)
+    local status_counts = {}
+    for _, name in ipairs(WIDGET_STATUS_LIST) do status_counts[name] = 0 end
+    return {
+        status = type(adapter.read_widget_slot) == "function" and "waiting" or "disabled",
+        attempts = 0,
+        next_slot = 0,
+        status_counts = status_counts,
+        matches = new_array(),
+        matches_dropped = 0,
+    }
 end
 
 local function safe_call(state, name, ...)
@@ -484,6 +529,70 @@ local function advance_cycle(state)
     end
 end
 
+local function bump_widget_status(widget, status)
+    widget.status_counts[status] = add_saturated(widget.status_counts[status] or 0, 1)
+end
+
+local function process_widget_probe(state)
+    local widget = state.widget_probe
+    if state.active_cycle or not (state.seen_ascii or state.seen_cjk) then return end
+    if type(state.adapter.read_widget_slot) ~= "function" then
+        widget.status = "disabled"
+        return
+    end
+    if widget.attempts >= WIDGET_MAX_ATTEMPTS then
+        widget.status = "complete"
+        return
+    end
+
+    local slot = widget.next_slot
+    local ok, status, sample = safe_call(state, "read_widget_slot", slot)
+    if not ok then
+        widget.status = "reader_error"
+        bump_widget_status(widget, "read_failed")
+        stop_observer(state, "widget_reader_error")
+        return
+    end
+    if type(status) ~= "string" or WIDGET_STATUSES[status] ~= true then
+        status = "read_failed"
+        sample = nil
+    end
+    if status == "deferred" then
+        bump_widget_status(widget, status)
+        widget.status = "deferred"
+        return
+    end
+
+    local match
+    if status == "ascii" or status == "cjk" then
+        if type(sample) == "table"
+            and is_integer(sample.event_slot) and sample.event_slot < SLOT_COUNT
+            and is_integer(sample.owner_anon_id) and sample.owner_anon_id > 0 then
+            match = {
+                widget_slot = slot,
+                event_slot = sample.event_slot,
+                owner_anon_id = sample.owner_anon_id,
+                seen_ascii = status == "ascii",
+                seen_cjk = status == "cjk",
+            }
+        else
+            status = "read_failed"
+        end
+    end
+
+    bump_widget_status(widget, status)
+    widget.attempts = widget.attempts + 1
+    widget.next_slot = (slot + 1) % WIDGET_SLOT_COUNT
+    if match then
+        if #widget.matches < WIDGET_MAX_MATCHES then
+            widget.matches[#widget.matches + 1] = match
+        else
+            widget.matches_dropped = add_saturated(widget.matches_dropped, 1)
+        end
+    end
+    widget.status = widget.attempts >= WIDGET_MAX_ATTEMPTS and "complete" or "searching"
+end
+
 local function process_command(state, now_ms)
     local ok, command = safe_call(state, "take_command")
     if not ok then return false end
@@ -524,6 +633,7 @@ function M.new(adapter)
         ui_snapshots = new_array(),
         ui_diagnostics = new_array(),
         ui_diagnostics_dropped = 0,
+        widget_probe = new_widget_probe(adapter),
         snapshot_count = 0,
         snapshot_attempts = 0,
         last_manifest = nil,
@@ -560,6 +670,42 @@ function M.new(adapter)
             output_failures = 0,
             clock_failures = 0,
         },
+    }
+end
+
+local function widget_probe_manifest(widget)
+    local status = WIDGET_PROBE_STATES[widget.status] and widget.status or "disabled"
+    local status_counts = {}
+    for _, name in ipairs(WIDGET_STATUS_LIST) do
+        local count = widget.status_counts[name]
+        status_counts[name] = is_integer(count) and count or 0
+    end
+    local matches = new_array()
+    if type(widget.matches) == "table" then
+        for index = 1, math.min(#widget.matches, WIDGET_MAX_MATCHES) do
+            local item = widget.matches[index]
+            if type(item) == "table"
+                and is_integer(item.widget_slot) and item.widget_slot < WIDGET_SLOT_COUNT
+                and is_integer(item.event_slot) and item.event_slot < SLOT_COUNT
+                and is_integer(item.owner_anon_id) and item.owner_anon_id > 0
+                and type(item.seen_ascii) == "boolean" and type(item.seen_cjk) == "boolean"
+                and item.seen_ascii ~= item.seen_cjk then
+                matches[#matches + 1] = {
+                    widget_slot = item.widget_slot,
+                    event_slot = item.event_slot,
+                    owner_anon_id = item.owner_anon_id,
+                    seen_ascii = item.seen_ascii,
+                    seen_cjk = item.seen_cjk,
+                }
+            end
+        end
+    end
+    return {
+        status = status,
+        attempts = is_integer(widget.attempts) and math.min(widget.attempts, WIDGET_MAX_ATTEMPTS) or 0,
+        status_counts = status_counts,
+        matches = matches,
+        matches_dropped = is_integer(widget.matches_dropped) and widget.matches_dropped or 0,
     }
 end
 
@@ -614,6 +760,7 @@ function M.manifest(state)
         ui_snapshots = state.ui_snapshots,
         ui_diagnostics = state.ui_diagnostics,
         ui_diagnostics_dropped = state.ui_diagnostics_dropped,
+        widget_probe = widget_probe_manifest(state.widget_probe),
     }
 end
 
@@ -670,6 +817,9 @@ function M.step(state)
                     start_cycle(state, now_ms)
                 end
                 advance_cycle(state)
+                if not state.done and not state.active_cycle then
+                    process_widget_probe(state)
+                end
             end
             report_if_due(state, now_ms, force_output or state.done)
         end

@@ -532,6 +532,214 @@ local function initialize_probe()
         return {identity = timestamp .. body:sub(1, 8), body = body, flags = flags}
     end
 
+    local OBSERVER_WIDGET_KEY = 0x7518C954
+    local OBSERVER_WIDGET_EVENT = 0x1C12037F
+    local OBSERVER_WIDGET_ASCII = "HD2CT_PROBE_ASCII_01"
+    local OBSERVER_WIDGET_CJK = "HD2CT_PROBE_中文_02"
+
+    local function observer_widget_context()
+        local root_global = observer_add(module_base_number, 0x346D538)
+        if not root_global then return nil end
+        local root = observer_read_pointer(root_global)
+        if not root then return nil end
+        local ring = observer_add(root, 0x4F7080)
+        if not ring then return nil end
+        local metadata_address = observer_add(ring, 0x12D00)
+        if not metadata_address then return nil end
+        local metadata = observer_read(metadata_address, 8)
+        if not metadata then return nil end
+        local next_index = observer_u32(metadata, 0)
+        local active_count = observer_u32(metadata, 4)
+        if next_index == nil or active_count == nil then return nil end
+        return {
+            root_global = root_global,
+            root = root,
+            ring = ring,
+            metadata_address = metadata_address,
+            metadata = metadata,
+            next_index = next_index,
+            active_count = active_count,
+        }
+    end
+
+    local function observer_widget_verify_context(context)
+        local verify_root = observer_read_pointer(context.root_global)
+        if not verify_root then return false, "read_failed" end
+        if verify_root ~= context.root then return false, "unstable" end
+        local verify_metadata = observer_read(context.metadata_address, 8)
+        if not verify_metadata then return false, "read_failed" end
+        if verify_metadata ~= context.metadata then return false, "unstable" end
+        return true
+    end
+
+    local function observer_widget_verify_base(context, count_address, count_bytes, entries_address, entries_bytes)
+        local stable, reason = observer_widget_verify_context(context)
+        if not stable then return false, reason end
+        local verify_count = observer_read(count_address, 1)
+        if not verify_count then return false, "read_failed" end
+        if verify_count ~= count_bytes then return false, "unstable" end
+        local verify_entries = ""
+        if #entries_bytes > 0 then
+            verify_entries = observer_read(entries_address, #entries_bytes)
+            if not verify_entries then return false, "read_failed" end
+        end
+        if verify_entries ~= entries_bytes then return false, "unstable" end
+        return true
+    end
+
+    local function observer_widget_verify_values(
+        context, count_address, count_bytes, entries_address, entries_bytes,
+        event_address, event_bytes, body_address, body_bytes
+    )
+        local stable, reason = observer_widget_verify_base(
+            context, count_address, count_bytes, entries_address, entries_bytes)
+        if not stable then return false, reason end
+        local verify_event = observer_read(event_address, 4)
+        if not verify_event then return false, "read_failed" end
+        if verify_event ~= event_bytes then return false, "unstable" end
+        if body_bytes ~= nil then
+            local verify_body = observer_read(body_address, 1024)
+            if not verify_body then return false, "read_failed" end
+            if verify_body ~= body_bytes then return false, "unstable" end
+        end
+        return true
+    end
+
+    local function observer_widget_read_widget_slot(slot)
+        if type(slot) ~= "number" or slot ~= math.floor(slot) or slot < 0 or slot >= 64 then
+            return "read_failed"
+        end
+        -- 为UI、环形历史和二次核验预留总预算，预算不足时不读、不推进槽位。
+        if observer_read_budget > MAX_OBSERVER_READ - 4096 then return "deferred" end
+
+        local context = observer_widget_context()
+        if not context then return "read_failed" end
+        if context.next_index >= 64 or context.active_count > 64 then
+            local stable, reason = observer_widget_verify_context(context)
+            if not stable then return reason end
+            return "count_out_of_range"
+        end
+
+        local manager = observer_add(context.root, 0x14498)
+        local widget_offset = 0x4390 + slot * 0x3D8
+        local widget = manager and observer_add(manager, widget_offset)
+        local map = widget and observer_add(widget, 0x220)
+        local count_address = map and observer_add(map, 0x158)
+        local entries_address = map and observer_add(map, 8)
+        if not manager or not widget or not map or not count_address or not entries_address then
+            return "read_failed"
+        end
+
+        local count_bytes = observer_read(count_address, 1)
+        if not count_bytes then return "read_failed" end
+        local count = count_bytes:byte(1)
+        if count == nil then return "read_failed" end
+        if count > 14 then
+            local stable, reason = observer_widget_verify_base(
+                context, count_address, count_bytes, entries_address, "")
+            if not stable then return reason end
+            return "count_out_of_range"
+        end
+
+        local entries_bytes = ""
+        if count > 0 then
+            entries_bytes = observer_read(entries_address, count * 0x18)
+            if not entries_bytes then return "read_failed" end
+        end
+        if count == 0 then
+            local stable, reason = observer_widget_verify_base(
+                context, count_address, count_bytes, entries_address, entries_bytes)
+            if not stable then return reason end
+            return "empty"
+        end
+
+        local matching_count = 0
+        local value_pointer
+        for index = 0, count - 1 do
+            local entry_offset = index * 0x18
+            local key = observer_u32(entries_bytes, entry_offset)
+            if key == nil then return "read_failed" end
+            if key == OBSERVER_WIDGET_KEY then
+                matching_count = matching_count + 1
+                if matching_count == 1 then
+                    value_pointer = observer_u64(entries_bytes, entry_offset + 8)
+                end
+            end
+        end
+
+        local result_status
+        local event_slot
+        if matching_count > 1 then
+            result_status = "ambiguous_key"
+        elseif matching_count == 0 then
+            result_status = "key_missing"
+        else
+            for index = 0, 63 do
+                local record = observer_add(context.ring, index * 0x4B4)
+                local expected_pointer = record and observer_add(record, 0xB4)
+                if not record or not expected_pointer then return "read_failed" end
+                if expected_pointer == value_pointer then
+                    event_slot = index
+                    break
+                end
+            end
+            if event_slot == nil then
+                result_status = "pointer_outside"
+            elseif (context.next_index - 1 - event_slot) % 64 >= context.active_count then
+                result_status = "inactive"
+            end
+        end
+
+        if result_status ~= nil then
+            local stable, reason = observer_widget_verify_base(
+                context, count_address, count_bytes, entries_address, entries_bytes)
+            if not stable then return reason end
+            return result_status
+        end
+
+        local record = observer_add(context.ring, event_slot * 0x4B4)
+        local event_address = record and observer_add(record, 0)
+        local body_address = record and observer_add(record, 0xB4)
+        if not record or not event_address or not body_address or body_address ~= value_pointer then
+            return "pointer_outside"
+        end
+        local event_bytes = observer_read(event_address, 4)
+        if not event_bytes then return "read_failed" end
+        local event_code = observer_u32(event_bytes, 0)
+        if event_code == nil then return "read_failed" end
+        if event_code ~= OBSERVER_WIDGET_EVENT then
+            local stable, reason = observer_widget_verify_values(
+                context, count_address, count_bytes, entries_address, entries_bytes,
+                event_address, event_bytes, nil, nil)
+            if not stable then return reason end
+            return "event_type_mismatch"
+        end
+
+        local body_bytes = observer_read(body_address, 1024)
+        if not body_bytes then return "read_failed" end
+        local stable, reason = observer_widget_verify_values(
+            context, count_address, count_bytes, entries_address, entries_bytes,
+            event_address, event_bytes, body_address, body_bytes)
+        if not stable then return reason end
+
+        local terminator = body_bytes:find("\0", 1, true)
+        if not terminator then return "missing_terminator" end
+        local body = body_bytes:sub(1, terminator - 1)
+        if body == OBSERVER_WIDGET_ASCII then
+            return "ascii", {
+                event_slot = event_slot,
+                owner_anon_id = observer_anon_id(context.root),
+            }
+        end
+        if body == OBSERVER_WIDGET_CJK then
+            return "cjk", {
+                event_slot = event_slot,
+                owner_anon_id = observer_anon_id(context.root),
+            }
+        end
+        return "no_match"
+    end
+
     local function observer_finish_cycle()
         local cycle = observer_active_cycle
         if not observer_same_cycle(cycle) then return nil end
@@ -775,6 +983,7 @@ local function initialize_probe()
         end)
         adapter.begin_cycle = protect(observer_begin_cycle)
         adapter.read_slot = protect(observer_read_slot)
+        adapter.read_widget_slot = protect(observer_widget_read_widget_slot)
         adapter.finish_cycle = protect(observer_finish_cycle)
         adapter.ui_snapshot = protect(observer_ui_snapshot)
         adapter.take_command = protect(observer_take_command)
