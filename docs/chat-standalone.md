@@ -4,6 +4,8 @@
 
 独立模式已完成构建、离线验收和一次真实游戏翻译核验。首次真实游戏启动发现文件信息结构的 FFI 越界写入，已补齐字段并增加布局门禁及真实 Windows API 回归；修订版成功在进程内请求模型并替换原聊天行，详情见下方验收记录及 [崩溃调查记录](crash-analysis-2026-10-02.md)。
 
+最新修订包为 `HD2ChatTranslate20261002173335.zip`。此前 `HD2ChatTranslate20261002170232.zip` 存在合并 TOC 格式错误，本机测试在启动时崩溃，现已按上游官方构建器修正；请更新包并重新部署，修订包的游戏启动仍待本轮确认。
+
 ## 安装与配置
 
 在游戏正常关闭时，向 HD2Arsenal 导入最新独立版 `HD2ChatTranslate年月日时分秒.zip`，更新同名模组，启用并部署。新包将 Bingus Shared Loader v18 的原始启动资源与聊天 addon 合入同一个 patch，无需另外导入加载器。默认优先级时将本模组放在列表最底端；若启用“第一个模组优先”，则放最顶端。不要同时启用旧聊天翻译 addon；独立版保留相同 Guid 与 Lua 资源作为升级。
@@ -99,3 +101,13 @@ ZIP CRC、内嵌 DLL 指纹、许可条目及 manifest 已核验。临时目录�
 本轮全套 `python -X utf8 -m unittest discover -s tests -v` 为 111 项通过，零失败、零跳过，28.598 秒；新增覆盖双资源 TOC、原始 loader 内容保留、错误来源包与非空 sidecar 拒绝、构建输入保护、北京时间命名，以及文件预检查后出现同名包时拒绝覆盖。源码语法和 `git diff --check` 通过，完整 UTF-8 日志位于 `artifacts/arsenal-repair/full-tests.log`。本机 Arsenal 0.36.2 没有查证可用的外部 ZIP 导入、部署接口；需要在其界面导入更新，启用并 Deploy，再检查实际部署指纹及新游戏会话。
 
 17:10:21 的 Arsenal 部署快照及模组库确认新包已导入同一 Guid，当前 `default` profile 的选项已启用，来源主 patch 与游戏中的 `patch_21` 摘要均为 `81b4fde7e8bfedaad7ee507cd21312c3d22c2612278d0e477b954d77024d180f`。两个空 sidecar 也存在且摘要匹配，原 patch 0–20 的 21 个主文件摘要未变，游戏 DLL 指纹仍匹配目标构建。此次导入与部署通过；核验时尚未生成比 16:22 成功报告更新的游戏会话，不能据旧计数宣布新包的游戏内翻译已完成。
+
+### 合并 TOC 崩溃修复
+
+后续 17:10、17:15 和 17:18 的三次启动在 `helldivers2.exe+0x5F2EB0` 读访问冲突，网络 DLL 尚未加载，loader 日志与翻译报告未更新。独立核对 [上游 archive.py](https://github.com/CowboyBingus/BingusSharedLoader/blob/main/scripts/archive.py) 及本机原有多资源 patch，发现合并构建器将头部的 `type_count` 与 `file_count` 写反，且第二条资源的末尾编号重复为 `0`。单资源时两个计数都是 `1`，此前测试又沿用生产代码的错误假设，未发现这两处问题。
+
+修复将头部写为 `type_count=1, file_count=2`，资源按 hash 排序，文件行编号为 `0,1`。独立解析回归拒绝旧错头和重复编号，并核对由上游构建器生成的双资源黄金摘要。另使用审阅过的上游 `make_archive` 纯函数，对本包的两个实际资源生成参考 archive；修订主 patch 与该结果逐字节一致。上游源码快照 SHA-256 为 `564dda73591088ced78be67fdae0c85df4eb1d82d6371cd16224ce7d90b25a12`。
+
+修订 ZIP `HD2ChatTranslate20261002173335.zip` 为 83,092 字节，SHA-256 `5d8064b0a4ebb3d27cf4e131b4b1f5cac91485a3a1f2e04de3b23340ef11092a`；主 patch 仍为 328,368 字节，SHA-256 `4cb51d198a387746afbace921dc6f9763e7a587748ea16e97c252defd92097cf`。它与失败 patch 仅在字节偏移 4、8、260 不同；两个资源内容、DLL、manifest、许可及上游说明均未变。ZIP CRC、实际包内 LuaJIT 语法、独立 TOC 和官方构建器比对通过，全套 112 项测试通过，零失败、零跳过，28.628 秒。数值证据与日志保存在 `artifacts/arsenal-repair/toc-fixed-package-verified.json`、`official-writer-comparison.json` 和 `toc-fixed-full-tests.log`。
+
+失败包保留供比对，新的实际 Arsenal 更新与游戏启动需要本轮重新核验。新转储表明异常发生在网络 DLL 加载前，不能单凭转储证明唯一原因；修订包的结构一致性也不能代替真实启动验证。

@@ -185,6 +185,7 @@ def make_lua_resource_archive(resources: list[tuple[int, bytes]]) -> bytes:
         total_resource_bytes += len(resource)
         if total_resource_bytes > MAX_ARCHIVE_SIZE:
             raise ValueError("archive Lua资源总大小超过构建上限")
+    resources = sorted(resources, key=lambda item: item[0])
 
     header_size = 72
     type_record_size = 32
@@ -204,8 +205,8 @@ def make_lua_resource_archive(resources: list[tuple[int, bytes]]) -> bytes:
         archive,
         0,
         0xF0000011,
-        len(resources),
         1,
+        len(resources),
         b"",
         archive_size,
         0,
@@ -232,7 +233,7 @@ def make_lua_resource_archive(resources: list[tuple[int, bytes]]) -> bytes:
             0,
             16,
             16,
-            0,
+            index,
         )
         archive[data_offset : data_offset + len(resource)] = resource
     return bytes(archive)

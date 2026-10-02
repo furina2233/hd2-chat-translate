@@ -114,6 +114,62 @@ def read_synthetic_shared_loader_assets(
         return builder.load_shared_loader_assets()
 
 
+def read_archive_contract(data: bytes) -> dict[str, object]:
+    """按TOC头部独立字段语义解析资源分组与文件行。"""
+    if len(data) < 72:
+        raise ValueError("archive头部被截断")
+    magic, type_count, file_count = struct.unpack_from("<III", data, 0)
+    if magic != 0xF0000011 or not 0 < type_count <= 1024 or not 0 < file_count <= 4096:
+        raise ValueError("archive头或计数无效")
+    type_rows_offset = 72
+    file_rows_offset = type_rows_offset + 32 * type_count
+    data_start = (file_rows_offset + 80 * file_count + 15) & ~15
+    if file_rows_offset + 80 * file_count > len(data):
+        raise ValueError("archive TOC表超出文件范围")
+
+    type_rows = [
+        struct.unpack_from("<IIQIIII", data, type_rows_offset + 32 * index)
+        for index in range(type_count)
+    ]
+    grouped_counts = {row[2]: row[3] for row in type_rows}
+    if len(grouped_counts) != type_count or any(count <= 0 for count in grouped_counts.values()):
+        raise ValueError("archive typeRows重复或分组计数无效")
+    if sum(grouped_counts.values()) != file_count:
+        raise ValueError("typeRows分组计数与header file_count不一致")
+
+    file_rows = [
+        struct.unpack_from("<7Q6I", data, file_rows_offset + 80 * index)
+        for index in range(file_count)
+    ]
+    observed_counts = {file_type: 0 for file_type in grouped_counts}
+    for row in file_rows:
+        if row[1] not in grouped_counts:
+            raise ValueError("fileRow的type未出现在typeRows中")
+        observed_counts[row[1]] += 1
+    if observed_counts != grouped_counts:
+        raise ValueError("fileRows类型计数与typeRows分组不一致")
+
+    file_indices = [row[-1] for row in file_rows]
+    if len(set(file_indices)) != file_count or sorted(file_indices) != list(range(file_count)):
+        raise ValueError("fileRow序号必须唯一且从零连续递增")
+    cursor = data_start
+    for row in file_rows:
+        offset, size = row[2], row[7]
+        if offset != cursor or offset % 16 or size <= 0 or offset + size > len(data):
+            raise ValueError("fileRow资源范围或16字节对齐无效")
+        cursor = (offset + size + 15) & ~15
+    if cursor != len(data):
+        raise ValueError("archive资源尾部或填充长度不匹配")
+    return {
+        "magic": magic,
+        "type_count": type_count,
+        "file_count": file_count,
+        "type_rows": type_rows,
+        "file_rows": file_rows,
+        "data_start": data_start,
+    }
+
+
 def fake_metadata(dll: bytes) -> bytes:
     return json.dumps(
         {
@@ -598,12 +654,67 @@ class StandaloneBuilderTests(unittest.TestCase):
             "aabae1880d3785ba7c14a4787f7d08ee635bccd0685d032c8eba26ee36397675",
         )
         self.assertEqual(builder.make_lua_resource_archive([(0x1234, resource)]), archive)
+        sorted_archive = builder.make_lua_resource_archive([(0x20, b"second"), (0x10, b"first")])
+        # 双资源黄金值由上游 scripts/archive.py 的 make_archive 独立生成。
+        self.assertEqual(
+            hashlib.sha256(sorted_archive).hexdigest(),
+            "e75ad56564a73e3803122ee54835a10fa9e6fa4e16dfe4932dcc7fda07224ce2",
+        )
+        sorted_layout = read_archive_contract(sorted_archive)
+        self.assertEqual([row[0] for row in sorted_layout["file_rows"]], [0x10, 0x20])
+        sorted_rows = sorted_layout["file_rows"]
+        self.assertEqual(
+            [sorted_archive[row[2] : row[2] + row[7]] for row in sorted_rows],
+            [b"first", b"second"],
+        )
         with self.assertRaisesRegex(ValueError, "重复"):
             builder.make_lua_resource_archive([(0x1234, resource), (0x1234, resource)])
         with self.assertRaisesRegex(ValueError, "数量上限"):
             builder.make_lua_resource_archive(
                 [(index, resource) for index in range(builder.MAX_ARCHIVE_LUA_RESOURCES + 1)]
             )
+
+    def test_independent_reader_uses_official_type_count_and_file_count_offsets(self):
+        # 真实patch0元数据：2个type row分组，每组2个file row；不依赖生产打包器。
+        type_count = 2
+        file_count = 4
+        header_size = 72
+        type_row_size = 32
+        file_row_size = 80
+        file_rows_offset = header_size + type_count * type_row_size
+        first_data_offset = (file_rows_offset + file_count * file_row_size + 15) & ~15
+        data_offsets = [first_data_offset + 16 * index for index in range(file_count)]
+        archive = bytearray(data_offsets[-1] + 16)
+        struct.pack_into(
+            "<III20sQQ24s", archive, 0, 0xF0000011, type_count, file_count, bytes(20), len(archive), 0, bytes(24)
+        )
+        struct.pack_into("<IIQIIII", archive, 72, 0, 0, 0xA14E8DFA2CD117E2, 2, 0, 16, 16)
+        struct.pack_into("<IIQIIII", archive, 104, 0, 0, 0xFEDCBA9876543210, 2, 0, 16, 16)
+        for index in range(file_count):
+            file_type = 0xA14E8DFA2CD117E2 if index < 2 else 0xFEDCBA9876543210
+            struct.pack_into(
+                "<7Q6I",
+                archive,
+                file_rows_offset + file_row_size * index,
+                index + 1,
+                file_type,
+                data_offsets[index],
+                0,
+                0,
+                0,
+                0,
+                8,
+                0,
+                0,
+                16,
+                16,
+                index,
+            )
+            archive[data_offsets[index] : data_offsets[index] + 8] = bytes([index + 1]) * 8
+        parsed = read_archive_contract(bytes(archive))
+        self.assertEqual((parsed["type_count"], parsed["file_count"]), (2, 4))
+        self.assertEqual([row[3] for row in parsed["type_rows"]], [2, 2])
+        self.assertEqual([row[-1] for row in parsed["file_rows"]], [0, 1, 2, 3])
 
     def test_local_shared_loader_zip_is_pinned_and_reads_only_required_assets(self):
         package_bytes, patch, resource, readme, manifest = synthetic_shared_loader_package()
@@ -729,11 +840,16 @@ class StandaloneBuilderTests(unittest.TestCase):
         )
         archive = files["Addon/9ba626afa44a3aa3.patch_0"]
         header = struct.unpack_from("<III20sQQ24s", archive, 0)
-        self.assertEqual((header[0], header[1], header[2], header[4]), (0xF0000011, 2, 1, len(archive)))
+        self.assertEqual((header[0], header[1], header[2], header[4]), (0xF0000011, 1, 2, len(archive)))
         type_record = struct.unpack_from("<IIQIIII", archive, 72)
         self.assertEqual(type_record, (0, 0, builder.RESOURCE_TYPE, 2, 0, 16, 16))
         entries = [struct.unpack_from("<7Q6I", archive, 104 + 80 * index) for index in range(2)]
         self.assertEqual([item[0] for item in entries], [builder.SHARED_LOADER_RESOURCE_HASH, builder.resource_hash(builder.RESOURCE_NAME)])
+        self.assertEqual([item[-1] for item in entries], [0, 1])
+        parsed = read_archive_contract(archive)
+        self.assertEqual((parsed["type_count"], parsed["file_count"]), (1, 2))
+        self.assertEqual([row[3] for row in parsed["type_rows"]], [2])
+        self.assertEqual([row[-1] for row in parsed["file_rows"]], [0, 1])
         self.assertEqual(len({item[0] for item in entries}), 2)
         for item in entries:
             self.assertEqual(item[1], builder.RESOURCE_TYPE)
@@ -745,6 +861,14 @@ class StandaloneBuilderTests(unittest.TestCase):
         self.assertEqual(first_blob, loader_resource)
         self.assertEqual(chat_blob, struct.pack("<II", len(entry), 2) + entry)
         self.assertIn(b"HD2CT_DLL_HEX", chat_blob)
+        wrong_header = bytearray(archive)
+        struct.pack_into("<II", wrong_header, 4, 2, 1)
+        with self.assertRaisesRegex(ValueError, "archive typeRows|分组计数"):
+            read_archive_contract(bytes(wrong_header))
+        duplicate_index = bytearray(archive)
+        struct.pack_into("<I", duplicate_index, 104 + 80 + 76, 0)
+        with self.assertRaisesRegex(ValueError, "序号必须唯一"):
+            read_archive_contract(bytes(duplicate_index))
         manifest = json.loads(files["manifest.json"])
         self.assertEqual(manifest["Guid"], builder.ADDON_GUID)
         self.assertEqual(manifest["Name"], "HD2 Chat Translate Standalone")
