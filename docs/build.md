@@ -92,7 +92,7 @@ python -m zipfile -t $taskPackage
 Get-FileHash -LiteralPath $taskPackage -Algorithm SHA256
 ```
 
-离线测试与包格式验证不能代替实际游戏启动。游戏关闭时在 Arsenal 导入更新并部署，启动后检查新会话报告，再验证英文聊天行替换为中文。流程见 [使用说明](chat-standalone.md)。
+离线测试与包格式验证不能代替实际游戏启动。游戏关闭时在 Arsenal 导入更新并部署，启动后检查新会话报告，再验证英文聊天行保留原文并在下一行显示“译文：”及中文。流程见 [使用说明](chat-standalone.md)。
 
 ## 常见构建失败
 

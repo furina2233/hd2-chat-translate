@@ -3,6 +3,8 @@ local M = {}
 
 M.MAX_SOURCE_BYTES = 1023
 M.MAX_TRANSLATION_BYTES = 16384
+M.DISPLAY_SEPARATOR = "\n译文："
+M.MAX_DISPLAY_BYTES = M.MAX_SOURCE_BYTES + #M.DISPLAY_SEPARATOR + M.MAX_TRANSLATION_BYTES
 M.MAX_PENDING = 32
 M.MAX_SLOTS_PER_STEP = 4
 M.MAX_SUBMITS_PER_STEP = 1
@@ -50,6 +52,7 @@ local COUNTER_NAMES = {
     "slot_reads",
     "slot_empty",
     "slot_stale",
+    "slot_event_filtered",
     "slot_read_failed",
     "slot_deferred",
     "invalid_messages",
@@ -68,6 +71,7 @@ local COUNTER_NAMES = {
     "translation_errors",
     "translation_unchanged",
     "translations_ready",
+    "error_displays_ready",
     "expired",
     "apply_attempts",
     "apply_confirmed",
@@ -425,6 +429,32 @@ local function add_pending(state, item)
     state.pending_by_slot[item.message.widget_slot] = item
 end
 
+local function mark_seen(state, message)
+    state.seen[message.widget_slot] = {
+        owner_id = message.owner_id,
+        event_slot = message.event_slot,
+        body = message.body,
+    }
+end
+
+local function remember_submit_error(state, message, token, code)
+    local item = {
+        token = token,
+        message = message,
+        source_body = message.body,
+        created_ms = state.last_now_ms,
+        translation = nil,
+        display_text = nil,
+        cancel_called = true,
+        owns_token = false,
+    }
+    item.display_text = item.source_body .. M.DISPLAY_SEPARATOR .. M.error_message(code)
+    item.error_display = true
+    add_pending(state, item)
+    mark_seen(state, message)
+    bump(state, "error_displays_ready")
+end
+
 local function submit_message(state, message)
     local token = make_token(state)
     if not token then
@@ -432,14 +462,17 @@ local function submit_message(state, message)
         return false
     end
     bump(state, "submit_attempts")
-    local ok, submitted = pcall(state.adapter.submit, token, message.body)
+    local ok, submitted, error_code = pcall(state.adapter.submit, token, message.body)
     if not ok then
         bump(state, "adapter_errors")
         bump(state, "submit_failures")
+        remember_submit_error(state, message, token, "SUBMIT_EXCEPTION")
         return false
     end
     if submitted ~= true then
         bump(state, "submit_failures")
+        remember_submit_error(state, message, token,
+            error_code == "SUBMIT_EXCEPTION" and "SUBMIT_EXCEPTION" or "SUBMIT_FAILED")
         return false
     end
     add_pending(state, {
@@ -448,15 +481,59 @@ local function submit_message(state, message)
         source_body = message.body,
         created_ms = state.last_now_ms,
         translation = nil,
+        display_text = nil,
         cancel_called = false,
     })
-    state.seen[message.widget_slot] = {
-        owner_id = message.owner_id,
-        event_slot = message.event_slot,
-        body = message.body,
-    }
+    mark_seen(state, message)
     bump(state, "submitted")
     return true
+end
+
+local ERROR_MESSAGES = {
+    TIMEOUT = "请求超时",
+    EXPIRED = "请求超时",
+    NETWORK = "网络连接失败",
+    BAD_RESPONSE = "返回内容无效",
+    RESPONSE_TOO_LARGE = "返回内容过长",
+    RATE_LIMITED = "请求太频繁，请稍后再试",
+    BACKOFF = "请稍后重试",
+    INVALID_URL = "接口地址无效",
+    INVALID_CONFIG = "模型配置无效",
+    INTERNAL = "翻译服务异常",
+    RESPONSE_EXCEPTION = "翻译服务异常",
+    CANCELLED = "请求已取消",
+    SUBMIT_FAILED = "翻译请求未能提交",
+    SUBMIT_EXCEPTION = "翻译服务异常",
+}
+
+local function error_message(code)
+    if type(code) == "string" then
+        local message = ERROR_MESSAGES[code]
+        if message then return message end
+        local digits = code:match("^HTTP_(%d%d%d)$")
+        local status = digits and tonumber(digits) or nil
+        if status and status >= 100 and status <= 599 then
+            if status == 400 or status == 422 then return "请求参数有误" end
+            if status == 401 then return "API 密钥无效" end
+            if status == 403 then return "无权使用此接口" end
+            if status == 404 then return "接口或模型不存在" end
+            if status == 408 or status == 504 then return "请求超时" end
+            if status == 429 then return "请求太频繁，请稍后再试" end
+            if status >= 500 then return "服务暂时不可用" end
+            return "请求失败"
+        end
+    end
+    return "翻译失败，请稍后重试"
+end
+
+function M.error_message(code)
+    return error_message(code)
+end
+
+local function set_error_display(state, item, code)
+    item.display_text = item.source_body .. M.DISPLAY_SEPARATOR .. error_message(code)
+    item.error_display = true
+    bump(state, "error_displays_ready")
 end
 
 local function parse_response(raw)
@@ -466,7 +543,7 @@ local function parse_response(raw)
         if not M.valid_text(text, M.MAX_TRANSLATION_BYTES) then return "invalid" end
         return "ok", text
     end
-    if raw:sub(1, 4) == "ERR\n" and #raw > 4 then return "error" end
+    if raw:sub(1, 4) == "ERR\n" and #raw > 4 then return "error", raw:sub(5) end
     return "invalid"
 end
 
@@ -496,31 +573,32 @@ local function process_one_pending(state)
         return
     end
 
-    if item.translation == nil then
+    if item.display_text == nil then
         local ok, raw = pcall(state.adapter.response, item.token)
         if not ok then
             bump(state, "adapter_errors")
-            terminal_response_failure(state, item, "response_errors")
-            return
-        end
-        if raw == nil then
+            bump(state, "response_errors")
+            set_error_display(state, item, "RESPONSE_EXCEPTION")
+        elseif raw == nil then
             bump(state, "responses_waiting")
             return
+        else
+            local kind, text = parse_response(raw)
+            if kind == "invalid" then
+                bump(state, "response_invalid")
+                set_error_display(state, item, "BAD_RESPONSE")
+            elseif kind == "error" then
+                bump(state, "translation_errors")
+                set_error_display(state, item, text)
+            elseif text == item.source_body then
+                terminal_response_failure(state, item, "translation_unchanged")
+                return
+            else
+                item.translation = text
+                item.display_text = item.source_body .. M.DISPLAY_SEPARATOR .. text
+                bump(state, "translations_ready")
+            end
         end
-        local kind, text = parse_response(raw)
-        if kind == "invalid" then
-            terminal_response_failure(state, item, "response_invalid")
-            return
-        elseif kind == "error" then
-            terminal_response_failure(state, item, "translation_errors")
-            return
-        end
-        if text == item.source_body then
-            terminal_response_failure(state, item, "translation_unchanged")
-            return
-        end
-        item.translation = text
-        bump(state, "translations_ready")
     end
 
     local active, fresh_now = ensure_active(state, true)
@@ -535,7 +613,7 @@ local function process_one_pending(state)
     set_status(state, "applying", nil)
     maybe_report(state, now_ms, false)
     bump(state, "apply_attempts")
-    local ok, result = pcall(state.adapter.apply, item.message, item.translation)
+    local ok, result = pcall(state.adapter.apply, item.message, item.display_text)
     if not ok then
         bump(state, "adapter_errors")
         terminal_response_failure(state, item, "apply_errors")
@@ -587,6 +665,9 @@ local function handle_non_ok_slot(state, slot, status)
         bump(state, "slot_empty")
     elseif status == "stale" then
         bump(state, "slot_stale")
+    elseif status == "filtered_event" then
+        -- 计数表示被拒绝的槽位采样次数，不代表去重后的通知数量。
+        bump(state, "slot_event_filtered")
     elseif status == "deferred" then
         bump(state, "slot_deferred")
     else
@@ -610,7 +691,8 @@ local function scan_slots(state)
         state.next_slot = (slot + 1) % SLOT_COUNT
         slots_read = slots_read + 1
         if status ~= "ok" then
-            if status ~= "empty" and status ~= "stale" and status ~= "read_failed" then
+            if status ~= "empty" and status ~= "stale" and status ~= "read_failed"
+                and status ~= "filtered_event" then
                 bump(state, "invalid_messages")
                 status = "read_failed"
             end
@@ -676,7 +758,8 @@ local function scan_baseline(state)
             if status == "ok" then
                 bump(state, "invalid_messages")
                 status = "read_failed"
-            elseif status ~= "empty" and status ~= "stale" and status ~= "read_failed" then
+            elseif status ~= "empty" and status ~= "stale" and status ~= "read_failed"
+                and status ~= "filtered_event" then
                 bump(state, "invalid_messages")
                 status = "read_failed"
             end

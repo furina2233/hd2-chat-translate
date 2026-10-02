@@ -173,6 +173,27 @@ assert(message.widget_slot == 0 and message.event_slot == 4 and message.owner_id
 assert(type(message.proof) == "table" and type(message.proof.context) == "table")
 assert(read_counts[widget_body] == 2, "ordinary body was not double-read")
 
+-- 稳定的不匹配event code只产生过滤状态；正文不读。漂移与稳定读失败仍映射到stale/failed。
+prepare_widget_case({event_code = 0x12345678})
+local filtered_event_status = translate_adapter.read_slot(0)
+assert(filtered_event_status == "filtered_event")
+assert(read_counts[widget_event_record] == 2 and read_counts[widget_body] == nil)
+
+prepare_widget_case({map_count = 15})
+local stable_failure_status = translate_adapter.read_slot(0)
+assert(stable_failure_status == "read_failed")
+assert(read_counts[widget_entries] == nil)
+
+prepare_widget_case()
+read_mutation = function(address, count)
+    if address == widget_event_record and count == 2 then
+        write_bytes(widget_event_record, pack32(0x12345678))
+    end
+end
+local unstable_status = translate_adapter.read_slot(0)
+read_mutation = nil
+assert(unstable_status == "stale", tostring(unstable_status))
+
 local private_message = message.body
 put_file(bridge_path, "HD2CT1 0\n")
 observer_now = 4101
@@ -182,6 +203,31 @@ local stale_read_count = read_calls
 local stale_status = translate_adapter.read_slot(0)
 assert(stale_status == "stale" and read_calls == stale_read_count)
 assert(not translate_heartbeat_fresh)
+
+-- standalone transport的Lua错误需局部捕获，不得触发memory adapter全局故障锁。
+STANDALONE_ENABLED = true
+native_init_status = 0
+translate_heartbeat_fresh = true
+native_transport_api = {
+    last_status = function() error("PRIVATE_NATIVE_STATUS") end,
+    enabled = function() return true end,
+    retry_cancels = function() error("PRIVATE_NATIVE_CANCEL") end,
+    submit = function() return true end,
+    response = function() return "OK\ntranslated" end,
+}
+local standalone_heartbeat = translate_adapter.heartbeat()
+assert(standalone_heartbeat == "HD2CT1 4101\n" and not observer_faulted)
+local retry_error_submit, retry_error_code = translate_adapter.submit(token, "Standalone body")
+assert(retry_error_submit == false and retry_error_code == "SUBMIT_EXCEPTION" and not observer_faulted)
+native_transport_api.retry_cancels = function() return 0 end
+native_transport_api.submit = function() error("PRIVATE_NATIVE_SUBMIT") end
+local submit_error_result, submit_error_code = translate_adapter.submit(token, "Standalone body")
+assert(submit_error_result == false and submit_error_code == "SUBMIT_EXCEPTION" and not observer_faulted)
+native_transport_api.response = function() error("PRIVATE_NATIVE_RESPONSE") end
+assert(translate_adapter.response(token) == "ERR\nRESPONSE_EXCEPTION" and not observer_faulted)
+STANDALONE_ENABLED = false
+native_transport_api = nil
+translate_heartbeat_fresh = false
 
 -- 每槽保守预留4096字节；预算不足立即延期，Fake VirtualQuery/RPM保持静默。
 observer_now = 4200
@@ -284,7 +330,8 @@ local sanitized_input = {
     status = "PRIVATE_STATUS", code = "PRIVATE_CODE", body = private_message,
     proof = {address = "PRIVATE_ADDRESS"}, extra = "PRIVATE_FIELD",
     baseline_remaining = 999, pending_count = 999,
-    counters = {steps = 3, submitted = 1, private_counter = 77},
+    counters = {steps = 3, submitted = 1, slot_event_filtered = 7,
+        error_displays_ready = 2, private_counter = 77},
 }
 assert(translate_adapter.output(sanitized_input))
 local sanitized = files[report_path].data
@@ -293,6 +340,9 @@ assert(not sanitized:find("PRIVATE_", 1, true))
 assert(sanitized:find('"status":"stopped"', 1, true))
 assert(sanitized:find('"baseline_remaining":0', 1, true))
 assert(sanitized:find('"pending_count":0', 1, true))
+assert(sanitized:find('"slot_event_filtered":7', 1, true))
+assert(sanitized:find('"error_displays_ready":2', 1, true))
+assert(not sanitized:find('"private_counter"', 1, true))
 
 -- 本native spy只模拟已知setter对目标属性entry的写入，绝不调用game.dll。
 native_spy_calls = 0
@@ -313,9 +363,10 @@ translate_adapter.heartbeat()
 observer_read_budget = 0
 local read_status, captured = translate_adapter.read_slot(0)
 assert(read_status == "ok" and captured.body == "Hello, divers")
-local apply_status = translate_adapter.apply(captured, "各位潜兵，集合撤离")
+local apply_text = "Hello, divers\n译文：各位潜兵，集合撤离"
+local apply_status = translate_adapter.apply(captured, apply_text)
 assert(apply_status == "called_confirmed" and native_spy_calls == 1)
-assert(native_spy_key == 0x7518C954 and native_spy_text == "各位潜兵，集合撤离")
+assert(native_spy_key == 0x7518C954 and native_spy_text == apply_text)
 assert(native_spy_widget == widget_slot_address + 0x110)
 local registry = rawget(_G, TRANSLATE_PIN_TABLE)
 assert(type(registry) == "table" and #registry.buffers == 1)
@@ -323,6 +374,32 @@ collectgarbage("collect")
 assert(ffi.string(registry.buffers[1]) == native_spy_text)
 assert(registry.bytes == #native_spy_text + 1)
 local successful_spy_calls = native_spy_calls
+
+-- 完整显示文本上限由翻译核心提供；超限、NUL与无效UTF-8不会分配或触发setter。
+native_spy_calls = 0
+rawset(_G, TRANSLATE_PIN_TABLE, nil)
+prepare_widget_case({body = widget_body_bytes("maximum display source")})
+observer_now = observer_now + 1
+put_file(bridge_path, string.format("HD2CT1 %d\n", observer_now))
+translate_adapter.heartbeat()
+observer_read_budget = 0
+local max_status, max_message = translate_adapter.read_slot(0)
+assert(max_status == "ok")
+local oversized_status = translate_adapter.apply(
+    max_message, string.rep("D", translate_core.MAX_DISPLAY_BYTES + 1))
+local nul_status = translate_adapter.apply(max_message, "bad" .. string.char(0) .. "text")
+local utf8_status = translate_adapter.apply(max_message, string.char(0xc0, 0xaf))
+assert(oversized_status == "read_failed" and nul_status == "read_failed" and utf8_status == "read_failed")
+assert(native_spy_calls == 0 and rawget(_G, TRANSLATE_PIN_TABLE) == nil)
+local max_display_text = string.rep("M", translate_core.MAX_DISPLAY_BYTES)
+local max_apply_status = translate_adapter.apply(max_message, max_display_text)
+assert(max_apply_status == "called_confirmed" and native_spy_calls == 1)
+assert(#native_spy_text == 17417 and native_spy_text == max_display_text)
+local max_registry = rawget(_G, TRANSLATE_PIN_TABLE)
+assert(max_registry.bytes == 17418 and #max_registry.buffers == 1)
+collectgarbage("collect")
+assert(ffi.string(max_registry.buffers[1]) == max_display_text,
+    "maximum display buffer was not kept alive through native use")
 
 -- 文本、event槽、owner/root、环metadata或property map漂移时都不能触发native setter。
 local function apply_after_mutation(mutate)
@@ -401,12 +478,25 @@ assert(count_capacity_buffer == nil and count_capacity_status == "capacity")
 assert(#count_registry.buffers == 512 and count_registry.buffers[1] ~= nil)
 
 rawset(_G, TRANSLATE_PIN_TABLE, nil)
-local large_text = string.rep("B", 16384)
-for _ = 1, 511 do assert(observer_translate_pin_text(large_text)) end
+assert(translate_core.MAX_DISPLAY_BYTES == 17417)
+local one_max_display = string.rep("P", translate_core.MAX_DISPLAY_BYTES)
+local max_pin = observer_translate_pin_text(one_max_display)
+assert(max_pin ~= nil)
+assert(observer_translate_pin_text(string.rep("O", translate_core.MAX_DISPLAY_BYTES + 1)) == nil)
+assert(observer_translate_pin_text("bad" .. string.char(0) .. "text") == nil)
+assert(observer_translate_pin_text(string.char(0xc0, 0xaf)) == nil)
+local one_max_registry = rawget(_G, TRANSLATE_PIN_TABLE)
+assert(one_max_registry.bytes == 17418 and #one_max_registry.buffers == 1)
+collectgarbage("collect")
+assert(ffi.string(one_max_registry.buffers[1]) == one_max_display)
+
+rawset(_G, TRANSLATE_PIN_TABLE, nil)
+local large_text = string.rep("B", translate_core.MAX_DISPLAY_BYTES)
+for _ = 1, 481 do assert(observer_translate_pin_text(large_text)) end
 local byte_capacity_buffer, byte_capacity_status = observer_translate_pin_text(large_text)
 local byte_registry = rawget(_G, TRANSLATE_PIN_TABLE)
 assert(byte_capacity_buffer == nil and byte_capacity_status == "capacity")
-assert(byte_registry.bytes <= 8 * 1024 * 1024)
+assert(byte_registry.bytes == 17418 * 481 and byte_registry.bytes <= 8 * 1024 * 1024)
 
 RESULT = json_core.encode_json({
     status = "translate fake Win32/kernel checks ok",
@@ -482,6 +572,9 @@ class ChatTranslateAdapterTests(unittest.TestCase):
         prelude = r'''
 local json_core = core
 local translate_core = dofile([[TRANSLATE_CORE_PATH]])
+local STANDALONE_ENABLED = false
+local native_transport_api
+local native_init_status = 0
 local TRANSLATE_ENABLED = false
 local DISPLAY_TEST_ENABLED = false
 local observer_display_native_gate = false

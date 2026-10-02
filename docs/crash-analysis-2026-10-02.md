@@ -22,6 +22,6 @@
 
 ## 当前状态
 
-TOC 修订合并包的实际 Arsenal 更新、稳定启动和聊天翻译仍待确认。格式一致性与离线回归不能代替新游戏会话验证。安装与状态检查见 [使用说明](chat-standalone.md)。
+用户后续运行游戏并将语言改为英文，反馈系统通知没有被翻译且没有发生崩溃。这补充了游戏启动和运行的观察；仍未做长期稳定性验证。本次双语显示和简短错误提示是后续更新，尚未完成游戏内验收。安装与状态检查见 [使用说明](chat-standalone.md)。
 
 本机必要数值证据已归并到被 Git 忽略的 `artifacts/validation/`：`standalone-confirmed.json`、`package-verified.json`、`official-writer-comparison.json`、`crash-evidence.json` 和原 patch 基线 `base-patches.json`。文件不包含聊天正文或模型配置，历史证据不能当作之后会话的成功报告。

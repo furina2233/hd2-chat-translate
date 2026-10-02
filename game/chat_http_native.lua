@@ -399,9 +399,12 @@ return function(ffi, kernel, bcrypt, hash_bytes, u16_ascii)
             local written = ffi.new("HD2Probe_U32[1]")
             written[0] = 0
             local ok, result = pcall(api.c_poll, token, buffer, 16388, written)
-            if not ok or tonumber(result) ~= 1 then return nil end
+            if not ok then return "ERR\nRESPONSE_EXCEPTION" end
+            if tonumber(result) ~= 1 then return nil end
             local length = tonumber(written[0])
-            if not length or length > 16387 then return "" end
+            if not length or length < 1 or length > 16387 or length ~= math.floor(length) then
+                return "ERR\nBAD_RESPONSE"
+            end
             return ffi.string(buffer, length)
         end
 

@@ -420,6 +420,9 @@ local function run_loader()
     exports.HD2CT_Poll = ffi.cast(
         "HD2Probe_U32 (*)(const char *, char *, HD2Probe_U32, HD2Probe_U32 *)",
         function(_, output, capacity, written)
+            if mode == "poll_exception" then error("PRIVATE_POLL_SECRET") end
+            if mode == "poll_pending" then return 0 end
+            if mode == "poll_bad_length" then written[0] = 16388; return 1 end
             local result = "OK\ntranslated"
             if capacity < #result + 1 then return 0 end
             ffi.copy(output, result, #result)
@@ -485,6 +488,10 @@ MODULE_SOURCE
         elseif mode == "http401" then
             result[#result + 1] = tostring(api.enabled())
             result[#result + 1] = tostring(api.last_status())
+        elseif mode == "poll_exception" or mode == "poll_pending" or mode == "poll_bad_length" then
+            api.submit("hd2ct_1", "body")
+            result[#result + 1] = api.response("hd2ct_1") or "pending"
+            api.disable()
         elseif mode == "cancel_busy_once" then
             api.submit("hd2ct_1", "body")
             local response = api.response("hd2ct_1") or "pending"
@@ -968,6 +975,14 @@ class StandaloneBuilderTests(unittest.TestCase):
         self.assertEqual(result[4:8], ["false", "false", "true", "0"])
         self.assertEqual(result[10:12], ["OK\ntranslated", "true"])
 
+    def test_native_poll_exception_and_invalid_length_are_classified_without_changing_pending(self):
+        caught = self.run_loader("poll_exception")
+        self.assertEqual(caught[10], "ERR\nRESPONSE_EXCEPTION")
+        pending = self.run_loader("poll_pending")
+        self.assertEqual(pending[10], "pending")
+        invalid_length = self.run_loader("poll_bad_length")
+        self.assertEqual(invalid_length[10], "ERR\nBAD_RESPONSE")
+
     def test_loader_rejects_bad_payload_file_size_sha_and_reparse_paths(self):
         for mode in (
             "bad_payload_hash",
@@ -1026,7 +1041,8 @@ class StandaloneBuilderTests(unittest.TestCase):
         heartbeat = source.split("local function observer_translate_heartbeat(force)", 1)[1].split(
             "local function observer_translate_refresh_for_setter", 1
         )[0]
-        self.assertIn("native_init_status == 0 and native_transport_api.enabled()", heartbeat)
+        self.assertIn("if enabled_ok and native_init_status == 0 and enabled", heartbeat)
+        self.assertIn("pcall(native_transport_api.retry_cancels, 4)", heartbeat)
         self.assertNotIn("native_last_status == 0", heartbeat)
         http_error = self.run_loader("http401")
         self.assertEqual(http_error[10:12], ["true", "401"])

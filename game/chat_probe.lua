@@ -1011,12 +1011,13 @@ local function initialize_probe()
             translate_heartbeat_next_poll = observer_now + 250
             translate_cached_heartbeat = nil
             if native_transport_api then
-                local status = native_transport_api.last_status()
-                if status ~= nil then native_last_status = status end
-                if native_init_status == 0 and native_transport_api.enabled() then
+                local status_ok, status = pcall(native_transport_api.last_status)
+                if status_ok and status ~= nil then native_last_status = status end
+                local enabled_ok, enabled = pcall(native_transport_api.enabled)
+                if enabled_ok and native_init_status == 0 and enabled then
                     translate_cached_heartbeat = string.format("HD2CT1 %.0f\n", observer_now)
                 end
-                native_transport_api.retry_cancels(4)
+                pcall(native_transport_api.retry_cancels, 4)
             end
             observer_translate_heartbeat_is_fresh(translate_cached_heartbeat)
             return translate_cached_heartbeat
@@ -1076,8 +1077,12 @@ local function initialize_probe()
                 or not translate_core.valid_text(body, TRANSLATE_MAX_REQUEST_BYTES) then
                 return false
             end
-            native_transport_api.retry_cancels(4)
-            return native_transport_api.submit(token, body) == true
+            local ok, submitted = pcall(function()
+                native_transport_api.retry_cancels(4)
+                return native_transport_api.submit(token, body)
+            end)
+            if not ok then return false, "SUBMIT_EXCEPTION" end
+            return submitted == true
         end
         if not TRANSLATE_ENABLED or not translate_heartbeat_fresh
             or not observer_translate_valid_token(token)
@@ -1120,7 +1125,9 @@ local function initialize_probe()
                 or native_init_status ~= 0 then
                 return nil
             end
-            return native_transport_api.response(token)
+            local ok, response = pcall(native_transport_api.response, token)
+            if not ok then return "ERR\nRESPONSE_EXCEPTION" end
+            return response
         end
         if not translate_owned_tokens[token] or not observer_translate_valid_token(token) then return nil end
         local path = observer_translate_path("\\" .. token .. ".res")
@@ -1146,9 +1153,11 @@ local function initialize_probe()
     end
 
     local function observer_translate_pin_text(text)
-        if type(text) ~= "string" or #text == 0 or #text > 16384
+        local max_display_bytes = translate_core and translate_core.MAX_DISPLAY_BYTES
+        if type(text) ~= "string" or #text == 0 or type(max_display_bytes) ~= "number"
+            or #text > max_display_bytes
             or not translate_core or type(translate_core.valid_text) ~= "function"
-            or not translate_core.valid_text(text, 16384) then
+            or not translate_core.valid_text(text, max_display_bytes) then
             return nil, "read_failed"
         end
         local registry = rawget(_G, TRANSLATE_PIN_TABLE)
@@ -1278,6 +1287,7 @@ local function initialize_probe()
         if status == "deferred" then return "deferred" end
         if status == "unstable" then return "stale" end
         if status == "read_failed" or status == "count_out_of_range" then return "read_failed" end
+        if status == "event_type_mismatch" then return "filtered_event" end
         if status ~= "ok" or type(message) ~= "table" then return "empty" end
         if type(message.body) ~= "string" or #message.body == 0
             or #message.body > TRANSLATE_MAX_REQUEST_BYTES
@@ -1293,12 +1303,14 @@ local function initialize_probe()
         if observer_read_budget > MAX_OBSERVER_READ - 4096 then return "deferred" end
         observer_translate_heartbeat(true)
         if not translate_heartbeat_fresh then return "stale" end
+        local max_display_bytes = translate_core and translate_core.MAX_DISPLAY_BYTES
         if type(message) ~= "table" or type(message.proof) ~= "table"
             or type(message.proof.context) ~= "table"
             or type(message.body) ~= "string" or #message.body == 0
             or not translate_core or type(translate_core.valid_text) ~= "function"
             or not translate_core.valid_text(message.body, TRANSLATE_MAX_REQUEST_BYTES)
-            or type(text) ~= "string" or not translate_core.valid_text(text, 16384) then
+            or type(text) ~= "string" or type(max_display_bytes) ~= "number"
+            or not translate_core.valid_text(text, max_display_bytes) then
             return "read_failed"
         end
         if text == message.body then return "stale" end
@@ -1405,10 +1417,12 @@ local function initialize_probe()
     local TRANSLATE_REPORT_COUNTERS = {
         "steps", "active_steps", "heartbeat_checks", "heartbeat_misses", "heartbeat_errors",
         "heartbeat_invalid", "heartbeat_stale", "slot_reads", "slot_empty", "slot_stale",
+        "slot_event_filtered",
         "slot_read_failed", "slot_deferred", "invalid_messages", "duplicates", "pending_observations",
         "queue_full", "submit_throttled", "submit_attempts", "submit_failures", "submitted", "cancelled",
         "cancel_errors", "responses_waiting", "response_errors", "response_invalid", "translation_errors",
         "translation_unchanged", "translations_ready", "expired", "apply_attempts", "apply_confirmed",
+        "error_displays_ready",
         "apply_unconfirmed", "apply_stale", "apply_deferred", "apply_capacity", "apply_read_failed",
         "apply_disabled", "apply_errors", "adapter_errors", "output_errors",
     }

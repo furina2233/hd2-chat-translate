@@ -28,9 +28,13 @@ local function new_env()
         now = 0,
         heartbeat_age = 0,
         messages = {},
+        filtered_slots = {},
         deferred_slots = {},
         responses = {},
         submit_accept = true,
+        submit_throw = false,
+        response_throw = false,
+        apply_throw = false,
         submit_calls = {},
         response_calls = {},
         apply_calls = {},
@@ -39,6 +43,7 @@ local function new_env()
         read_calls = {},
         applied = 0,
         apply_status = "called_confirmed",
+        apply_status_sequence = {},
         max_reads_one_step = 0,
         max_applies_one_step = 0,
         max_submits_one_step = 0,
@@ -52,16 +57,19 @@ local function new_env()
         read_slot = function(slot)
             env.read_calls[#env.read_calls + 1] = slot
             if env.deferred_slots[slot] then return "deferred" end
+            if env.filtered_slots[slot] then return "filtered_event" end
             local message = env.messages[slot]
             if message then return "ok", message end
             return "empty"
         end,
         submit = function(token, body)
             env.submit_calls[#env.submit_calls + 1] = {token = token, body = body}
+            if env.submit_throw then error("PRIVATE_SUBMIT_SECRET") end
             return env.submit_accept
         end,
         response = function(token)
             env.response_calls[#env.response_calls + 1] = token
+            if env.response_throw then error("PRIVATE_RESPONSE_SECRET") end
             return env.responses[token]
         end,
         apply = function(message, text)
@@ -71,6 +79,10 @@ local function new_env()
                 text = text,
                 slot = message.widget_slot,
             }
+            if env.apply_throw then error("PRIVATE_APPLY_SECRET") end
+            if #env.apply_status_sequence > 0 then
+                return table.remove(env.apply_status_sequence, 1)
+            end
             return env.apply_status
         end,
         cancel = function(token)
@@ -139,6 +151,7 @@ local function one_baseline_and_chinese_case()
         after_baseline = after_baseline,
         submits = #env.submit_calls,
         applies = #env.apply_calls,
+        submitted_body = env.submit_calls[1] and env.submit_calls[1].body or "",
         cancels = #env.cancel_calls,
         unchanged = manifest.counters.translation_unchanged,
         duplicates = manifest.counters.duplicates,
@@ -150,7 +163,8 @@ end
 local function one_apply_and_stale_case()
     local env = new_env()
     finish_baseline(env)
-    env.messages[0] = make_message(0, "Move to extraction", 2, 6)
+    local source = "Move to extraction\n\"A1\""
+    env.messages[0] = make_message(0, source, 2, 6)
     step(env)
     local first_token = env.submit_calls[1].token
     env.responses[first_token] = "OK\n前往撤离点"
@@ -171,10 +185,66 @@ local function one_apply_and_stale_case()
         apply_count = #env.apply_calls,
         apply_count_after_first = applied_once,
         submitted_count = #env.submit_calls,
+        source_body = source,
+        submitted_body = env.submit_calls[1] and env.submit_calls[1].body or "",
         translated_text = env.apply_calls[1] and env.apply_calls[1].text,
         stale_count = counters(changed).apply_stale,
         stale_cancel_count = #changed.cancel_calls,
         stale_body = changed.apply_calls[1] and changed.apply_calls[1].body,
+    }
+end
+
+local function one_deferred_apply_retry_case()
+    local env = new_env()
+    finish_baseline(env)
+    local source = "Hold position\n\"B2\""
+    local expected = source .. core.DISPLAY_SEPARATOR .. "保持阵地"
+    env.messages[0] = make_message(0, source, 3, 6)
+    step(env)
+    local token = env.submit_calls[1].token
+    env.responses[token] = "OK\n保持阵地"
+    env.apply_status_sequence = {"deferred", "called_confirmed"}
+    step(env)
+    local after_defer = env.apply_calls[1] and env.apply_calls[1].text or ""
+    step(env)
+    return {
+        apply_count = #env.apply_calls,
+        first_text = after_defer,
+        second_text = env.apply_calls[2] and env.apply_calls[2].text or "",
+        expected_text = expected,
+        response_count = #env.response_calls,
+        submitted_count = #env.submit_calls,
+        submitted_body = env.submit_calls[1] and env.submit_calls[1].body or "",
+        source_body = source,
+    }
+end
+
+local function one_filtered_event_case()
+    local pending_env = new_env()
+    finish_baseline(pending_env)
+    pending_env.messages[0] = make_message(0, "Pending player message", 0, 6)
+    step(pending_env)
+    local token = pending_env.submit_calls[1].token
+    pending_env.filtered_slots[0] = true
+    pending_env.state.next_slot = 0
+    step(pending_env)
+    local pending_manifest = core.manifest(pending_env.state)
+
+    local baseline_env = new_env()
+    baseline_env.filtered_slots[7] = true
+    finish_baseline(baseline_env)
+    local baseline_manifest = core.manifest(baseline_env.state)
+    return {
+        pending_count = pending_manifest.pending_count,
+        pending_submitted = #pending_env.submit_calls,
+        pending_cancel_count = #pending_env.cancel_calls,
+        pending_cancel_token = pending_env.cancel_calls[1] or "",
+        expected_token = token,
+        pending_filtered = pending_manifest.counters.slot_event_filtered,
+        pending_invalid = pending_manifest.counters.invalid_messages,
+        baseline_submitted = #baseline_env.submit_calls,
+        baseline_filtered = baseline_manifest.counters.slot_event_filtered,
+        baseline_invalid = baseline_manifest.counters.invalid_messages,
     }
 end
 
@@ -241,6 +311,14 @@ local function one_deferred_and_submit_failure_case()
     before = #reject.submit_calls
     step(reject)
     local attempts_second = #reject.submit_calls - before
+    local rejected_manifest = core.manifest(reject.state)
+
+    local dedupe = new_env()
+    finish_baseline(dedupe)
+    dedupe.submit_accept = false
+    dedupe.messages[0] = make_message(0, "one failed source", 0, 6)
+    step(dedupe)
+    for _ = 1, 16 do step(dedupe) end
     return {
         pending_after_defer = after_defer.pending_count,
         defer_counter = after_defer.counters.slot_deferred,
@@ -252,6 +330,16 @@ local function one_deferred_and_submit_failure_case()
         attempts_first = attempts_first,
         attempts_second = attempts_second,
         failed_submit_count = counters(reject).submit_failures,
+        failed_submitted_count = rejected_manifest.counters.submitted,
+        failed_error_displays = rejected_manifest.counters.error_displays_ready,
+        failed_apply_count = #reject.apply_calls,
+        failed_apply_text = reject.apply_calls[1] and reject.apply_calls[1].text or "",
+        failed_cancel_count = #reject.cancel_calls,
+        failed_response_count = #reject.response_calls,
+        failed_adapter_errors = rejected_manifest.counters.adapter_errors,
+        dedupe_submit_count = #dedupe.submit_calls,
+        dedupe_apply_count = #dedupe.apply_calls,
+        dedupe_duplicate_count = counters(dedupe).duplicates,
     }
 end
 
@@ -275,10 +363,11 @@ local function one_inactive_heartbeat_case()
     }
 end
 
-local function run_response_case(text)
+local function run_response_case(text, source)
     local env = new_env()
     finish_baseline(env)
-    env.messages[0] = make_message(0, "source", 0, 6)
+    source = source or "source"
+    env.messages[0] = make_message(0, source, 0, 6)
     step(env)
     local token = env.submit_calls[1].token
     env.responses[token] = "OK\n" .. text
@@ -286,18 +375,123 @@ local function run_response_case(text)
     local manifest = core.manifest(env.state)
     return {
         applied_bytes = env.apply_calls[1] and #env.apply_calls[1].text or 0,
+        applied_text = env.apply_calls[1] and env.apply_calls[1].text or "",
         applied = #env.apply_calls,
+        submitted_body = env.submit_calls[1] and env.submit_calls[1].body or "",
         invalid = manifest.counters.response_invalid,
         unchanged = manifest.counters.translation_unchanged,
+        error_displays = manifest.counters.error_displays_ready,
+        translations_ready = manifest.counters.translations_ready,
+    }
+end
+
+local function run_error_response_case(code, source_override)
+    local env = new_env()
+    finish_baseline(env)
+    local source = source_override or "Original player message"
+    env.messages[0] = make_message(0, source, 0, 6)
+    step(env)
+    local token = env.submit_calls[1].token
+    env.responses[token] = "ERR\n" .. code
+    step(env)
+    local manifest = core.manifest(env.state)
+    return {
+        source = source,
+        text = env.apply_calls[1] and env.apply_calls[1].text or "",
+        report = table.concat(env.output_calls, "\n"),
+        translation_errors = manifest.counters.translation_errors,
+        response_invalid = manifest.counters.response_invalid,
+        response_errors = manifest.counters.response_errors,
+        translations_ready = manifest.counters.translations_ready,
+        translation_unchanged = manifest.counters.translation_unchanged,
+        error_displays_ready = manifest.counters.error_displays_ready,
+        apply_count = #env.apply_calls,
+    }
+end
+
+local function one_error_message_case()
+    return {
+        http400 = run_error_response_case("HTTP_400"),
+        http422 = run_error_response_case("HTTP_422"),
+        http401 = run_error_response_case("HTTP_401"),
+        http403 = run_error_response_case("HTTP_403"),
+        http404 = run_error_response_case("HTTP_404"),
+        http408 = run_error_response_case("HTTP_408"),
+        http429 = run_error_response_case("HTTP_429"),
+        http503 = run_error_response_case("HTTP_503"),
+        http504 = run_error_response_case("HTTP_504"),
+        http599 = run_error_response_case("HTTP_599"),
+        http600 = run_error_response_case("HTTP_600"),
+        network = run_error_response_case("NETWORK"),
+        timeout = run_error_response_case("TIMEOUT"),
+        expired = run_error_response_case("EXPIRED"),
+        bad_response = run_error_response_case("BAD_RESPONSE"),
+        response_too_large = run_error_response_case("RESPONSE_TOO_LARGE"),
+        rate_limited = run_error_response_case("RATE_LIMITED"),
+        backoff = run_error_response_case("BACKOFF"),
+        invalid_url = run_error_response_case("INVALID_URL"),
+        invalid_config = run_error_response_case("INVALID_CONFIG"),
+        internal = run_error_response_case("INTERNAL"),
+        response_exception = run_error_response_case("RESPONSE_EXCEPTION"),
+        cancelled = run_error_response_case("CANCELLED"),
+        submit_failed = run_error_response_case("SUBMIT_FAILED"),
+        submit_exception = run_error_response_case("SUBMIT_EXCEPTION"),
+        same_as_source = run_error_response_case("NETWORK", "网络连接失败"),
+        unknown_private = run_error_response_case("PRIVATE_SECRET_API_KEY"),
+    }
+end
+
+local function one_exception_case()
+    local submit = new_env()
+    finish_baseline(submit)
+    submit.submit_throw = true
+    submit.messages[0] = make_message(0, "submit source", 0, 6)
+    step(submit)
+    step(submit)
+
+    local response = new_env()
+    finish_baseline(response)
+    response.messages[0] = make_message(0, "response source", 0, 6)
+    step(response)
+    response.response_throw = true
+    step(response)
+
+    local apply = new_env()
+    finish_baseline(apply)
+    apply.messages[0] = make_message(0, "apply source", 0, 6)
+    step(apply)
+    local token = apply.submit_calls[1].token
+    apply.responses[token] = "OK\n应用目标译文"
+    apply.apply_throw = true
+    step(apply)
+    return {
+        submit_text = submit.apply_calls[1] and submit.apply_calls[1].text or "",
+        submit_failures = counters(submit).submit_failures,
+        submit_count = #submit.submit_calls,
+        submit_applied = #submit.apply_calls,
+        submit_cancels = #submit.cancel_calls,
+        submit_responses = #submit.response_calls,
+        submit_adapter_errors = counters(submit).adapter_errors,
+        submit_error_displays = counters(submit).error_displays_ready,
+        submit_report = table.concat(submit.output_calls, "\n"),
+        response_text = response.apply_calls[1] and response.apply_calls[1].text or "",
+        response_errors = counters(response).response_errors,
+        response_error_displays = counters(response).error_displays_ready,
+        response_applied = #response.apply_calls,
+        response_report = table.concat(response.output_calls, "\n"),
+        apply_errors = counters(apply).apply_errors,
+        apply_report = table.concat(apply.output_calls, "\n"),
     }
 end
 
 local function one_response_bounds_case()
     local valid_max = run_response_case(string.rep("T", 16384))
+    local maximum_display = run_response_case(string.rep("T", 16384), string.rep("S", 1023))
     local too_long = run_response_case(string.rep("T", 16385))
     local nul = run_response_case("first" .. string.char(0) .. "last")
     local malformed = run_response_case(string.char(0xf0, 0x80, 0x80, 0x80))
-    return {valid_max = valid_max, too_long = too_long, nul = nul, malformed = malformed}
+    return {valid_max = valid_max, maximum_display = maximum_display,
+        too_long = too_long, nul = nul, malformed = malformed}
 end
 
 local function one_apply_heartbeat_gate_case()
@@ -390,6 +584,10 @@ local function one_heartbeat_clock_race_case()
 end
 
 RESULT = json_core.encode_json({
+    display_contract = {
+        separator = core.DISPLAY_SEPARATOR,
+        max_display_bytes = core.MAX_DISPLAY_BYTES,
+    },
     validation = {
         ascii = core.valid_text("Move now", 1023),
         chinese = core.valid_text("撤离点集合", 1023),
@@ -404,6 +602,8 @@ RESULT = json_core.encode_json({
     unverified = one_unverified_case(),
     baseline_chinese = one_baseline_and_chinese_case(),
     apply_stale = one_apply_and_stale_case(),
+    deferred_apply_retry = one_deferred_apply_retry_case(),
+    filtered_event = one_filtered_event_case(),
     capacity_ttl = one_capacity_ttl_case(),
     deferred_submit_failure = one_deferred_and_submit_failure_case(),
     heartbeat_stop = one_inactive_heartbeat_case(),
@@ -411,6 +611,8 @@ RESULT = json_core.encode_json({
     heartbeat_stale = one_stale_heartbeat_case(),
     heartbeat_clock_race = one_heartbeat_clock_race_case(),
     response_bounds = one_response_bounds_case(),
+    error_messages = one_error_message_case(),
+    exceptions = one_exception_case(),
 })
 '''
 
@@ -433,13 +635,16 @@ class ChatTranslateCoreTests(unittest.TestCase):
         return json.loads(self.lua.run(script))
 
     def test_utf8_and_size_validation_rejects_ambiguous_text(self) -> None:
-        cases = self._scenarios()["validation"]
+        scenarios = self._scenarios()
+        cases = scenarios["validation"]
         self.assertTrue(cases["ascii"])
         self.assertTrue(cases["chinese"])
         self.assertTrue(cases["boundary"])
         for invalid in ("over_boundary", "embedded_nul", "overlong", "surrogate", "truncated", "oversized_translation"):
             with self.subTest(invalid=invalid):
                 self.assertFalse(cases[invalid])
+        self.assertEqual(scenarios["display_contract"]["separator"], "\n译文：")
+        self.assertEqual(scenarios["display_contract"]["max_display_bytes"], 17417)
 
     def test_build_gate_baselines_old_chat_and_preserves_unchanged_chinese(self) -> None:
         result = self._scenarios()
@@ -451,6 +656,7 @@ class ChatTranslateCoreTests(unittest.TestCase):
         baseline = result["baseline_chinese"]
         self.assertEqual(baseline["after_baseline"], 0, "preexisting chat was submitted")
         self.assertEqual(baseline["submits"], 1, "Chinese source was not sent through model detection")
+        self.assertEqual(baseline["submitted_body"], "你好，队友", "model input should remain the unformatted source")
         self.assertEqual(baseline["applies"], 0, "unchanged Chinese text reached native apply")
         self.assertEqual(baseline["unchanged"], 1)
         self.assertEqual(baseline["cancels"], 1)
@@ -464,10 +670,34 @@ class ChatTranslateCoreTests(unittest.TestCase):
         self.assertEqual(result["apply_count_after_first"], 1)
         self.assertEqual(result["apply_count"], 1, "stable slot was applied more than once")
         self.assertEqual(result["submitted_count"], 1, "same body was submitted again after apply")
-        self.assertEqual(result["translated_text"], "前往撤离点")
+        expected_source = 'Move to extraction\n"A1"'
+        self.assertEqual(result["source_body"], expected_source)
+        self.assertEqual(result["submitted_body"], expected_source, "model input should preserve raw newlines and quotes")
+        self.assertEqual(result["translated_text"], expected_source + "\n译文：前往撤离点")
         self.assertEqual(result["stale_count"], 1)
         self.assertEqual(result["stale_cancel_count"], 1)
         self.assertEqual(result["stale_body"], "Original chat")
+
+    def test_deferred_apply_reuses_the_single_preformatted_display_text(self) -> None:
+        result = self._scenarios()["deferred_apply_retry"]
+        self.assertEqual(result["apply_count"], 2)
+        self.assertEqual(result["first_text"], result["expected_text"])
+        self.assertEqual(result["second_text"], result["expected_text"])
+        self.assertEqual(result["response_count"], 1, "deferred apply should reuse the parsed response")
+        self.assertEqual(result["submitted_count"], 1, "same identity should not be resubmitted")
+        self.assertEqual(result["submitted_body"], result["source_body"], "submit should receive the unformatted source")
+
+    def test_filtered_event_is_counted_without_submit_and_cancels_owned_pending(self) -> None:
+        result = self._scenarios()["filtered_event"]
+        self.assertEqual(result["pending_count"], 0)
+        self.assertEqual(result["pending_submitted"], 1)
+        self.assertEqual(result["pending_cancel_count"], 1)
+        self.assertEqual(result["pending_cancel_token"], result["expected_token"])
+        self.assertEqual(result["pending_filtered"], 1)
+        self.assertEqual(result["pending_invalid"], 0)
+        self.assertEqual(result["baseline_submitted"], 0)
+        self.assertEqual(result["baseline_filtered"], 1)
+        self.assertEqual(result["baseline_invalid"], 0)
 
     def test_pending_queue_cap_and_expiry_cancel_the_owned_request(self) -> None:
         result = self._scenarios()["capacity_ttl"]
@@ -490,10 +720,20 @@ class ChatTranslateCoreTests(unittest.TestCase):
         self.assertEqual(result["cursor_after_defer"], 0)
         self.assertEqual(result["cancel_after_defer"], 0)
         self.assertEqual(result["apply_after_resume"], 1)
-        self.assertEqual(result["apply_text_after_resume"], "保持阵地")
+        self.assertEqual(result["apply_text_after_resume"], "Hold position\n译文：保持阵地")
         self.assertEqual(result["attempts_first"], 1)
         self.assertEqual(result["attempts_second"], 0)
         self.assertEqual(result["failed_submit_count"], 1)
+        self.assertEqual(result["failed_submitted_count"], 0)
+        self.assertEqual(result["failed_error_displays"], 1)
+        self.assertEqual(result["failed_apply_count"], 1)
+        self.assertEqual(result["failed_apply_text"], "retry-0\n译文：翻译请求未能提交")
+        self.assertEqual(result["failed_cancel_count"], 0, "a rejected submit does not own a provider token")
+        self.assertEqual(result["failed_response_count"], 0, "a local submit error must not poll the provider")
+        self.assertEqual(result["failed_adapter_errors"], 0, "a normal submit rejection is not an exception")
+        self.assertEqual(result["dedupe_submit_count"], 1, "same identity retried a failed submit")
+        self.assertEqual(result["dedupe_apply_count"], 1)
+        self.assertGreaterEqual(result["dedupe_duplicate_count"], 1)
 
     def test_lost_heartbeat_clears_only_the_pending_bridge_request(self) -> None:
         result = self._scenarios()["heartbeat_stop"]
@@ -544,11 +784,87 @@ class ChatTranslateCoreTests(unittest.TestCase):
     def test_response_payload_accepts_exact_utf8_limit_and_rejects_invalid_or_oversized(self) -> None:
         cases = self._scenarios()["response_bounds"]
         self.assertEqual(cases["valid_max"]["applied"], 1)
-        self.assertEqual(cases["valid_max"]["applied_bytes"], 16384)
+        self.assertEqual(cases["valid_max"]["applied_bytes"], 16400)
+        maximum = cases["maximum_display"]
+        expected_source = "S" * 1023
+        expected_translation = "T" * 16384
+        self.assertEqual(maximum["applied"], 1)
+        self.assertEqual(maximum["applied_bytes"], 17417)
+        self.assertEqual(maximum["applied_text"], expected_source + "\n译文：" + expected_translation)
+        self.assertEqual(maximum["submitted_body"], expected_source)
+        self.assertEqual(cases["valid_max"]["error_displays"], 0)
+        self.assertEqual(cases["valid_max"]["translations_ready"], 1)
         for label in ("too_long", "nul", "malformed"):
             with self.subTest(response=label):
-                self.assertEqual(cases[label]["applied"], 0)
+                self.assertEqual(cases[label]["applied"], 1)
                 self.assertEqual(cases[label]["invalid"], 1)
+                self.assertEqual(cases[label]["error_displays"], 1)
+                self.assertEqual(cases[label]["translations_ready"], 0)
+                self.assertEqual(cases[label]["applied_text"], "source\n译文：返回内容无效")
+
+    def test_error_codes_produce_only_short_whitelisted_chinese_messages(self) -> None:
+        cases = self._scenarios()["error_messages"]
+        expected_messages = {
+            "http400": "请求参数有误",
+            "http422": "请求参数有误",
+            "http401": "API 密钥无效",
+            "http403": "无权使用此接口",
+            "http404": "接口或模型不存在",
+            "http408": "请求超时",
+            "http429": "请求太频繁，请稍后再试",
+            "http503": "服务暂时不可用",
+            "http504": "请求超时",
+            "http599": "服务暂时不可用",
+            "http600": "翻译失败，请稍后重试",
+            "network": "网络连接失败",
+            "timeout": "请求超时",
+            "expired": "请求超时",
+            "bad_response": "返回内容无效",
+            "response_too_large": "返回内容过长",
+            "rate_limited": "请求太频繁，请稍后再试",
+            "backoff": "请稍后重试",
+            "invalid_url": "接口地址无效",
+            "invalid_config": "模型配置无效",
+            "internal": "翻译服务异常",
+            "response_exception": "翻译服务异常",
+            "cancelled": "请求已取消",
+            "submit_failed": "翻译请求未能提交",
+            "submit_exception": "翻译服务异常",
+        }
+        for code, phrase in expected_messages.items():
+            with self.subTest(code=code):
+                result = cases[code]
+                self.assertEqual(result["apply_count"], 1)
+                self.assertEqual(result["text"], result["source"] + "\n译文：" + phrase)
+                self.assertEqual(result["translation_errors"], 1)
+                self.assertEqual(result["response_invalid"], 0)
+                self.assertEqual(result["translations_ready"], 0)
+                self.assertEqual(result["error_displays_ready"], 1)
+        unknown = cases["unknown_private"]
+        self.assertEqual(unknown["text"], unknown["source"] + "\n译文：翻译失败，请稍后重试")
+        self.assertNotIn("PRIVATE_SECRET_API_KEY", unknown["text"] + unknown["report"])
+        same_as_source = cases["same_as_source"]
+        self.assertEqual(same_as_source["translation_unchanged"], 0)
+        self.assertEqual(same_as_source["text"], "网络连接失败\n译文：网络连接失败")
+
+    def test_submit_response_and_apply_exceptions_are_caught_without_leaking_details(self) -> None:
+        result = self._scenarios()["exceptions"]
+        self.assertEqual(result["submit_text"], "submit source\n译文：翻译服务异常")
+        self.assertEqual(result["submit_failures"], 1)
+        self.assertEqual(result["submit_count"], 1)
+        self.assertEqual(result["submit_applied"], 1)
+        self.assertEqual(result["submit_cancels"], 0)
+        self.assertEqual(result["submit_responses"], 0)
+        self.assertEqual(result["submit_adapter_errors"], 1)
+        self.assertEqual(result["submit_error_displays"], 1)
+        self.assertEqual(result["response_text"], "response source\n译文：翻译服务异常")
+        self.assertEqual(result["response_errors"], 1)
+        self.assertEqual(result["response_applied"], 1)
+        self.assertEqual(result["response_error_displays"], 1)
+        self.assertEqual(result["apply_errors"], 1)
+        for report in (result["submit_report"], result["response_report"], result["apply_report"]):
+            for secret in ("PRIVATE_SUBMIT_SECRET", "PRIVATE_RESPONSE_SECRET", "PRIVATE_APPLY_SECRET"):
+                self.assertNotIn(secret, report)
 
 
 if __name__ == "__main__":

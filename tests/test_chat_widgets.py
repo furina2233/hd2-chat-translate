@@ -135,7 +135,10 @@ assert(read_counts[inactive_record] == nil, "inactive event record was read")
 
 -- 普通正文、错误event code、缺失属性和重复key均只返回固定状态。
 expect_widget_status("no_match", {body = widget_body_bytes("ordinary widget text")})
-expect_widget_status("event_type_mismatch", {event_code = 0x12345678})
+local filtered_sample = expect_widget_status("event_type_mismatch", {event_code = 0x12345678})
+assert(filtered_sample == nil, "a non-matching event produced a chat sample")
+assert(read_counts[widget_event_record] == 2, "event type mismatch was not stable across reads")
+assert(read_counts[widget_body] == nil, "event type mismatch caused a body read")
 expect_widget_status("key_missing", {target_index = -1})
 expect_widget_status("ambiguous_key", {duplicate_index = 0})
 expect_widget_status("empty", {map_count = 0, target_index = -1})

@@ -440,10 +440,11 @@ def addon_files(
         ]
     )
     description = (
-        "进程内聊天翻译：通过游戏内原生网络线程将聊天交给配置的大模型并更新本机显示，不广播译文。"
+        "进程内聊天翻译：通过游戏内原生网络线程将聊天交给配置的大模型，"
+        "非中文消息显示为原文、换行和“译文：”加译文；中文保持原样，请求失败显示简短提示，不广播译文。"
         "读取 HD2CT_API_URL、HD2CT_MODEL、HD2CT_API_KEY、"
         "HD2CT_TIMEOUT_SECONDS（默认20）和 HD2CT_ENABLED（默认1）环境变量。"
-        "内置 Bingus Shared Loader v18，无需另外导入。Arsenal 默认优先级请放在列表最底；"
+        "内置 Bingus Shared Loader v18，无需另外导入，无需运行伴随程序。Arsenal 默认优先级请放在列表最底；"
         "启用 first-mod-wins 时请放在列表最顶。"
     )
     manifest = {
