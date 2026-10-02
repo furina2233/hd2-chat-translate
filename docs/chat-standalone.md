@@ -54,7 +54,9 @@ Arsenal 的 [导入说明](https://docs.rsnl.gg/mod-management/adding-mods) 支�
 
 正常关闭游戏后，在 Arsenal 禁用或移除独立 addon 并重新部署；按需保留其他模组使用的 Shared Loader。提取的本插件 DLL 缓存可以在游戏关闭后删除，它只位于本插件专用的 `native` 目录。环境变量可以自行删除或将 `HD2CT_ENABLED` 设为 `0`。
 
-当前本机核验使用独立槽位与指纹收据部署。改由 Arsenal 管理前，先正常退出游戏并执行 `pwsh -NoProfile -File tools/deploy_probe.ps1 -Standalone -Rollback`，再导入和部署本包及 loader，避免重复部署。该脚本仅删除收据拥有且摘要匹配的六个文件。旧伴随程序版的来源包仍保留。
+本机游戏核验使用独立槽位与指纹收据部署。如仍存在这类部署，改由 Arsenal 管理前，先正常退出游戏并执行 `pwsh -NoProfile -File tools/deploy_probe.ps1 -Standalone -Rollback`，再导入和部署本包及 loader，避免重复部署。该脚本仅删除收据拥有且摘要匹配的六个文件。旧伴随程序版的来源包仍保留。
+
+2026-10-02 核验完成后，按用户要求移除了本机部署：patch 21 的聊天 addon、patch 22 的本次配套 loader，共六个文件，以及活动部署收据；另删除了摘要匹配的网络 DLL 缓存。原 Arsenal patch 0–20 的 21 个主文件摘要未变。源码、来源 ZIP、验收记录和模型环境变量均保留；游戏不会继续加载本次翻译插件，需要使用时可重新安装。
 
 ## 构建与验证
 
