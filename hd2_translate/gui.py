@@ -10,7 +10,7 @@ from tkinter import messagebox, ttk
 
 from .config import AppConfig, ConfigError, load_config, save_config
 from .service import CompanionService, ServiceAlreadyRunningError
-from .translator import TranslationError, Translator, validate_config
+from .translator import TranslationError, Translator, normalize_endpoint, validate_config
 
 
 class CompanionWindow:
@@ -87,8 +87,9 @@ class CompanionWindow:
         self.feedback_var = tk.StringVar(value=self._load_notice or "设置已载入。")
         ttk.Label(outer, textvariable=self.feedback_var, wraplength=500).grid(row=10, column=1, columnspan=2, sticky="w", pady=4)
         note = (
-            "游戏聊天接入尚未完成：本程序不会自动读取游戏聊天。聊天文本经邮箱提交后会发送到上方配置的服务商处理；"
-            "中文消息也会交由模型检测。测试连接只发送固定示例。邮箱默认位于 %LOCALAPPDATA%/HD2ChatTranslate/mailbox。"
+            "URL 支持基础地址、/v1 或完整接口；基础地址会自动补全。"
+            "测试连接只发送固定示例，不启用聊天翻译。安装游戏插件并启用后，聊天正文会发送到所选服务，"
+            "中文也由模型检测；密钥仅保存在本机。"
         )
         ttk.Label(outer, text=note, wraplength=610, justify="left").grid(
             row=11, column=0, columnspan=3, sticky="w", pady=(12, 0)
@@ -104,8 +105,11 @@ class CompanionWindow:
             timeout = float(self.timeout_var.get())
         except ValueError:
             raise ConfigError("超时必须是 1 到 120 之间的数字") from None
+        url = self.url_var.get().strip()
+        if url:
+            url = normalize_endpoint(url)
         config = AppConfig(
-            url=self.url_var.get().strip(),
+            url=url,
             model=self.model_var.get().strip(),
             api_key=api_key,
             timeout=timeout,
@@ -117,6 +121,7 @@ class CompanionWindow:
     def _apply(self, persist: bool) -> bool:
         try:
             config = self._read_form()
+            self.url_var.set(config.url)
             if persist:
                 save_config(config)
             self.translator.configure(config)

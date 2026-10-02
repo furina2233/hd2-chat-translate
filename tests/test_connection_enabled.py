@@ -10,8 +10,14 @@ from dataclasses import replace
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 
-from hd2_translate.config import AppConfig
-from hd2_translate.translator import RequestLimiter, TEST_SAMPLE, TranslationError, Translator
+from hd2_translate.config import AppConfig, ConfigError
+from hd2_translate.translator import (
+    RequestLimiter,
+    TEST_SAMPLE,
+    TranslationError,
+    Translator,
+    normalize_endpoint,
+)
 
 
 def _make_handler(state: dict[str, Any]) -> type[BaseHTTPRequestHandler]:
@@ -22,28 +28,33 @@ def _make_handler(state: dict[str, Any]) -> type[BaseHTTPRequestHandler]:
             state["requests"].append(
                 {
                     "authorization": self.headers.get("Authorization"),
+                    "path": self.path,
                     "payload": payload,
                 }
             )
             delay = float(state.get("delay", 0))
             if delay:
                 time.sleep(delay)
-            answer = {
-                "is_chinese": False,
-                "translation": f"固定示例译文{len(state['requests'])}",
-            }
-            body = json.dumps(
-                {
-                    "choices": [
-                        {
-                            "finish_reason": "stop",
-                            "message": {"content": json.dumps(answer, ensure_ascii=False)},
-                        }
-                    ]
-                },
-                ensure_ascii=False,
-            ).encode("utf-8")
-            self.send_response(200)
+            status = int(state.get("status", 200))
+            if status == 200:
+                answer = {
+                    "is_chinese": False,
+                    "translation": f"固定示例译文{len(state['requests'])}",
+                }
+                body = json.dumps(
+                    {
+                        "choices": [
+                            {
+                                "finish_reason": "stop",
+                                "message": {"content": json.dumps(answer, ensure_ascii=False)},
+                            }
+                        ]
+                    },
+                    ensure_ascii=False,
+                ).encode("utf-8")
+            else:
+                body = state.get("error_body", b"private provider error body")
+            self.send_response(status)
             self.send_header("Content-Type", "application/json; charset=utf-8")
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
@@ -57,7 +68,7 @@ def _make_handler(state: dict[str, Any]) -> type[BaseHTTPRequestHandler]:
 
 class ConnectionTestEnabledTests(unittest.TestCase):
     def setUp(self) -> None:
-        self.state: dict[str, Any] = {"requests": [], "delay": 0}
+        self.state: dict[str, Any] = {"requests": [], "delay": 0, "status": 200}
         self.server = ThreadingHTTPServer(("127.0.0.1", 0), _make_handler(self.state))
         self.server_thread = threading.Thread(target=self.server.serve_forever, daemon=True)
         self.server_thread.start()
@@ -162,6 +173,68 @@ class ConnectionTestEnabledTests(unittest.TestCase):
             translator.test_connection()
         self.assertEqual(len(self.state["requests"]), 1)
         self.assertFalse(translator.config.enabled)
+
+    def test_base_and_v1_urls_normalize_to_the_actual_local_request_path(self) -> None:
+        origin = f"http://127.0.0.1:{self.server.server_port}"
+        cases = (
+            ("", f"{origin}/chat/completions", "/chat/completions"),
+            ("/", f"{origin}/chat/completions", "/chat/completions"),
+            ("/v1", f"{origin}/v1/chat/completions", "/v1/chat/completions"),
+            ("/v1/", f"{origin}/v1/chat/completions", "/v1/chat/completions"),
+        )
+        for suffix, expected_url, expected_path in cases:
+            with self.subTest(suffix=suffix):
+                translator = Translator(
+                    self._config(url=origin + suffix),
+                    limiter=RequestLimiter(limit=10),
+                )
+                self.assertEqual(translator.config.url, expected_url)
+                translator.test_connection()
+                self.assertEqual(self.state["requests"][-1]["path"], expected_path)
+
+        configured = Translator(self._config(url=origin), limiter=RequestLimiter(limit=10))
+        configured.configure(self._config(url=origin + "/v1/"))
+        self.assertEqual(configured.config.url, f"{origin}/v1/chat/completions")
+
+    def test_complete_custom_paths_are_preserved_and_invalid_urls_are_rejected(self) -> None:
+        origin = f"http://127.0.0.1:{self.server.server_port}"
+        for path in ("/v1/chat/completions", "/custom/chat/translate"):
+            with self.subTest(path=path):
+                endpoint = origin + path
+                self.assertEqual(normalize_endpoint(endpoint), endpoint)
+                translator = Translator(self._config(url=endpoint))
+                self.assertEqual(translator.config.url, endpoint)
+
+        invalid_urls = (
+            "http://api.example.test/",
+            "https://user:secret@example.test/",
+            "https://api.example.test/?token=secret",
+            "https://api.example.test/#fragment",
+        )
+        for endpoint in invalid_urls:
+            with self.subTest(endpoint=endpoint), self.assertRaises(ConfigError):
+                normalize_endpoint(endpoint)
+
+    def test_http_status_hints_do_not_expose_key_or_provider_body(self) -> None:
+        secret = "fake-local-test-key"
+        private_body = f"private provider text containing {secret}".encode("utf-8")
+        cases = (
+            (401, "API 密钥或接口权限"),
+            (404, "请求地址或模型名称"),
+        )
+        for status, hint in cases:
+            with self.subTest(status=status):
+                self.state["status"] = status
+                self.state["error_body"] = private_body
+                translator = Translator(self._config(), limiter=RequestLimiter(limit=5))
+                with self.assertRaises(TranslationError) as caught:
+                    translator.test_connection()
+                message = str(caught.exception)
+                self.assertIn("翻译服务暂不可用", message)
+                self.assertIn(f"HTTP {status}", message)
+                self.assertIn(hint, message)
+                self.assertNotIn(secret, message)
+                self.assertNotIn(private_body.decode("utf-8"), message)
 
 
 if __name__ == "__main__":

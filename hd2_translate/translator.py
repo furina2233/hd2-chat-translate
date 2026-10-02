@@ -36,7 +36,7 @@ class TranslationError(RuntimeError):
 
 
 def validate_endpoint(url: str) -> None:
-    """验证完整 Chat Completions URL，限制明文 HTTP 到本机回环地址。"""
+    """验证 API URL，限制明文 HTTP 到本机回环地址。"""
     if (
         not isinstance(url, str)
         or not url
@@ -69,6 +69,26 @@ def validate_endpoint(url: str) -> None:
             raise ConfigError("明文 HTTP 仅允许 localhost 或本机回环地址")
 
 
+def normalize_endpoint(url: str) -> str:
+    """验证并补全服务商基础地址和 /v1 地址。"""
+    validate_endpoint(url)
+    parsed = urllib.parse.urlsplit(url)
+    path = parsed.path
+    if path in ("", "/"):
+        normalized_path = "/chat/completions"
+    elif path in ("/v1", "/v1/"):
+        normalized_path = "/v1/chat/completions"
+    else:
+        normalized_path = path
+    normalized = url
+    if normalized_path != path:
+        normalized = urllib.parse.urlunsplit(
+            (parsed.scheme, parsed.netloc, normalized_path, parsed.query, parsed.fragment)
+        )
+    validate_endpoint(normalized)
+    return normalized
+
+
 def validate_config(config: AppConfig) -> None:
     """验证设置；空 URL/model 仅在启用时不允许。"""
     if not isinstance(config, AppConfig):
@@ -94,6 +114,14 @@ def validate_config(config: AppConfig) -> None:
             raise ConfigError("启用翻译前请填写 API 密钥")
     if any(unicodedata.category(character) == "Cc" for character in config.api_key):
         raise ConfigError("API 密钥格式无效")
+
+
+def _normalize_config(config: AppConfig) -> AppConfig:
+    """验证设置并将可识别的基础地址转为完整接口地址。"""
+    validate_config(config)
+    if not config.url:
+        return config
+    return replace(config, url=normalize_endpoint(config.url))
 
 
 class RequestLimiter:
@@ -141,7 +169,7 @@ class Translator:
         limiter: RequestLimiter | None = None,
         cache_size: int = 512,
     ) -> None:
-        validate_config(config)
+        config = _normalize_config(config)
         self._config = config
         self._limiter = limiter or _GLOBAL_LIMITER
         self._cache_size = cache_size
@@ -158,7 +186,7 @@ class Translator:
             return self._config
 
     def configure(self, config: AppConfig) -> None:
-        validate_config(config)
+        config = _normalize_config(config)
         with self._lock:
             if config != self._config:
                 self._config = config
@@ -312,7 +340,21 @@ class Translator:
                 exc.close()
             except Exception:
                 pass
-            raise TranslationError("翻译服务暂不可用") from None
+            status = exc.code if type(exc.code) is int and 100 <= exc.code <= 599 else None
+            status_hints = {
+                400: "请检查模型名称或请求参数",
+                401: "请检查 API 密钥或接口权限",
+                403: "请检查 API 密钥或接口权限",
+                404: "请检查请求地址或模型名称",
+                429: "服务商限速或额度不足",
+            }
+            if status is None:
+                message = "翻译服务暂不可用"
+            elif status in status_hints:
+                message = f"翻译服务暂不可用（HTTP {status}）：{status_hints[status]}"
+            else:
+                message = f"翻译服务暂不可用（HTTP {status}）"
+            raise TranslationError(message) from None
         except (urllib.error.URLError, TimeoutError, OSError, ValueError):
             raise TranslationError("翻译服务暂不可用") from None
         if len(body) > _MAX_RESPONSE_BYTES:

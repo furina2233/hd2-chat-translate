@@ -18,9 +18,9 @@ pwsh -File .\run.ps1
 python -m hd2_translate
 ```
 
-填写完整 Chat Completions URL、模型名称、API Key 和请求超时，启用翻译后保存设置。测试连接无需启用翻译，仅发送固定示例，不读取游戏聊天或启动聊天处理。
+填写服务商基础地址或完整 Chat Completions URL、模型名称、API Key 和请求超时，启用翻译后保存设置。测试连接无需启用翻译，仅发送固定示例，不读取游戏聊天或启动聊天处理。
 
-URL 必须是完整请求地址，例如 `https://api.deepseek.com/chat/completions`，而不是仅填服务商域名。模型名称请使用服务商为账户提供的名称。服务端需支持 Chat Completions 和 JSON mode。本机服务允许使用 HTTP，例如 `http://localhost:11434/v1/chat/completions`；Ollama 的本地 API Key 可填写 `ollama`，模型名使用实际已安装的模型，参见 [Ollama 文档](https://docs.ollama.com/api/openai-compatibility)。
+基础地址 `https://api.deepseek.com/` 会自动补全为 `https://api.deepseek.com/chat/completions`，`https://服务商/v1` 会补全为 `/v1/chat/completions`；其他自定义路径请填写完整请求地址。模型名称请使用服务商为账户提供的名称。服务端需支持 Chat Completions 和 JSON mode。本机服务允许使用 HTTP，例如 `http://localhost:11434/v1/chat/completions`；Ollama 的本地 API Key 可填写 `ollama`，模型名使用实际已安装的模型，参见 [Ollama 文档](https://docs.ollama.com/api/openai-compatibility)。
 
 聊天正文会发送到填写的地址；请使用自己认可的服务商或本地模型。默认地址与模型为空、翻译关闭，不会自动调用任何服务。密钥在 Windows 上由当前用户的 DPAPI 加密，保存在 `%LOCALAPPDATA%/HD2ChatTranslate/config.json`，不会写入项目或游戏 archive。服务只处理消息正文，不提交玩家账户信息。后台最多两个请求并行，缓存最多 512 条，实际请求限额为每分钟 30 次，超限保留原文。请求 60 秒后过期，响应 5 分钟后清理。同一个邮箱只允许一个服务实例运行。
 
