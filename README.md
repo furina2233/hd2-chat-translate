@@ -18,7 +18,7 @@ pwsh -File .\run.ps1
 python -m hd2_translate
 ```
 
-填写完整 Chat Completions URL、模型名称、API Key 和请求超时，启用翻译后保存设置。测试连接仅发送固定示例，不读取游戏聊天。
+填写完整 Chat Completions URL、模型名称、API Key 和请求超时，启用翻译后保存设置。测试连接无需启用翻译，仅发送固定示例，不读取游戏聊天或启动聊天处理。
 
 URL 必须是完整请求地址，例如 `https://api.deepseek.com/chat/completions`，而不是仅填服务商域名。模型名称请使用服务商为账户提供的名称。服务端需支持 Chat Completions 和 JSON mode。本机服务允许使用 HTTP，例如 `http://localhost:11434/v1/chat/completions`；Ollama 的本地 API Key 可填写 `ollama`，模型名使用实际已安装的模型，参见 [Ollama 文档](https://docs.ollama.com/api/openai-compatibility)。
 

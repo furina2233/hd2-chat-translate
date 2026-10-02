@@ -11,7 +11,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from collections import OrderedDict, deque
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any
 
 from .config import AppConfig, ConfigError
@@ -189,8 +189,10 @@ class Translator:
         with self._lock:
             config = self._config
             generation = self._generation
-            if not config.enabled or not config.api_key:
-                raise TranslationError("未配置 API 密钥或翻译服务未启用")
+            if not config.enabled:
+                raise TranslationError("翻译服务未启用")
+            if not isinstance(config.api_key, str) or not config.api_key.strip():
+                raise TranslationError("请填写 API 密钥")
             if use_cache:
                 cached = self._cache.get(source)
                 if cached is not None:
@@ -255,7 +257,28 @@ class Translator:
 
     def test_connection(self) -> str:
         """发送固定示例；调用方应在线程池或后台线程中运行。"""
-        result = self.translate(TEST_SAMPLE, use_cache=False)
+        with self._lock:
+            config = self._config
+            generation = self._generation
+        result = ""
+        failure_message: str | None = None
+        try:
+            # 连接测试使用独立客户端，避免改变正式服务的启用状态、缓存和失败退避。
+            test_config = replace(config, enabled=True)
+            validate_config(test_config)
+            test_translator = Translator(test_config, limiter=self._limiter)
+            result = test_translator.translate(TEST_SAMPLE, use_cache=False)
+        except ConfigError as exc:
+            failure_message = str(exc)
+        except TranslationError as exc:
+            failure_message = str(exc)
+        except Exception:
+            failure_message = "翻译服务暂不可用"
+        with self._lock:
+            if generation != self._generation or config != self._config:
+                raise TranslationError("翻译服务配置已更改") from None
+        if failure_message is not None:
+            raise TranslationError(failure_message) from None
         if not result.strip():
             raise TranslationError("测试请求没有获得有效翻译")
         return result

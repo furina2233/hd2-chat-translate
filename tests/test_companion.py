@@ -218,7 +218,7 @@ class CompanionTests(unittest.TestCase):
         self.assertEqual(translator.translate("Hello"), "新译文")
         self.assertEqual(self.state["count"], 2)
         translator.configure(replace(translator.config, enabled=False))
-        with self.assertRaisesRegex(TranslationError, "未配置"):
+        with self.assertRaisesRegex(TranslationError, "翻译服务未启用"):
             translator.translate("Hello")
 
     def test_old_generation_result_is_not_cached(self) -> None:
@@ -280,7 +280,7 @@ class CompanionTests(unittest.TestCase):
                 (mailbox / "no_key.req").write_text("Original chat", encoding="utf-8")
                 response = mailbox / "no_key.res"
                 self.assertTrue(self._wait_for_file(response))
-                self.assertEqual(response.read_text(encoding="utf-8"), "ERR\n未配置 API 密钥或翻译服务未启用")
+                self.assertEqual(response.read_text(encoding="utf-8"), "ERR\n翻译服务未启用")
                 self.assertEqual(self.state["count"], 0)
 
                 (mailbox / "crashed.processing").write_text("Already submitted", encoding="utf-8")
