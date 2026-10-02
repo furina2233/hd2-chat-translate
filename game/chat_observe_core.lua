@@ -24,6 +24,23 @@ local TEST_CJK = "HD2CT_PROBE_中文_02"
 local WIDGET_SLOT_COUNT = 64
 local WIDGET_MAX_ATTEMPTS = 128
 local WIDGET_MAX_MATCHES = 64
+local DISPLAY_TEST_STATUSES = {
+    disabled = true,
+    target_unverified = true,
+    waiting = true,
+    deferred = true,
+    stale = true,
+    read_failed = true,
+    called_confirmed = true,
+    called_unconfirmed = true,
+}
+local DISPLAY_TEST_CALL_STATUSES = {
+    deferred = true,
+    stale = true,
+    read_failed = true,
+    called_confirmed = true,
+    called_unconfirmed = true,
+}
 
 local WIDGET_STATUS_LIST = {
     "deferred",
@@ -536,6 +553,38 @@ end
 local function process_widget_probe(state)
     local widget = state.widget_probe
     if state.active_cycle or not (state.seen_ascii or state.seen_cjk) then return end
+
+    local display = state.display_test
+    if display.pending then
+        local pending = display.pending
+        local ok, status, property_confirmed = safe_call(
+            state, "replace_ascii_widget", pending.widget_slot, pending.event_slot, pending.owner_anon_id)
+        if not ok then
+            display.pending = nil
+            display.status = "read_failed"
+            stop_observer(state, "display_setter_error")
+            return
+        end
+        if type(status) ~= "string" or not DISPLAY_TEST_CALL_STATUSES[status] then
+            status = "read_failed"
+            property_confirmed = false
+        end
+        if status == "called_confirmed" and property_confirmed ~= true then
+            status = "called_unconfirmed"
+        end
+        if status == "deferred" then
+            display.status = "deferred"
+            return
+        end
+        display.pending = nil
+        display.status = status
+        if status == "called_confirmed" or status == "called_unconfirmed" then
+            display.attempts = 1
+            display.property_confirmed = status == "called_confirmed" and property_confirmed == true
+        end
+        return
+    end
+
     if type(state.adapter.read_widget_slot) ~= "function" then
         widget.status = "disabled"
         return
@@ -589,8 +638,39 @@ local function process_widget_probe(state)
         else
             widget.matches_dropped = add_saturated(widget.matches_dropped, 1)
         end
+        if display.enabled and display.target_verified and display.status == "waiting"
+            and status == "ascii" then
+            display.pending = {
+                widget_slot = slot,
+                event_slot = match.event_slot,
+                owner_anon_id = match.owner_anon_id,
+            }
+            process_widget_probe(state)
+            return
+        end
     end
     widget.status = widget.attempts >= WIDGET_MAX_ATTEMPTS and "complete" or "searching"
+end
+
+local function new_display_test(adapter, options)
+    local enabled = type(options) == "table" and options.display_test == true
+    local target_verified = enabled and options.target_verified == true
+    local status = "disabled"
+    if enabled then
+        status = target_verified and "waiting" or "target_unverified"
+        if target_verified and (type(adapter.read_widget_slot) ~= "function"
+            or type(adapter.replace_ascii_widget) ~= "function") then
+            status = "read_failed"
+        end
+    end
+    return {
+        enabled = enabled,
+        target_verified = target_verified,
+        status = status,
+        attempts = 0,
+        property_confirmed = false,
+        pending = nil,
+    }
 end
 
 local function process_command(state, now_ms)
@@ -605,7 +685,7 @@ local function process_command(state, now_ms)
     return true
 end
 
-function M.new(adapter)
+function M.new(adapter, options)
     assert(type(adapter) == "table", "adapter required")
     for _, name in ipairs({
         "begin_cycle", "read_slot", "finish_cycle", "ui_snapshot", "take_command", "now_ms", "output",
@@ -634,6 +714,7 @@ function M.new(adapter)
         ui_diagnostics = new_array(),
         ui_diagnostics_dropped = 0,
         widget_probe = new_widget_probe(adapter),
+        display_test = new_display_test(adapter, options),
         snapshot_count = 0,
         snapshot_attempts = 0,
         last_manifest = nil,
@@ -761,6 +842,11 @@ function M.manifest(state)
         ui_diagnostics = state.ui_diagnostics,
         ui_diagnostics_dropped = state.ui_diagnostics_dropped,
         widget_probe = widget_probe_manifest(state.widget_probe),
+        display_test = {
+            status = DISPLAY_TEST_STATUSES[state.display_test.status] and state.display_test.status or "read_failed",
+            attempts = state.display_test.attempts == 1 and 1 or 0,
+            property_confirmed = state.display_test.property_confirmed == true,
+        },
     }
 end
 

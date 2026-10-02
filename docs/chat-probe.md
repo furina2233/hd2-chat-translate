@@ -247,3 +247,32 @@ pwsh -NoProfile -File tools/deploy_probe.ps1 -ObserveWidget -Rollback
 最终回归全部 38 项通过、零跳过（10.485 秒）；新增两个持久化测试在私有 LuaJIT 的 fake-kernel 与 pure core 中验证真实生产片段，覆盖 14/15 项边界、精确指针、活动环槽、根/元数据/属性/正文漂移、缺 NUL、预算 defer、每步一个槽、128 上限、64 条匹配上限及输出净化。未读取真实游戏或请求文件。PowerShell 语法、compileall 与空白检查通过。
 
 验收期间检测到游戏已退出，确认进程为零后按既有诊断部署授权继续：回滚偏移修正版的六个文件，安装控件定位版至 `patch_21`、加载器至 `patch_22`。六文件摘要全部通过，原有 21 个主 patch 摘要全部不变；真实目录重复部署与回滚预演通过。**当前安装控件定位观察器，回滚模式为 `-ObserveWidget -Rollback`。** 新版控件槽匹配尚待游戏内验证；它没有连接大模型或调用文本 setter。
+
+### 控件定位的真实结果
+
+2026-10-02 用户重启并发送固定 ASCII 消息后，观察器完成 128 次槽尝试：两次命中均为 widget slot 0、event slot 0、同一根匿名 ID 6，其余 126 次为空，其他状态计数均为零。历史正文读取、双读、UTF-8 与 adapter 错误也均为零。留存 `artifacts/observer-widget-runtime/matched-slots.json` SHA-256 为 `70198c64c78ec935db76079c5fb0f213cc31da398e1e85957f0a77bb7e45cb3b`。固定消息的控件正文属性确实指向活动事件正文；该结果尚不证明原生更新与中文显示。
+
+### 固定中文显示试验
+
+用户选择先验证固定中文译文，暂不配置大模型。新增独立 `--display-test` 模式：只对精确的 `HD2CT_PROBE_ASCII_01`，在同一游戏 update 中重新核对属性与活动事件，然后调用聊天原路径的正文 setter，尝试将这一条的本机显示改为 `聊天翻译测试成功`。最多调用一次；普通探针与 `--observe` 模式仍关闭 setter。
+
+此模式会调用游戏函数，不能当作只读观察器。没有网络、模型、邮箱或广播操作，也不改其他聊天正文。调用前要求现有构建门禁、六处签名与 setter 入口字节全部通过；根/属性/事件/正文变化时拒绝调用。固定 UTF-8 缓冲区含 NUL，通过专用 `_G` 表保持存活，Lua 重载最多保留 16 个，达到上限拒绝新增；正常一次试验只保留一个。
+
+观察报告增加 `display_test`：`status` 是固定枚举，`attempts` 为 0/1，`property_confirmed` 是布尔值。`called_confirmed` 只表示调用后属性指针精确指向保活缓冲区，目标 key 唯一，除 setter 正常更新的目标类型/hash/指针外表内容一致；最终聊天行显示必须由用户观察确认。`called_unconfirmed` 不重试，也不能据此认定画面失败。此模式尚未解决异步请求期间环形槽复用的问题。
+
+独立包 `artifacts/HD2ChatDisplayTest.zip` 为 26,473 字节，SHA-256 为 `d9e246e13817a9550cd5fca069c7403fe5c6f3ae8e18409d384e7627e5d07c7e`；主 patch 为 124,560 字节，SHA-256 为 `dd93815f019eab3dce8f670d47743d382f6c24c0ed6fdd73247a6f3aca63c58d`。ZIP CRC、包内源码和封装精确比对通过。部署脚本新增互斥的固定来源 `-DisplayTest`，隔离目录部署预演与混用模式拒绝通过；准备期间保留当前控件定位包与收据。
+
+```pwsh
+python tools/build_chat_probe.py --display-test
+# 正常退出游戏后，按原收据移除控件定位版，再部署显示测试。
+pwsh -NoProfile -File tools/deploy_probe.ps1 -ObserveWidget -Rollback
+pwsh -NoProfile -File tools/deploy_probe.ps1 -DisplayTest
+# 显示测试的移除命令。
+pwsh -NoProfile -File tools/deploy_probe.ps1 -DisplayTest -Rollback
+```
+
+加载新版并完成扫描后，在聊天框发送 `HD2CT_PROBE_ASCII_01`，观察该条是否显示为 `聊天翻译测试成功`。无需在输入框直接输入中文，无需 API Key；本试验不等于完整自动翻译插件。
+
+本轮全部 47 项测试通过、零跳过（11.973 秒）；新增三项显示回归覆盖 gate、候选前缀、固定消息、deferred、消息漂移、保活/GC、UTF-8/NUL、属性正常字段变化与异常漂移、模式互斥和包来源保护。PowerShell 语法、compileall、空白检查通过。隔离目录实际安装、幂等与回滚通过，原基线不变。检测到真实游戏关闭后，回滚控件定位版并安装显示版至 `patch_21`、加载器至 `patch_22`；六文件摘要通过，原有 21 个 patch 主文件全部不变，重复部署与回滚预演通过。**当前安装固定显示测试版，移除模式为 `-DisplayTest -Rollback`。**
+
+2026-10-02 用户实际发送后确认该条显示为“聊天翻译测试成功”。运行报告 `display_test.status=called_confirmed`、`attempts=1`、`property_confirmed=true`，adapter 和正文校验错误为零；留存 `artifacts/display-test-runtime/confirmed.json` SHA-256 为 `5bb1efa6e2d98c885f716c09ad4de17aed7b8c3aa06cf4446368d17777658784`。替换后唯一一次 `pointer_outside` 是再次扫描发现属性已指向专用保活缓冲区，符合此模式的预期。原聊天行刷新及中文显示已经验证；普通聊天和异步模型回写仍未接入。

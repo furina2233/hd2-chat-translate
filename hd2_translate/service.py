@@ -20,6 +20,26 @@ REQUEST_TTL_SECONDS = 60
 RESPONSE_TTL_SECONDS = 300
 _TOKEN_PATTERN = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
 _MAX_SOURCE_BYTES = 8_192
+_BRIDGE_FLAG_NAME = "bridge.flag"
+_MAX_BRIDGE_FLAG_BYTES = 64
+_UPTIME_API_LOCK = threading.Lock()
+_UPTIME_KERNEL32 = None
+_UPTIME_GET_TICK_COUNT_64 = None
+
+
+def _uptime_ms() -> int:
+    """返回与游戏端同一 Windows 启动周期内的单调毫秒数。"""
+    global _UPTIME_KERNEL32, _UPTIME_GET_TICK_COUNT_64
+    if os.name == "nt":
+        if _UPTIME_GET_TICK_COUNT_64 is None:
+            with _UPTIME_API_LOCK:
+                if _UPTIME_GET_TICK_COUNT_64 is None:
+                    _UPTIME_KERNEL32 = ctypes.WinDLL("kernel32", use_last_error=True)
+                    _UPTIME_GET_TICK_COUNT_64 = _UPTIME_KERNEL32.GetTickCount64
+                    _UPTIME_GET_TICK_COUNT_64.argtypes = []
+                    _UPTIME_GET_TICK_COUNT_64.restype = ctypes.c_ulonglong
+        return int(_UPTIME_GET_TICK_COUNT_64())
+    return int(time.monotonic() * 1000)
 
 
 class CompanionService:
@@ -50,6 +70,10 @@ class CompanionService:
         self._restart_pending = False
         self._processed = 0
         self._failed = 0
+        self._configured_enabled = bool(config.enabled)
+        self._bridge_flag_path = self.mailbox / _BRIDGE_FLAG_NAME
+        self._bridge_flag_content: bytes | None = None
+        self._bridge_flag_event: threading.Event | None = None
 
     @property
     def running(self) -> bool:
@@ -71,6 +95,10 @@ class CompanionService:
 
     def configure(self, config: AppConfig) -> None:
         self.translator.configure(config)
+        with self._lock:
+            self._configured_enabled = bool(config.enabled)
+            if not self._configured_enabled and self._stop_event is not None:
+                self._remove_bridge_flag_locked(self._stop_event)
 
     def start(self) -> None:
         with self._lock:
@@ -152,6 +180,7 @@ class CompanionService:
             if self._stop_event is not None:
                 stopped_event = self._stop_event
                 stopped_event.set()
+                self._remove_bridge_flag_locked(stopped_event)
                 previous_threads = [
                     thread
                     for thread in [self._poll_thread, *self._workers]
@@ -178,11 +207,78 @@ class CompanionService:
     def _poller(self, stop_event: threading.Event) -> None:
         while not stop_event.is_set():
             try:
+                self._maintain_bridge_flag(stop_event)
+            except OSError:
+                # 临时文件系统错误在后续轮询中恢复，不显示底层路径或内容。
+                pass
+            try:
                 self._scan_mailbox(stop_event)
             except OSError:
                 # 临时文件系统错误在后续轮询中恢复，不显示底层路径或内容。
                 pass
             stop_event.wait(self.poll_interval)
+
+    def _translator_enabled_locked(self) -> bool:
+        """优先读取实时 Translator 配置；兼容没有 config 属性的测试替身。"""
+        try:
+            translator_config = self.translator.config
+        except AttributeError:
+            return self._configured_enabled
+        except Exception:
+            return False
+        return bool(getattr(translator_config, "enabled", False))
+
+    def _maintain_bridge_flag(self, stop_event: threading.Event) -> None:
+        """只在当前服务代际持有邮箱锁时发布启用心跳。"""
+        with self._lock:
+            if (
+                self._stop_event is not stop_event
+                or stop_event.is_set()
+                or self._mailbox_lock is None
+            ):
+                return
+            if not self._translator_enabled_locked():
+                self._remove_bridge_flag_locked(stop_event)
+                return
+
+            content = f"HD2CT1 {_uptime_ms()}\n".encode("ascii")
+            if len(content) > _MAX_BRIDGE_FLAG_BYTES:
+                return
+            temporary = self.mailbox / f".bridge.flag.{uuid.uuid4().hex}.tmp"
+            try:
+                temporary.write_bytes(content)
+                # 再次确认服务代际，避免停止后把临时文件发布成有效心跳。
+                if (
+                    self._stop_event is not stop_event
+                    or stop_event.is_set()
+                    or self._mailbox_lock is None
+                    or not self._translator_enabled_locked()
+                ):
+                    return
+                os.replace(temporary, self._bridge_flag_path)
+                self._bridge_flag_content = content
+                self._bridge_flag_event = stop_event
+            finally:
+                temporary.unlink(missing_ok=True)
+
+    def _remove_bridge_flag_locked(self, expected_event: threading.Event) -> None:
+        """只删除本实例、指定服务代际最近发布的心跳。调用方须持有 _lock。"""
+        if (
+            self._mailbox_lock is None
+            or self._bridge_flag_event is not expected_event
+            or self._bridge_flag_content is None
+        ):
+            return
+        try:
+            with self._bridge_flag_path.open("rb") as stream:
+                current = stream.read(_MAX_BRIDGE_FLAG_BYTES + 1)
+            if current == self._bridge_flag_content:
+                self._bridge_flag_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+        finally:
+            self._bridge_flag_content = None
+            self._bridge_flag_event = None
 
     def _scan_mailbox(self, stop_event: threading.Event) -> None:
         now = time.time()

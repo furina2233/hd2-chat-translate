@@ -1,9 +1,10 @@
--- HD2 只读模块扫描研究探针；此文件由构建脚本嵌入纯 Lua 扫描核心。
+-- HD2聊天研究模块：包含代码扫描、只读观察与受限固定中文显示测试模式。
 local core = (function()
 --[[HD2_CHAT_PROBE_CORE]]
 end)()
 
 local OBSERVE_ENABLED = false --[[HD2_CHAT_OBSERVER_ENABLED]]
+local DISPLAY_TEST_ENABLED = false --[[HD2_CHAT_DISPLAY_TEST_ENABLED]]
 local observer_core = (function()
 --[[HD2_CHAT_OBSERVER_CORE]]
 end)()
@@ -278,6 +279,12 @@ local function initialize_probe()
     end
 
     local observer_read_budget = 0
+    local observer_display_native_gate = false
+    local DISPLAY_TARGET_RVA = 0x1441CA0
+    local DISPLAY_TARGET_PREFIX = "40534883ec20488bd94881c110010000e8fb84ffff"
+    local DISPLAY_TEST_TEXT = "聊天翻译测试成功"
+    local DISPLAY_PIN_TABLE = "__HD2_CHAT_DISPLAY_TEST_PINS_V1"
+    local DISPLAY_MAX_PINS = 16
     local observer_now = 0
     local observer_next_command_poll = 0
     local observer_faulted = false
@@ -655,6 +662,7 @@ local function initialize_probe()
 
         local matching_count = 0
         local value_pointer
+        local matching_index
         for index = 0, count - 1 do
             local entry_offset = index * 0x18
             local key = observer_u32(entries_bytes, entry_offset)
@@ -663,6 +671,7 @@ local function initialize_probe()
                 matching_count = matching_count + 1
                 if matching_count == 1 then
                     value_pointer = observer_u64(entries_bytes, entry_offset + 8)
+                    matching_index = index
                 end
             end
         end
@@ -729,6 +738,16 @@ local function initialize_probe()
             return "ascii", {
                 event_slot = event_slot,
                 owner_anon_id = observer_anon_id(context.root),
+            }, {
+                context = context,
+                widget = widget,
+                map = map,
+                count_address = count_address,
+                count_bytes = count_bytes,
+                entries_address = entries_address,
+                entries_bytes = entries_bytes,
+                key_index = matching_index,
+                event_slot = event_slot,
             }
         end
         if body == OBSERVER_WIDGET_CJK then
@@ -738,6 +757,106 @@ local function initialize_probe()
             }
         end
         return "no_match"
+    end
+
+    local function observer_display_setter(widget_argument, buffer)
+        if not DISPLAY_TEST_ENABLED or not observer_display_native_gate then return false end
+        local target = ffi.cast(
+            "void (*)(void *, HD2Probe_U32, const char *)",
+            ffi.cast("size_t", module_base) + DISPLAY_TARGET_RVA
+        )
+        target(
+            ffi.cast("void *", widget_argument),
+            OBSERVER_WIDGET_KEY,
+            ffi.cast("const char *", buffer)
+        )
+        return true
+    end
+
+    local function observer_display_pin_buffer()
+        local pins = rawget(_G, DISPLAY_PIN_TABLE)
+        if pins == nil then
+            pins = {}
+            rawset(_G, DISPLAY_PIN_TABLE, pins)
+        end
+        if type(pins) ~= "table" then return nil end
+        local pin_count = #pins
+        if pin_count < 0 or pin_count >= DISPLAY_MAX_PINS then return nil end
+
+        local buffer = ffi.new("HD2Probe_U8[?]", #DISPLAY_TEST_TEXT + 1)
+        for index = 1, #DISPLAY_TEST_TEXT do
+            buffer[index - 1] = DISPLAY_TEST_TEXT:byte(index)
+        end
+        -- FFI 数组初始为零，末字节保留为 C 字符串终止符。
+        pins[pin_count + 1] = buffer
+        return buffer
+    end
+
+    local function observer_display_verify_property(proof, buffer)
+        local stable = observer_widget_verify_context(proof.context)
+        if not stable then return false end
+        local count_bytes = observer_read(proof.count_address, 1)
+        if not count_bytes or count_bytes ~= proof.count_bytes then return false end
+        local entries_bytes = observer_read(proof.entries_address, #proof.entries_bytes)
+        if not entries_bytes or #entries_bytes ~= #proof.entries_bytes then return false end
+
+        local pointer_address = tonumber(ffi.cast("size_t", ffi.cast("void *", buffer)))
+        if not pointer_address then return false end
+        local matching_count = 0
+        local matching_index
+        for index = 0, count_bytes:byte(1) - 1 do
+            local entry_offset = index * 0x18
+            local key = observer_u32(entries_bytes, entry_offset)
+            if key == nil then return false end
+            local entry_start = entry_offset + 1
+            local entry_end = entry_offset + 0x18
+            if key == OBSERVER_WIDGET_KEY then
+                matching_count = matching_count + 1
+                matching_index = index
+                if observer_u32(entries_bytes, entry_offset + 4) ~= 1
+                    or observer_u64(entries_bytes, entry_offset + 8) ~= pointer_address then
+                    return false
+                end
+                if entries_bytes:sub(entry_start, entry_start + 3)
+                    ~= proof.entries_bytes:sub(entry_start, entry_start + 3)
+                    or entries_bytes:sub(entry_start + 20, entry_end)
+                    ~= proof.entries_bytes:sub(entry_start + 20, entry_end) then
+                    return false
+                end
+            elseif entries_bytes:sub(entry_start, entry_end)
+                ~= proof.entries_bytes:sub(entry_start, entry_end) then
+                return false
+            end
+        end
+        if matching_count ~= 1 or matching_index ~= proof.key_index then return false end
+        return true
+    end
+
+    local function observer_display_replace_ascii_widget(slot, event_slot, owner_anon_id)
+        if not DISPLAY_TEST_ENABLED or not observer_display_native_gate then return "target_unverified", false end
+        if observer_read_budget > MAX_OBSERVER_READ - 4096 then return "deferred", false end
+
+        local status, sample, proof = observer_widget_read_widget_slot(slot)
+        if status == "deferred" then return "deferred", false end
+        if status == "read_failed" then return "read_failed", false end
+        if status ~= "ascii" or type(sample) ~= "table" or type(proof) ~= "table"
+            or sample.event_slot ~= event_slot or sample.owner_anon_id ~= owner_anon_id
+            or proof.event_slot ~= event_slot then
+            return "stale", false
+        end
+
+        local widget_argument = observer_add(proof.widget, 0x110)
+        if not widget_argument then return "read_failed", false end
+        local buffer = observer_display_pin_buffer()
+        if not buffer then return "read_failed", false end
+
+        if not observer_display_setter(widget_argument, buffer) then
+            return "target_unverified", false
+        end
+        if observer_display_verify_property(proof, buffer) then
+            return "called_confirmed", true
+        end
+        return "called_unconfirmed", false
     end
 
     local function observer_finish_cycle()
@@ -966,12 +1085,12 @@ local function initialize_probe()
         local function protect(callback)
             return function(...)
                 if observer_faulted then return nil end
-                local ok, first, second = pcall(callback, ...)
+                local ok, first, second, third = pcall(callback, ...)
                 if not ok then
                     observer_faulted = true
                     error("observer adapter failure")
                 end
-                return first, second
+                return first, second, third
             end
         end
         adapter.now_ms = protect(function()
@@ -984,6 +1103,7 @@ local function initialize_probe()
         adapter.begin_cycle = protect(observer_begin_cycle)
         adapter.read_slot = protect(observer_read_slot)
         adapter.read_widget_slot = protect(observer_widget_read_widget_slot)
+        adapter.replace_ascii_widget = protect(observer_display_replace_ascii_widget)
         adapter.finish_cycle = protect(observer_finish_cycle)
         adapter.ui_snapshot = protect(observer_ui_snapshot)
         adapter.take_command = protect(observer_take_command)
@@ -1031,13 +1151,37 @@ local function initialize_probe()
         return true
     end
 
-    local function start_observer()
+    local function display_target_verified(manifest)
+        if not signatures_verified(manifest) or type(manifest.candidates) ~= "table" then return false end
+        for _, candidate in ipairs(manifest.candidates) do
+            if type(candidate) == "table" and candidate.rva == DISPLAY_TARGET_RVA
+                and type(candidate.window_rva) == "number"
+                and candidate.window_rva == math.floor(candidate.window_rva)
+                and type(candidate.byte_length) == "number"
+                and candidate.byte_length == math.floor(candidate.byte_length)
+                and type(candidate.bytes_hex) == "string"
+                and candidate.window_rva <= DISPLAY_TARGET_RVA then
+                local offset = DISPLAY_TARGET_RVA - candidate.window_rva
+                if offset >= 0 and offset + 21 <= candidate.byte_length
+                    and #candidate.bytes_hex == candidate.byte_length * 2 then
+                    local prefix = candidate.bytes_hex:sub(offset * 2 + 1, offset * 2 + 42):lower()
+                    if prefix == DISPLAY_TARGET_PREFIX then return true end
+                end
+            end
+        end
+        return false
+    end
+
+    local function start_observer(target_verified)
         local adapter_ok, observer_adapter = pcall(make_observer_adapter)
         if not adapter_ok then
             observer_log_stopped()
             return false
         end
-        local state_ok, created_state = pcall(observer_core.new, observer_adapter)
+        local state_ok, created_state = pcall(observer_core.new, observer_adapter, {
+            display_test = DISPLAY_TEST_ENABLED,
+            target_verified = target_verified == true,
+        })
         if not state_ok or type(created_state) ~= "table" then
             observer_log_stopped()
             return false
@@ -1066,12 +1210,14 @@ local function initialize_probe()
             end
 
             if not OBSERVE_ENABLED or not signatures_verified(manifest) then return true end
+            local target_verified = not DISPLAY_TEST_ENABLED or display_target_verified(manifest)
+            observer_display_native_gate = DISPLAY_TEST_ENABLED and target_verified
             if not observer_core or type(observer_core.new) ~= "function"
                 or type(observer_core.step) ~= "function" or type(observer_core.manifest) ~= "function" then
                 observer_log_stopped()
                 return true
             end
-            if not start_observer() then return true end
+            if not start_observer(target_verified) then return true end
         end
 
         if not observer_state then return true end
@@ -1087,7 +1233,26 @@ end
 local original_update = _G.update
 local setup_ok, probe_step = pcall(initialize_probe)
 if setup_ok then
-    _G.update = core.wrap_update(original_update, probe_step)
+    if DISPLAY_TEST_ENABLED then
+        local function pack_results(...)
+            return {n = select("#", ...), ...}
+        end
+        local unpack_results = unpack or table.unpack
+        local finished = false
+        _G.update = function(...)
+            local results
+            if type(original_update) == "function" then
+                results = pack_results(original_update(...))
+            end
+            if not finished then
+                local ok, done = pcall(probe_step)
+                if not ok or done == true then finished = true end
+            end
+            if results then return unpack_results(results, 1, results.n) end
+        end
+    else
+        _G.update = core.wrap_update(original_update, probe_step)
+    end
 else
     pcall(print, "[HD2 Chat Probe] initialization failed; research scan did not start")
 end

@@ -8,13 +8,14 @@ param(
     [switch]$ObserveFix,
     [switch]$ObserveDiag,
     [switch]$ObserveOffset,
-    [switch]$ObserveWidget
+    [switch]$ObserveWidget,
+    [switch]$DisplayTest
 )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
-if (@(@($Followup, $Observe, $ObserveFix, $ObserveDiag, $ObserveOffset, $ObserveWidget) | Where-Object { $_.IsPresent }).Count -gt 1) {
-    throw "Followup、Observe、ObserveFix、ObserveDiag、ObserveOffset 与 ObserveWidget 只能指定一个。"
+if (@(@($Followup, $Observe, $ObserveFix, $ObserveDiag, $ObserveOffset, $ObserveWidget, $DisplayTest) | Where-Object { $_.IsPresent }).Count -gt 1) {
+    throw "Followup、Observe、ObserveFix、ObserveDiag、ObserveOffset、ObserveWidget 与 DisplayTest 只能指定一个。"
 }
 
 $script:ProjectRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot ".."))
@@ -59,6 +60,12 @@ if ($ObserveWidget) {
     $script:ExpectedProbeZipSha256 = "a488ed3ec7030a27eb9bf765606bb9474c82df25bbe3f5455664b3787ca04410"
     $script:ProbeZipName = "HD2ChatObserveWidget.zip"
     $script:ExpectedProbePatchLength = 113776L
+}
+# 固定中文显示测试会调用原生 setter；独立来源保留只读版的回滚能力。
+if ($DisplayTest) {
+    $script:ExpectedProbeZipSha256 = "d9e246e13817a9550cd5fca069c7403fe5c6f3ae8e18409d384e7627e5d07c7e"
+    $script:ProbeZipName = "HD2ChatDisplayTest.zip"
+    $script:ExpectedProbePatchLength = 124560L
 }
 $script:LoaderResourceId = [Convert]::ToUInt64("7251fdd9bb62480a", 16)
 $script:ProbeResourceId = [Convert]::ToUInt64("c509c11199f753c2", 16)
