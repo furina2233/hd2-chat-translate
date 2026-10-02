@@ -1,4 +1,4 @@
-"""构建 HD2 聊天代码研究、只读观察或固定中文显示测试的 Bingus addon ZIP。"""
+"""构建 HD2 聊天代码研究、只读观察、固定显示测试或翻译桥接的 Bingus addon ZIP。"""
 
 # 格式依据公开实现核对：https://github.com/CowboyBingus/BingusSharedLoader/tree/main/scripts
 
@@ -21,10 +21,13 @@ CORE_MARKER = b"--[[HD2_CHAT_PROBE_CORE]]"
 OBSERVE_MARKER = b"--[[HD2_CHAT_OBSERVER_CORE]]"
 OBSERVE_FLAG = b"local OBSERVE_ENABLED = false --[[HD2_CHAT_OBSERVER_ENABLED]]"
 DISPLAY_TEST_FLAG = b"local DISPLAY_TEST_ENABLED = false --[[HD2_CHAT_DISPLAY_TEST_ENABLED]]"
+TRANSLATE_MARKER = b"--[[HD2_CHAT_TRANSLATE_CORE]]"
+TRANSLATE_FLAG = b"local TRANSLATE_ENABLED = false --[[HD2_CHAT_TRANSLATE_ENABLED]]"
 MAX_SOURCE_BYTES = 512 * 1024
 DEFAULT_OUTPUT = ROOT / "artifacts" / "HD2ChatProbe.zip"
 OBSERVE_OUTPUT = ROOT / "artifacts" / "HD2ChatObserve.zip"
 DISPLAY_TEST_OUTPUT = ROOT / "artifacts" / "HD2ChatDisplayTest.zip"
+TRANSLATE_OUTPUT = ROOT / "artifacts" / "HD2ChatTranslate.zip"
 DEPLOYMENT_RECEIPT = ROOT / ".local" / "chat-probe-deployment.json"
 
 
@@ -87,8 +90,17 @@ def entry_source(
     core_source: bytes,
     observer_source: bytes | None = None,
     display_test: bool = False,
+    *,
+    translate_source: bytes | None = None,
+    translate: bool = False,
 ) -> bytes:
-    sources = (source, core_source) if observer_source is None else (source, core_source, observer_source)
+    if display_test and translate:
+        raise ValueError("固定显示测试与翻译模式不能同时启用")
+    sources = [source, core_source]
+    if observer_source is not None:
+        sources.append(observer_source)
+    if translate_source is not None:
+        sources.append(translate_source)
     if any(len(item) > MAX_SOURCE_BYTES for item in sources):
         raise ValueError("Lua 源文件超过构建大小上限")
     if source.startswith((b"\xef\xbb\xbf", b"\x1b")) or b"\0" in source:
@@ -101,6 +113,10 @@ def entry_source(
         if observer_source.startswith((b"\xef\xbb\xbf", b"\x1b")) or b"\0" in observer_source:
             raise ValueError("观察核心必须是无 BOM、无字节码标记的 UTF-8 Lua 文本")
         observer_source.decode("utf-8")
+    if translate_source is not None:
+        if translate_source.startswith((b"\xef\xbb\xbf", b"\x1b")) or b"\0" in translate_source:
+            raise ValueError("翻译核心必须是无 BOM、无字节码标记的 UTF-8 Lua 文本")
+        translate_source.decode("utf-8")
     if source.count(CORE_MARKER) != 1:
         raise ValueError("入口必须恰好包含一个扫描核心嵌入标记")
     embedded = source.replace(CORE_MARKER, core_source.rstrip() + b"\n", 1)
@@ -113,8 +129,16 @@ def entry_source(
         raise ValueError("固定显示测试模式必须嵌入观察核心")
     if display_flag_count > 1:
         raise ValueError("入口包含多个固定显示测试标记")
+    translate_marker_count = source.count(TRANSLATE_MARKER)
+    translate_flag_count = source.count(TRANSLATE_FLAG)
+    if translate_marker_count > 1 or translate_flag_count > 1:
+        raise ValueError("入口包含多个翻译核心或开关标记")
+    if translate and (translate_marker_count != 1 or translate_flag_count != 1):
+        raise ValueError("翻译模式要求入口恰好包含一个核心标记和默认关闭标记")
+    if translate and (translate_source is None or observer_source is None):
+        raise ValueError("翻译模式必须嵌入翻译核心和只读适配器")
     embedded = embedded.replace(OBSERVE_MARKER, (observer_source or b"return nil").rstrip() + b"\n", 1)
-    if observer_source is not None:
+    if observer_source is not None and not translate:
         embedded = embedded.replace(OBSERVE_FLAG, OBSERVE_FLAG.replace(b"= false", b"= true"), 1)
     if display_test:
         embedded = embedded.replace(
@@ -122,6 +146,14 @@ def entry_source(
             DISPLAY_TEST_FLAG.replace(b"= false", b"= true"),
             1,
         )
+    if translate_marker_count == 1:
+        embedded = embedded.replace(
+            TRANSLATE_MARKER,
+            (translate_source if translate else b"return nil").rstrip() + b"\n",
+            1,
+        )
+    if translate:
+        embedded = embedded.replace(TRANSLATE_FLAG, TRANSLATE_FLAG.replace(b"= false", b"= true"), 1)
     if embedded.startswith(b"-- HD2-Addon:"):
         _, separator, embedded = embedded.partition(b"\n")
         if not separator:
@@ -134,7 +166,14 @@ def entry_source(
     return declaration + embedded
 
 
-def addon_files(entry: bytes, observe: bool = False, display_test: bool = False) -> dict[str, bytes]:
+def addon_files(
+    entry: bytes,
+    observe: bool = False,
+    display_test: bool = False,
+    translate: bool = False,
+) -> dict[str, bytes]:
+    if sum((bool(observe), bool(display_test), bool(translate))) > 1:
+        raise ValueError("观察、固定显示测试与翻译模式互斥")
     resource = struct.pack("<II", len(entry), 2) + entry
     archive = make_single_resource_archive(resource_hash(RESOURCE_NAME), resource)
     description = (
@@ -151,14 +190,27 @@ def addon_files(entry: bytes, observe: bool = False, display_test: bool = False)
             "只读聊天观察器：校验指定构建后读取有界历史和 UI 元数据，只报告固定测试消息是否出现。"
             "不保存普通聊天，不调用游戏函数、不写游戏内存、不连接大模型。需要 Bingus Shared Loader v15+ / API 1。"
         )
+    elif translate:
+        description = (
+            "本机聊天翻译桥接：将当前本机游戏会话中符合条件的聊天正文通过固定本地 mailbox 交给本机服务，"
+            "再尝试更新本机显示；插件本身不联网、不广播译文。需要 Bingus Shared Loader v15+ / API 1。"
+        )
     manifest = {
         "Version": 1,
         "Guid": str(uuid.UUID(ADDON_GUID)),
-        "Name": "HD2 Chat Display Test" if display_test else "HD2 Chat Probe Research Tool",
+        "Name": (
+            "HD2 Chat Translate" if translate else
+            "HD2 Chat Display Test" if display_test else
+            "HD2 Chat Probe Research Tool"
+        ),
         "Description": description,
         "Options": [
             {
-                "Name": "HD2 Chat Display Test" if display_test else "HD2 Chat Probe Research Tool",
+                "Name": (
+                    "HD2 Chat Translate" if translate else
+                    "HD2 Chat Display Test" if display_test else
+                    "HD2 Chat Probe Research Tool"
+                ),
                 "Description": description,
                 "Include": ["Addon"],
             }
@@ -186,7 +238,7 @@ def _protect_deployed_source(output_path: Path) -> None:
 
     is_default = any(
         _same_path(output_path, item)
-        for item in (DEFAULT_OUTPUT, OBSERVE_OUTPUT, DISPLAY_TEST_OUTPUT)
+        for item in (DEFAULT_OUTPUT, OBSERVE_OUTPUT, DISPLAY_TEST_OUTPUT, TRANSLATE_OUTPUT)
     )
     try:
         receipt = json.loads(DEPLOYMENT_RECEIPT.read_text(encoding="utf-8"))
@@ -238,28 +290,36 @@ def build_artifact(
     output: Path | str | None = None,
     observe: bool = False,
     display_test: bool = False,
+    translate: bool = False,
 ) -> Path:
-    if observe and display_test:
-        raise ValueError("--observe 与 --display-test 不能同时使用")
+    if sum((bool(observe), bool(display_test), bool(translate))) > 1:
+        raise ValueError("--observe、--display-test 与 --translate 不能同时使用")
     entry_path = ROOT / "game" / "chat_probe.lua"
     core_path = ROOT / "game" / "chat_probe_core.lua"
     observer_path = ROOT / "game" / "chat_observe_core.lua"
+    translate_path = ROOT / "game" / "chat_translate_core.lua"
     if output is not None:
         output_path = Path(output)
     elif display_test:
         output_path = DISPLAY_TEST_OUTPUT
+    elif translate:
+        output_path = TRANSLATE_OUTPUT
     else:
         output_path = OBSERVE_OUTPUT if observe else DEFAULT_OUTPUT
     _protect_deployed_source(output_path)
-    if output_path.resolve() in (entry_path.resolve(), core_path.resolve(), observer_path.resolve()):
+    if output_path.resolve() in (
+        entry_path.resolve(), core_path.resolve(), observer_path.resolve(), translate_path.resolve()
+    ):
         raise ValueError("输出不能覆盖 Lua 源文件")
     packaged_entry = entry_source(
         entry_path.read_bytes(),
         core_path.read_bytes(),
-        observer_path.read_bytes() if (observe or display_test) else None,
+        observer_path.read_bytes() if (observe or display_test or translate) else None,
         display_test=display_test,
+        translate_source=translate_path.read_bytes() if translate else None,
+        translate=translate,
     )
-    files = addon_files(packaged_entry, observe, display_test)
+    files = addon_files(packaged_entry, observe, display_test, translate)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     with zipfile.ZipFile(output_path, "w", compression=zipfile.ZIP_DEFLATED) as package:
         for name, content in sorted(files.items()):
@@ -280,12 +340,17 @@ def main() -> None:
         action="store_true",
         help="构建固定中文显示测试 ZIP，默认输出 artifacts/HD2ChatDisplayTest.zip",
     )
+    mode.add_argument(
+        "--translate",
+        action="store_true",
+        help="构建本机翻译桥接 ZIP，默认输出 artifacts/HD2ChatTranslate.zip",
+    )
     args = parser.parse_args()
     try:
-        result = build_artifact(args.output, args.observe, args.display_test)
+        result = build_artifact(args.output, args.observe, args.display_test, args.translate)
     except (OSError, ValueError) as error:
         parser.error(str(error))
-    print(f"已构建HD2 Chat Probe addon：{result}")
+    print(f"已构建HD2聊天插件ZIP：{result}")
 
 
 if __name__ == "__main__":

@@ -1,12 +1,16 @@
--- HD2聊天研究模块：包含代码扫描、只读观察与受限固定中文显示测试模式。
+-- HD2聊天研究模块：包含代码扫描、只读观察、固定显示测试与本机翻译桥接模式。
 local core = (function()
 --[[HD2_CHAT_PROBE_CORE]]
 end)()
 
 local OBSERVE_ENABLED = false --[[HD2_CHAT_OBSERVER_ENABLED]]
 local DISPLAY_TEST_ENABLED = false --[[HD2_CHAT_DISPLAY_TEST_ENABLED]]
+local TRANSLATE_ENABLED = false --[[HD2_CHAT_TRANSLATE_ENABLED]]
 local observer_core = (function()
 --[[HD2_CHAT_OBSERVER_CORE]]
+end)()
+local translate_core = (function()
+--[[HD2_CHAT_TRANSLATE_CORE]]
 end)()
 
 local function initialize_probe()
@@ -285,6 +289,12 @@ local function initialize_probe()
     local DISPLAY_TEST_TEXT = "聊天翻译测试成功"
     local DISPLAY_PIN_TABLE = "__HD2_CHAT_DISPLAY_TEST_PINS_V1"
     local DISPLAY_MAX_PINS = 16
+    local TRANSLATE_PIN_TABLE = "__HD2_CHAT_TRANSLATE_PINS_V1"
+    local TRANSLATE_MAX_PINS = 512
+    local TRANSLATE_MAX_PIN_BYTES = 8 * 1024 * 1024
+    local TRANSLATE_MAX_REQUEST_BYTES = 1023
+    local TRANSLATE_MAX_RESPONSE_BYTES = 16387
+    local TRANSLATE_MAX_REPORT_BYTES = 64 * 1024
     local observer_now = 0
     local observer_next_command_poll = 0
     local observer_faulted = false
@@ -300,6 +310,16 @@ local function initialize_probe()
     local observer_directory
     local observer_directory_length
     local observer_request_path
+    local translate_mailbox_directory
+    local translate_mailbox_directory_length
+    local translate_heartbeat_path
+    local translate_report_path
+    local translate_session_id
+    local translate_heartbeat_next_poll = 0
+    local translate_cached_heartbeat
+    local translate_heartbeat_fresh = false
+    local translate_owned_tokens = {}
+    local translate_file_sequence = 0
 
     local MAX_OBSERVER_ADDRESS = 0x7fffffffffff
     local MAX_OBSERVER_READ = 16 * 1024
@@ -612,7 +632,7 @@ local function initialize_probe()
         return true
     end
 
-    local function observer_widget_read_widget_slot(slot)
+    local function observer_widget_read_widget_slot(slot, allow_body)
         if type(slot) ~= "number" or slot ~= math.floor(slot) or slot < 0 or slot >= 64 then
             return "read_failed"
         end
@@ -678,7 +698,10 @@ local function initialize_probe()
 
         local result_status
         local event_slot
-        if matching_count > 1 then
+        if allow_body and matching_count == 1
+            and observer_u32(entries_bytes, matching_index * 0x18 + 4) ~= 1 then
+            result_status = "property_type_mismatch"
+        elseif matching_count > 1 then
             result_status = "ambiguous_key"
         elseif matching_count == 0 then
             result_status = "key_missing"
@@ -734,6 +757,32 @@ local function initialize_probe()
         local terminator = body_bytes:find("\0", 1, true)
         if not terminator then return "missing_terminator" end
         local body = body_bytes:sub(1, terminator - 1)
+        if allow_body then
+            local owner_id = observer_anon_id(context.root)
+            if not owner_id then return "read_failed" end
+            return "ok", {
+                widget_slot = slot,
+                event_slot = event_slot,
+                owner_id = owner_id,
+                body = body,
+                proof = {
+                    context = context,
+                    widget = widget,
+                    map = map,
+                    count_address = count_address,
+                    count_bytes = count_bytes,
+                    entries_address = entries_address,
+                    entries_bytes = entries_bytes,
+                    key_index = matching_index,
+                    event_slot = event_slot,
+                    event_address = event_address,
+                    event_bytes = event_bytes,
+                    body_address = body_address,
+                    body_bytes = body_bytes,
+                    body = body,
+                },
+            }
+        end
         if body == OBSERVER_WIDGET_ASCII then
             return "ascii", {
                 event_slot = event_slot,
@@ -859,6 +908,343 @@ local function initialize_probe()
         return "called_unconfirmed", false
     end
 
+    local function observer_translate_prepare_paths()
+        prepare_observer_paths()
+        local parent, parent_length = append_wide_ascii(
+            observer_local_app, observer_local_app_length, "\\HD2ChatTranslate")
+        local mailbox, mailbox_length = append_wide_ascii(
+            observer_local_app, observer_local_app_length, "\\HD2ChatTranslate\\mailbox")
+        if not parent or not mailbox then error("translation mailbox path unavailable") end
+        kernel.CreateDirectoryW(parent, nil)
+        kernel.CreateDirectoryW(mailbox, nil)
+        translate_mailbox_directory = mailbox
+        translate_mailbox_directory_length = mailbox_length
+        translate_heartbeat_path = append_wide_ascii(mailbox, mailbox_length, "\\bridge.flag")
+        if not translate_heartbeat_path then error("translation heartbeat path unavailable") end
+
+        translate_session_id = string.format("hd2ct_%d_%08x", observer_session_time, observer_session_nonce)
+        if #translate_session_id > 80 or translate_session_id:find("[^A-Za-z0-9_%-]") then
+            error("translation session unavailable")
+        end
+        translate_report_path = append_wide_ascii(
+            mailbox, mailbox_length, "\\chat-translate-" .. translate_session_id .. ".json")
+        if not translate_report_path then error("translation report path unavailable") end
+    end
+
+    local function observer_translate_path(suffix)
+        return append_wide_ascii(translate_mailbox_directory, translate_mailbox_directory_length, suffix)
+    end
+
+    local function observer_translate_read_file(path, maximum)
+        local file = kernel.CreateFileW(path, 0x80000000, 0x7, nil, 3, 0x80, nil)
+        if file == nil or file == invalid_handle then return nil end
+        local buffer = ffi.new("HD2Probe_U8[?]", maximum)
+        local bytes_read = ffi.new("HD2Probe_U32[1]")
+        local read_ok = kernel.ReadFile(file, buffer, maximum, bytes_read, nil)
+        local close_ok = kernel.CloseHandle(file) ~= 0
+        if read_ok == 0 or not close_ok then return nil end
+        local length = tonumber(bytes_read[0])
+        if not length or length > maximum then return nil end
+        return ffi.string(buffer, length)
+    end
+
+    local function observer_translate_heartbeat_is_fresh(raw)
+        translate_heartbeat_fresh = false
+        if type(raw) ~= "string" or #raw == 0 or #raw > 64 then return false end
+        local digits = raw:match("^HD2CT1 ([0-9]+)\n$")
+        if not digits then return false end
+        local started = tonumber(digits)
+        if not started or started ~= math.floor(started) or started > observer_now then return false end
+        translate_heartbeat_fresh = observer_now - started <= 3000
+        return translate_heartbeat_fresh
+    end
+
+    local function observer_translate_heartbeat(force)
+        if not force and observer_now < translate_heartbeat_next_poll then
+            observer_translate_heartbeat_is_fresh(translate_cached_heartbeat)
+            return translate_cached_heartbeat
+        end
+        translate_cached_heartbeat = observer_translate_read_file(translate_heartbeat_path, 65)
+        -- 用读取完成后的同一单调时钟检查时间戳，避免发布中的新心跳被旧时刻误判。
+        local read_completed_ms = tonumber(kernel.GetTickCount64())
+        if not read_completed_ms or read_completed_ms < 0
+            or read_completed_ms ~= math.floor(read_completed_ms)
+            or read_completed_ms < observer_now then
+            error("translation clock failure")
+        end
+        observer_now = read_completed_ms
+        translate_heartbeat_next_poll = observer_now + 250
+        if translate_cached_heartbeat and #translate_cached_heartbeat > 64 then
+            translate_cached_heartbeat = nil
+        end
+        observer_translate_heartbeat_is_fresh(translate_cached_heartbeat)
+        return translate_cached_heartbeat
+    end
+
+    local function observer_translate_refresh_for_setter()
+        local now_ms = tonumber(kernel.GetTickCount64())
+        if not now_ms or now_ms < 0 or now_ms ~= math.floor(now_ms)
+            or now_ms < observer_now then
+            return false
+        end
+        observer_now = now_ms
+        observer_translate_heartbeat(true)
+        return translate_heartbeat_fresh
+    end
+
+    local function observer_translate_valid_token(token)
+        if type(token) ~= "string" or #token < 3 or #token > 128 or not translate_session_id then
+            return false
+        end
+        local prefix = translate_session_id .. "_"
+        if token:sub(1, #prefix) ~= prefix then return false end
+        local counter = token:sub(#prefix + 1)
+        if counter == "" or counter:find("[^0-9]") then return false end
+        local numeric = tonumber(counter)
+        return numeric ~= nil and numeric > 0 and numeric == math.floor(numeric)
+            and numeric <= 9007199254740991 and string.format("%.0f", numeric) == counter
+    end
+
+    local function observer_translate_publish_request(token, body)
+        if not TRANSLATE_ENABLED or not translate_heartbeat_fresh
+            or not observer_translate_valid_token(token)
+            or type(body) ~= "string" or #body == 0 or #body > TRANSLATE_MAX_REQUEST_BYTES
+            or not translate_core or type(translate_core.valid_text) ~= "function"
+            or not translate_core.valid_text(body, TRANSLATE_MAX_REQUEST_BYTES)
+            or translate_owned_tokens[token] then
+            return false
+        end
+        local final_path = observer_translate_path("\\" .. token .. ".req")
+        if not final_path then return false end
+
+        for attempt = 1, 16 do
+            translate_file_sequence = translate_file_sequence + 1
+            local temporary_path = observer_translate_path(string.format(
+                "\\.%s.req.%08x.%02d.tmp", token, translate_file_sequence, attempt))
+            if not temporary_path then return false end
+            local file = kernel.CreateFileW(temporary_path, 0x40000000, 0, nil, 1, 0x80, nil)
+            if file ~= nil and file ~= invalid_handle then
+                local bytes_written = ffi.new("HD2Probe_U32[1]")
+                local write_ok = kernel.WriteFile(
+                    file, ffi.cast("const char *", body), #body, bytes_written, nil)
+                local flush_ok = write_ok ~= 0 and tonumber(bytes_written[0]) == #body
+                    and kernel.FlushFileBuffers(file) ~= 0
+                local close_ok = kernel.CloseHandle(file) ~= 0
+                if flush_ok and close_ok and kernel.MoveFileExW(temporary_path, final_path, 0x8) ~= 0 then
+                    translate_owned_tokens[token] = true
+                    return true
+                end
+                kernel.DeleteFileW(temporary_path)
+                return false
+            end
+        end
+        return false
+    end
+
+    local function observer_translate_read_response(token)
+        if not translate_owned_tokens[token] or not observer_translate_valid_token(token) then return nil end
+        local path = observer_translate_path("\\" .. token .. ".res")
+        if not path then return nil end
+        local raw = observer_translate_read_file(path, TRANSLATE_MAX_RESPONSE_BYTES + 1)
+        if not raw then return nil end
+        if #raw > TRANSLATE_MAX_RESPONSE_BYTES then return "" end
+        return raw
+    end
+
+    local function observer_translate_cancel(token)
+        if not translate_owned_tokens[token] or not observer_translate_valid_token(token) then return false end
+        local request_path = observer_translate_path("\\" .. token .. ".req")
+        local response_path = observer_translate_path("\\" .. token .. ".res")
+        if request_path then kernel.DeleteFileW(request_path) end
+        if response_path then kernel.DeleteFileW(response_path) end
+        translate_owned_tokens[token] = nil
+        return true
+    end
+
+    local function observer_translate_pin_text(text)
+        if type(text) ~= "string" or #text == 0 or #text > 16384
+            or not translate_core or type(translate_core.valid_text) ~= "function"
+            or not translate_core.valid_text(text, 16384) then
+            return nil, "read_failed"
+        end
+        local registry = rawget(_G, TRANSLATE_PIN_TABLE)
+        if registry == nil then
+            registry = {buffers = {}, bytes = 0}
+            rawset(_G, TRANSLATE_PIN_TABLE, registry)
+        end
+        if type(registry) ~= "table" or type(registry.buffers) ~= "table"
+            or type(registry.bytes) ~= "number" or registry.bytes < 0
+            or registry.bytes ~= math.floor(registry.bytes) then
+            return nil, "capacity"
+        end
+        local pin_count = #registry.buffers
+        local byte_count = #text + 1
+        if pin_count >= TRANSLATE_MAX_PINS
+            or registry.bytes > TRANSLATE_MAX_PIN_BYTES - byte_count then
+            return nil, "capacity"
+        end
+
+        local buffer = ffi.new("HD2Probe_U8[?]", byte_count)
+        for index = 1, #text do buffer[index - 1] = text:byte(index) end
+        -- 数组的最后一字节由FFI零初始化，登记后始终保留本次译文指针。
+        registry.buffers[pin_count + 1] = buffer
+        registry.bytes = registry.bytes + byte_count
+        return buffer
+    end
+
+    local function observer_translate_verify_apply(proof, buffer)
+        local context = proof.context
+        local root_before = observer_read_pointer(context.root_global)
+        if root_before ~= context.root then return false end
+        local metadata_before = observer_read(context.metadata_address, 8)
+        if not metadata_before then return false end
+        local next_index = observer_u32(metadata_before, 0)
+        local active_count = observer_u32(metadata_before, 4)
+        if next_index == nil or next_index >= 64 or active_count == nil or active_count > 64
+            or (next_index - 1 - proof.event_slot) % 64 >= active_count then
+            return false
+        end
+
+        local record = observer_add(context.ring, proof.event_slot * 0x4B4)
+        local event_address = record and observer_add(record, 0)
+        local body_address = record and observer_add(record, 0xB4)
+        if not record or not event_address or not body_address then return false end
+        local event_before = observer_read(event_address, 4)
+        local body_before = observer_read(body_address, 1024)
+        if not event_before or observer_u32(event_before, 0) ~= OBSERVER_WIDGET_EVENT
+            or not body_before or body_before ~= proof.body_bytes then
+            return false
+        end
+        local terminator = body_before:find("\0", 1, true)
+        if not terminator or body_before:sub(1, terminator - 1) ~= proof.body then return false end
+
+        local count_before = observer_read(proof.count_address, 1)
+        if not count_before or count_before ~= proof.count_bytes then return false end
+        local entries_before = observer_read(proof.entries_address, #proof.entries_bytes)
+        if not entries_before or #entries_before ~= #proof.entries_bytes then return false end
+
+        local root_after = observer_read_pointer(context.root_global)
+        local metadata_after = observer_read(context.metadata_address, 8)
+        local event_after = observer_read(event_address, 4)
+        local body_after = observer_read(body_address, 1024)
+        if root_after ~= root_before or metadata_after ~= metadata_before
+            or event_after ~= event_before or body_after ~= body_before then
+            return false
+        end
+        local count_after = observer_read(proof.count_address, 1)
+        local entries_after = observer_read(proof.entries_address, #proof.entries_bytes)
+        if not count_after or count_after ~= count_before
+            or not entries_after or entries_after ~= entries_before then
+            return false
+        end
+
+        local pointer_address = tonumber(ffi.cast("size_t", ffi.cast("void *", buffer)))
+        if not pointer_address then return false end
+        local matching_count = 0
+        local matching_index
+        local entry_count = count_after:byte(1)
+        if not entry_count or entry_count == 0 or entry_count > 14
+            or #entries_after ~= entry_count * 0x18 then
+            return false
+        end
+        for index = 0, entry_count - 1 do
+            local entry_offset = index * 0x18
+            local key = observer_u32(entries_after, entry_offset)
+            if key == nil then return false end
+            local entry_start = entry_offset + 1
+            local entry_end = entry_offset + 0x18
+            if key == OBSERVER_WIDGET_KEY then
+                matching_count = matching_count + 1
+                matching_index = index
+                if observer_u32(entries_after, entry_offset + 4) ~= 1
+                    or observer_u64(entries_after, entry_offset + 8) ~= pointer_address
+                    or entries_after:sub(entry_start, entry_start + 3)
+                        ~= proof.entries_bytes:sub(entry_start, entry_start + 3)
+                    or entries_after:sub(entry_start + 20, entry_end)
+                        ~= proof.entries_bytes:sub(entry_start + 20, entry_end) then
+                    return false
+                end
+            elseif entries_after:sub(entry_start, entry_end)
+                ~= proof.entries_bytes:sub(entry_start, entry_end) then
+                return false
+            end
+        end
+        return matching_count == 1 and matching_index == proof.key_index
+    end
+
+    local function observer_translate_setter(widget_argument, buffer)
+        if not TRANSLATE_ENABLED or not observer_display_native_gate then return false end
+        local target = ffi.cast(
+            "void (*)(void *, HD2Probe_U32, const char *)",
+            ffi.cast("size_t", module_base) + DISPLAY_TARGET_RVA
+        )
+        target(
+            ffi.cast("void *", widget_argument),
+            OBSERVER_WIDGET_KEY,
+            ffi.cast("const char *", buffer)
+        )
+        return true
+    end
+
+    local function observer_translate_read_slot(slot)
+        if not TRANSLATE_ENABLED or not observer_translate_heartbeat_is_fresh(translate_cached_heartbeat) then
+            return "stale"
+        end
+        local status, message = observer_widget_read_widget_slot(slot, true)
+        if status == "deferred" then return "deferred" end
+        if status == "unstable" then return "stale" end
+        if status == "read_failed" or status == "count_out_of_range" then return "read_failed" end
+        if status ~= "ok" or type(message) ~= "table" then return "empty" end
+        if type(message.body) ~= "string" or #message.body == 0
+            or #message.body > TRANSLATE_MAX_REQUEST_BYTES
+            or not translate_core or type(translate_core.valid_text) ~= "function"
+            or not translate_core.valid_text(message.body, TRANSLATE_MAX_REQUEST_BYTES) then
+            return "empty"
+        end
+        return "ok", message
+    end
+
+    local function observer_translate_apply(message, text)
+        if not TRANSLATE_ENABLED or not observer_display_native_gate then return "disabled" end
+        if observer_read_budget > MAX_OBSERVER_READ - 4096 then return "deferred" end
+        observer_translate_heartbeat(true)
+        if not translate_heartbeat_fresh then return "stale" end
+        if type(message) ~= "table" or type(message.proof) ~= "table"
+            or type(message.proof.context) ~= "table"
+            or type(message.body) ~= "string" or #message.body == 0
+            or not translate_core or type(translate_core.valid_text) ~= "function"
+            or not translate_core.valid_text(message.body, TRANSLATE_MAX_REQUEST_BYTES)
+            or type(text) ~= "string" or not translate_core.valid_text(text, 16384) then
+            return "read_failed"
+        end
+        if text == message.body then return "stale" end
+
+        local status, current = observer_widget_read_widget_slot(message.widget_slot, true)
+        if status == "deferred" then return "deferred" end
+        if status == "read_failed" or status == "count_out_of_range" then return "read_failed" end
+        if status ~= "ok" or type(current) ~= "table" or type(current.proof) ~= "table"
+            or current.widget_slot ~= message.widget_slot
+            or current.event_slot ~= message.event_slot
+            or current.owner_id ~= message.owner_id
+            or current.body ~= message.body
+            or current.proof.context.root ~= message.proof.context.root
+            or current.proof.widget ~= message.proof.widget
+            or current.proof.map ~= message.proof.map
+            or current.proof.key_index ~= message.proof.key_index then
+            return "stale"
+        end
+
+        local buffer, pin_status = observer_translate_pin_text(text)
+        if not buffer then return pin_status == "capacity" and "capacity" or "read_failed" end
+        local widget_argument = observer_add(current.proof.widget, 0x110)
+        if not widget_argument then return "read_failed" end
+        -- 原生调用前刷新单调时钟和固定心跳，失效时绝不进入游戏函数。
+        if not observer_translate_refresh_for_setter() then return "disabled" end
+        if not observer_translate_setter(widget_argument, buffer) then return "disabled" end
+        if observer_translate_verify_apply(current.proof, buffer) then return "called_confirmed" end
+        return "called_unconfirmed"
+    end
+
     local function observer_finish_cycle()
         local cycle = observer_active_cycle
         if not observer_same_cycle(cycle) then return nil end
@@ -906,6 +1292,103 @@ local function initialize_probe()
         if kernel.MoveFileExW(temporary_path, final_path, 0x1 + 0x8) == 0 then
             kernel.DeleteFileW(temporary_path)
             error("observer report replace failed")
+        end
+        return true
+    end
+
+    local TRANSLATE_REPORT_STATUSES = {
+        target_unverified = true,
+        inactive = true,
+        baseline = true,
+        ready = true,
+        pending = true,
+        applying = true,
+        stopped = true,
+    }
+    local TRANSLATE_REPORT_CODES = {
+        target_unverified = true,
+        invalid_session = true,
+        adapter_missing = true,
+        clock_error = true,
+        invalid_clock = true,
+        clock_reversed = true,
+        heartbeat_inactive = true,
+        heartbeat_error = true,
+        heartbeat_invalid = true,
+        heartbeat_stale = true,
+        token_exhausted = true,
+    }
+    local TRANSLATE_REPORT_COUNTERS = {
+        "steps", "active_steps", "heartbeat_checks", "heartbeat_misses", "heartbeat_errors",
+        "heartbeat_invalid", "heartbeat_stale", "slot_reads", "slot_empty", "slot_stale",
+        "slot_read_failed", "slot_deferred", "invalid_messages", "duplicates", "pending_observations",
+        "queue_full", "submit_throttled", "submit_attempts", "submit_failures", "submitted", "cancelled",
+        "cancel_errors", "responses_waiting", "response_errors", "response_invalid", "translation_errors",
+        "translation_unchanged", "translations_ready", "expired", "apply_attempts", "apply_confirmed",
+        "apply_unconfirmed", "apply_stale", "apply_deferred", "apply_capacity", "apply_read_failed",
+        "apply_disabled", "apply_errors", "adapter_errors", "output_errors",
+    }
+
+    local function observer_translate_safe_count(value, maximum)
+        return type(value) == "number" and value == value and value ~= math.huge and value ~= -math.huge
+            and value >= 0 and value == math.floor(value) and value <= maximum
+    end
+
+    local function observer_translate_sanitize_report(manifest)
+        local value = type(manifest) == "table" and manifest or {}
+        local status = TRANSLATE_REPORT_STATUSES[value.status] and value.status or "stopped"
+        local code = TRANSLATE_REPORT_CODES[value.code] and value.code or nil
+        local counters = {}
+        local raw_counters = type(value.counters) == "table" and value.counters or {}
+        for _, name in ipairs(TRANSLATE_REPORT_COUNTERS) do
+            local count = raw_counters[name]
+            counters[name] = observer_translate_safe_count(count, 9007199254740991) and count or 0
+        end
+        return {
+            schema_version = 1,
+            status = status,
+            code = code,
+            done = value.done == true,
+            heartbeat_active = value.heartbeat_active == true,
+            baseline_remaining = observer_translate_safe_count(value.baseline_remaining, 64)
+                and value.baseline_remaining or 0,
+            pending_count = observer_translate_safe_count(value.pending_count, 32) and value.pending_count or 0,
+            counters = counters,
+        }
+    end
+
+    local function observer_translate_write_report(manifest)
+        local sanitized = observer_translate_sanitize_report(manifest)
+        local encoded = core.encode_json(sanitized)
+        if type(encoded) ~= "string" or #encoded > TRANSLATE_MAX_REPORT_BYTES then
+            error("translation report limit")
+        end
+        local bytes = ffi.new("HD2Probe_U8[?]", math.max(#encoded, 1))
+        if #encoded > 0 then ffi.copy(bytes, encoded, #encoded) end
+        local written = ffi.new("HD2Probe_U32[1]")
+        local file, temporary_path
+        for attempt = 1, 16 do
+            translate_file_sequence = translate_file_sequence + 1
+            temporary_path = observer_translate_path(string.format(
+                "\\.chat-translate-%s-%08x-%02d.tmp", translate_session_id,
+                translate_file_sequence, attempt))
+            if not temporary_path then error("translation temporary path unavailable") end
+            file = kernel.CreateFileW(temporary_path, 0x40000000, 0, nil, 1, 0x80, nil)
+            if file ~= nil and file ~= invalid_handle then break end
+            file = nil
+        end
+        if not file then error("translation temporary file unavailable") end
+        local write_ok = kernel.WriteFile(file, bytes, #encoded, written, nil) ~= 0
+            and tonumber(written[0]) == #encoded
+        local flush_ok = write_ok and kernel.FlushFileBuffers(file) ~= 0
+        local close_ok = kernel.CloseHandle(file) ~= 0
+        if not write_ok or not flush_ok or not close_ok then
+            kernel.DeleteFileW(temporary_path)
+            error("translation report write failed")
+        end
+        if kernel.MoveFileExW(temporary_path, translate_report_path, 0x1 + 0x8) == 0 then
+            kernel.DeleteFileW(temporary_path)
+            error("translation report replace failed")
         end
         return true
     end
@@ -1111,6 +1594,38 @@ local function initialize_probe()
         return adapter
     end
 
+    local function make_translate_adapter()
+        observer_translate_prepare_paths()
+        local adapter = {}
+        local function protect(callback)
+            return function(...)
+                if observer_faulted then return nil end
+                local ok, first, second, third = pcall(callback, ...)
+                if not ok then
+                    observer_faulted = true
+                    error("translation adapter failure")
+                end
+                return first, second, third
+            end
+        end
+        adapter.now_ms = protect(function()
+            observer_now = tonumber(kernel.GetTickCount64())
+            if not observer_now or observer_now < 0 or observer_now ~= math.floor(observer_now) then
+                error("translation clock failure")
+            end
+            return observer_now
+        end)
+        -- 核心每次显式轮询时都重新读取固定心跳文件，避免缓存掩盖停用状态。
+        adapter.heartbeat = protect(function() return observer_translate_heartbeat(true) end)
+        adapter.read_slot = protect(observer_translate_read_slot)
+        adapter.submit = protect(observer_translate_publish_request)
+        adapter.response = protect(observer_translate_read_response)
+        adapter.apply = protect(observer_translate_apply)
+        adapter.cancel = protect(observer_translate_cancel)
+        adapter.output = protect(observer_translate_write_report)
+        return adapter
+    end
+
     local adapter = {
         hash_file = hash_module_file,
         query = query,
@@ -1122,6 +1637,7 @@ local function initialize_probe()
     local code_manifest_written = false
     local code_scan_done = false
     local observer_state = nil
+    local translate_state = nil
 
     local function observer_log_stopped()
         pcall(print, "[HD2 Chat Probe] observer stopped after a sanitized failure")
@@ -1190,6 +1706,42 @@ local function initialize_probe()
         return true
     end
 
+    local function start_translation(target_verified)
+        local adapter_ok, translate_adapter = pcall(make_translate_adapter)
+        if not adapter_ok then
+            observer_log_stopped()
+            return false
+        end
+        local state_ok, created_state = pcall(translate_core.new, translate_adapter, {
+            target_verified = target_verified == true,
+            session_id = translate_session_id,
+        })
+        if not state_ok or type(created_state) ~= "table" then
+            observer_log_stopped()
+            return false
+        end
+        translate_state = created_state
+        return true
+    end
+
+    local function observer_finish_translation_with_error(_reason)
+        if translate_state and translate_core and type(translate_core.manifest) == "function" then
+            local manifest_ok, manifest = pcall(translate_core.manifest, translate_state)
+            if manifest_ok and type(manifest) == "table" then
+                manifest.status = "stopped"
+                manifest.done = true
+                manifest.code = nil
+                local output_ok = pcall(observer_translate_write_report, manifest)
+                if not output_ok then observer_log_stopped() end
+            else
+                observer_log_stopped()
+            end
+        else
+            observer_log_stopped()
+        end
+        return true
+    end
+
     local function one_probe_step()
         if not code_scan_done then
             local step_ok, done, manifest = pcall(core.step, state, core.BUDGET_PER_STEP)
@@ -1209,17 +1761,36 @@ local function initialize_probe()
                 if not output_ok then pcall(print, "[HD2 Chat Probe] failed to write research manifest") end
             end
 
-            if not OBSERVE_ENABLED or not signatures_verified(manifest) then return true end
-            local target_verified = not DISPLAY_TEST_ENABLED or display_target_verified(manifest)
-            observer_display_native_gate = DISPLAY_TEST_ENABLED and target_verified
-            if not observer_core or type(observer_core.new) ~= "function"
-                or type(observer_core.step) ~= "function" or type(observer_core.manifest) ~= "function" then
-                observer_log_stopped()
+            if TRANSLATE_ENABLED then
+                local target_verified = display_target_verified(manifest)
+                observer_display_native_gate = target_verified
+                if not translate_core or type(translate_core.new) ~= "function"
+                    or type(translate_core.step) ~= "function" or type(translate_core.manifest) ~= "function" then
+                    observer_log_stopped()
+                    return true
+                end
+                if not start_translation(target_verified) then return true end
+            elseif OBSERVE_ENABLED and signatures_verified(manifest) then
+                local target_verified = not DISPLAY_TEST_ENABLED or display_target_verified(manifest)
+                observer_display_native_gate = DISPLAY_TEST_ENABLED and target_verified
+                if not observer_core or type(observer_core.new) ~= "function"
+                    or type(observer_core.step) ~= "function" or type(observer_core.manifest) ~= "function" then
+                    observer_log_stopped()
+                    return true
+                end
+                if not start_observer(target_verified) then return true end
+            else
                 return true
             end
-            if not start_observer(target_verified) then return true end
         end
 
+        if translate_state then
+            observer_read_budget = 0
+            local step_ok, done = pcall(translate_core.step, translate_state)
+            if not step_ok then return observer_finish_translation_with_error("internal_error") end
+            if observer_faulted then return observer_finish_translation_with_error("adapter_error") end
+            return done == true
+        end
         if not observer_state then return true end
         observer_read_budget = 0
         local step_ok, done = pcall(observer_core.step, observer_state)
@@ -1233,7 +1804,7 @@ end
 local original_update = _G.update
 local setup_ok, probe_step = pcall(initialize_probe)
 if setup_ok then
-    if DISPLAY_TEST_ENABLED then
+    if DISPLAY_TEST_ENABLED or TRANSLATE_ENABLED then
         local function pack_results(...)
             return {n = select("#", ...), ...}
         end

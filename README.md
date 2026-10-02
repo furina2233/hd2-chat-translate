@@ -1,59 +1,58 @@
 # HD2 Chat Translate
 
-绝地潜兵 2 聊天翻译项目。目标是在本机接收队友消息后，交大模型判断语言，并将非中文消息的显示文字替换为简体中文。
+绝地潜兵 2 本机聊天翻译插件。新聊天正文交给用户配置的大模型检测语言；中文保留原文，其他语言翻译为简体中文，并替换对应的本机聊天行。译文不会发送给其他玩家。
 
-**当前状态：翻译伴随程序与配置窗口已完成，固定中文原位替换已在真实游戏验证；异步大模型聊天接入尚未完成。此项目目前不能作为已完成的自动翻译插件安装。** 在公开的 Blender HD2SDK 和 HD2Runtime 接口中未找到聊天替换 API；六轮运行态采集已确认环形记录、正文容量、发送调用链及正文控件属性路径。固定显示试验已将英文测试消息替换为“聊天翻译测试成功”，原生属性读回和用户画面确认一致。正文属性保留字符串指针，替换需要维持缓冲区并复核消息生命周期。普通聊天捕获、邮箱请求与异步译文回写正在接入。具体来源见 [文档核对记录](docs/research.md)。
+**当前状态：配置窗口、伴随服务和异步游戏桥接已实现。真实游戏已确认固定中文原位显示，用户配置的模型已通过固定示例连接测试；完整游戏到模型的翻译仍待本机联调。** 游戏接口来自实际代码采集和控件读回，适配目前核验的构建，详情见 [运行与兼容性说明](docs/chat-translate.md)。
 
-## 启动伴随程序
+## 配置与启动
 
-需要 Windows 和 Python 3.10 或更新版本，程序仅使用 Python 标准库。
+需要 Windows 和 Python 3.10 或更新版本，伴随程序仅使用 Python 标准库。在项目目录运行：
 
 ```pwsh
 pwsh -File .\run.ps1
 ```
 
-也可以在项目目录执行：
+也可以执行 `python -m hd2_translate`。填写服务商基础地址或完整 Chat Completions URL、模型名称、API Key 和超时，点击“测试连接”。测试只发送固定示例，不要求启用翻译。测试通过后，勾选“启用翻译服务”并点击“开始”，然后启动游戏。
+
+根基础地址会补全 `/chat/completions`，`/v1` 基础地址会补全 `/v1/chat/completions`，其他自定义路径请填写完整请求地址。例如 `https://api.deepseek.com/` 会补全为 `https://api.deepseek.com/chat/completions`。服务商需要支持 Chat Completions 和 JSON mode；模型名使用账户可用的实际名称。窗口会给出 HTTP 状态码和对应建议。
+
+本机服务允许 HTTP，例如 `http://localhost:11434/v1/chat/completions`；Ollama 可填写 API Key `ollama`，模型名使用本机已安装名称，参见 [Ollama 文档](https://docs.ollama.com/api/openai-compatibility)。无界面运行方式为 `python -m hd2_translate --headless`，使用已保存的配置。
+
+默认地址、模型和密钥为空，翻译关闭。密钥由当前 Windows 用户的 DPAPI 加密，保存在 `%LOCALAPPDATA%/HD2ChatTranslate/config.json`，不进入游戏 patch 或项目。启用后聊天正文会发送至配置的服务商，只提交正文，不提交玩家账户信息。停止会阻止新请求和游戏回写；已经发送的网络请求仍可能处理至返回或超时。
+
+## 游戏安装与回滚
+
+安装包为 `artifacts/HD2ChatTranslate.zip`，需要 Bingus Shared Loader v18。现有本机部署使用独立 patch 槽和带指纹的收据，保留原 Arsenal patch 0–20；来源包与 `.local` 收据需保留至回滚完成。安装与移除前正常退出游戏。
 
 ```pwsh
-python -m hd2_translate
+pwsh -NoProfile -File tools/deploy_probe.ps1 -Translate -DryRun
+pwsh -NoProfile -File tools/deploy_probe.ps1 -Translate
 ```
 
-填写服务商基础地址或完整 Chat Completions URL、模型名称、API Key 和请求超时，启用翻译后保存设置。测试连接无需启用翻译，仅发送固定示例，不读取游戏聊天或启动聊天处理。
-
-基础地址 `https://api.deepseek.com/` 会自动补全为 `https://api.deepseek.com/chat/completions`，`https://服务商/v1` 会补全为 `/v1/chat/completions`；其他自定义路径请填写完整请求地址。模型名称请使用服务商为账户提供的名称。服务端需支持 Chat Completions 和 JSON mode。本机服务允许使用 HTTP，例如 `http://localhost:11434/v1/chat/completions`；Ollama 的本地 API Key 可填写 `ollama`，模型名使用实际已安装的模型，参见 [Ollama 文档](https://docs.ollama.com/api/openai-compatibility)。
-
-聊天正文会发送到填写的地址；请使用自己认可的服务商或本地模型。默认地址与模型为空、翻译关闭，不会自动调用任何服务。密钥在 Windows 上由当前用户的 DPAPI 加密，保存在 `%LOCALAPPDATA%/HD2ChatTranslate/config.json`，不会写入项目或游戏 archive。服务只处理消息正文，不提交玩家账户信息。后台最多两个请求并行，缓存最多 512 条，实际请求限额为每分钟 30 次，超限保留原文。请求 60 秒后过期，响应 5 分钟后清理。同一个邮箱只允许一个服务实例运行。
-
-无界面模式：
+回滚本次部署：
 
 ```pwsh
-python -m hd2_translate --headless
+pwsh -NoProfile -File tools/deploy_probe.ps1 -Translate -Rollback
 ```
 
-## 游戏接入要求
+脚本只接受已核验的游戏 DLL、来源 ZIP 和独立槽位；不会覆盖已有文件。旧诊断部署需按对应模式先回滚，见 [诊断包说明](docs/chat-probe.md)。
 
-完整插件需要两个已经核实的接入点：新聊天消息的正文/稳定标识，以及对应消息的本机显示更新函数。Bingus Shared Loader 能加载独立 Lua addon，但加载能力本身不等于聊天替换能力。目前已在本机临时部署探针与加载器，并完成真实游戏内的代码采集与已知签名字节核验。
+## 行为与验证
 
-计划的异步流程是：游戏显示原文 → Lua 写文件邮箱 → 伴随程序检测/翻译 → Lua 读取结果 → 更新对应消息。请求失败、服务停止、消息过期时保持原文。中文也由大模型检测，检测为中文后保留原文。
+启用时先建立已有消息的基线，随后只处理新消息或变化的正文。读取有每步预算，最多 32 条待处理请求，60 秒后过期；失败、停用或原消息已经变化时保留原文。写入前重新核对活动事件、正文与唯一控件属性，并再次读取服务心跳。原生控件借用字符串指针，译文缓冲区保留至游戏结束；每次会话上限 512 个、总量 8 MiB。达到上限保留原文。
 
-伴随程序协议与待接入的游戏端边界见 [文档核对记录](docs/research.md)。在游戏接入完成前，启动伴随程序不会自动捕获聊天。
-
-已继续检查其他代码模组的原生 UI、签名扫描和聊天发送实现，并尝试全包 XAML/Lua 资源检索。发送与历史记录代码已有可核对的地址线索，仍需运行态确认消息条目与显示控件。来源、偏移及各路线的结果见 [原生聊天接入研究](docs/native-chat-research.md)。
-
-提供受限的只读聊天代码研究探针，可构建为 Bingus addon，采集候选代码窗口供离线分析。首次真实扫描完整读取 34,667,155 字节，六处已知签名全部匹配；探针不执行翻译或消息替换。构建、采集与分析方法见 [探针使用说明](docs/chat-probe.md)。
-
-`python tools/build_chat_probe.py --observe` 构建持续只读观察器，严格限制历史读取、双读一致性和 UI 快照。它只报告固定 ASCII/中文测试消息是否出现，不输出普通聊天正文、不调用大模型。测试消息、输出位置与部署方式见 [观察器说明](docs/chat-probe.md#持续只读观察器)。
-
-首轮观察暴露了诊断命令的 LuaJIT NUL 模式错误；已修复并增加命令路径与混合 UI 行的动态回归。修订包及重启部署步骤见 [正文观察记录](docs/chat-probe.md#首次正文观察与诊断命令错误)。当前不会把观察成功视为显示替换已完成。
-
-## 验证与回滚
-
-当前临时安装的是固定中文显示测试版，只处理 `HD2CT_PROBE_ASCII_01`。正常退出游戏后，使用 `pwsh -NoProfile -File tools/deploy_probe.ps1 -DisplayTest -Rollback` 移除；保留来源 ZIP 与部署收据直到回滚完成。属性读回确认原生 setter 已更新正文指针，用户确认该条显示为“聊天翻译测试成功”。它不调用模型、不翻译普通聊天。
+事件记录没有已证实的唯一 epoch，当前绑定检查不能证明快速复用同槽且正文再次相同时仍为最初的消息。游戏更新后指纹门禁不通过时不会调用 setter。完整边界与本机邮箱协议见 [插件说明](docs/chat-translate.md)。
 
 ```pwsh
 python -m unittest discover -s tests -v
 ```
 
-47 项测试通过、零跳过：22 项伴随服务（含心跳）、8 项代码研究工具、12 项只读观察器、2 项控件定位与 3 项固定显示测试。覆盖中文检测/外文翻译、邮箱与配置、超时及密钥保护，以及模拟代码扫描、UTF-8 与 NUL 边界、双读、UI 净化、读取权限和预算、构建格式与来源 ZIP 保护。显示回归验证入口门禁、消息漂移拒绝、缓冲区保活和正常属性字段更新。适配器测试使用私有 LuaJIT、假内核和测试缓冲区，不读取游戏进程或调用真实 setter。HTTP 测试使用模拟响应及本机服务，不调用真实收费 API；GUI 使用临时设置和本地测试端点。真实游戏已确认固定中文原位显示，自动捕获和真实模型翻译仍待验证。
+66 项测试通过，零失败、零跳过，覆盖伴随服务、配置与密钥保护、连接测试、UTF-8、队列及心跳、原子邮箱、控件生命周期复核、原生 setter 模拟和 ZIP 构建。适配器使用本机私有 LuaJIT、假内核与内存缓冲区，不读取外部游戏进程或调用真实 setter。HTTP 回归使用模拟响应和本机端点；真实提供商连接另以固定示例核验。
 
-停止伴随程序会阻止新请求，并丢弃尚未返回的翻译结果；已经发送的网络请求仍可能由服务商处理，直到返回或超时。临时游戏诊断部署应先正常退出游戏，再执行 `pwsh -NoProfile -File tools/deploy_probe.ps1 -Rollback`；若部署的是补充探针，则加上 `-Followup`；首版观察器加上 `-Observe`，修订观察器加上 `-ObserveFix`。保留来源 ZIP 和 `.local` 收据直到回滚完成，详见 [探针使用说明](docs/chat-probe.md)。删除项目目录可移除源码。若要清除保存的设置和邮箱，可自行删除 `%LOCALAPPDATA%/HD2ChatTranslate`。
+## 研究资料
+
+- [Wiki、HD2SDK 与模型协议核对](docs/research.md)：公开资源工具不提供聊天替换 API，配置窗口采用外部伴随程序。
+- [其他代码模组与原生聊天路径研究](docs/native-chat-research.md)：发送、事件环、控件属性与字符串生命周期的证据。
+- [诊断包与真实固定中文显示记录](docs/chat-probe.md)：只读采集、控件定位及原生替换验证。
+
+游戏 Lua 通过本机文件邮箱与伴随程序通信，网络请求由后台 worker 处理。研究阶段的默认探针与只读观察模式保留，不会执行普通聊天翻译。
