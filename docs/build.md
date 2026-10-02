@@ -63,7 +63,7 @@ if ($LASTEXITCODE -ne 0) { throw '安装包构建失败' }
 python tools/build_package.py --loader-zip 'C:\dependencies\Bingus-Shared-Loader-v18.zip' --native-dll 'C:\build\hd2ct_http.dll' --native-meta 'C:\build\hd2ct_http.meta.json'
 ```
 
-安装包包含 `manifest.json`、`Addon/` 的一个合并 patch 及两个空 sidecar、`LICENSES/` 的 cJSON 许可与上游原始说明、元数据、来源记录。patch 中一个 Lua 类型、两个资源，按 hash 排序，编号为 `0,1`。原始 loader 资源保持字节不变，聊天资源内嵌本次 DLL；模型地址、模型名和密钥不进入包。
+安装包包含 `manifest.json`、项目 GPLv3 原文 `LICENSE`、`Addon/` 的一个合并 patch 及两个空 sidecar、`LICENSES/` 的 cJSON 许可与上游原始说明、元数据、来源记录。patch 中一个 Lua 类型、两个资源，按 hash 排序，编号为 `0,1`。原始 loader 资源保持字节不变，聊天资源内嵌本次 DLL；模型地址、模型名和密钥不进入包。
 
 构建保留既有 Guid 与资源名，导入 Arsenal 时更新同名模组。不要手改 archive 计数、编号、声明或 manifest 身份。包名中的时间不改变模组身份。
 
@@ -92,7 +92,7 @@ python -m zipfile -t $taskPackage
 Get-FileHash -LiteralPath $taskPackage -Algorithm SHA256
 ```
 
-离线测试与包格式验证不能代替实际游戏启动。游戏关闭时在 Arsenal 导入更新并部署，启动后检查新会话报告，再验证英文聊天行保留原文并在下一行显示“译文：”及中文。流程见 [使用说明](chat-standalone.md)。
+离线测试与包格式验证不能代替实际游戏启动。游戏关闭时在 Arsenal 导入更新并部署，启动后检查新会话报告，再验证英文聊天行保留原文并在下一行显示“译文：”及中文。连续发送至少三条长短不同的英文消息，等待各条翻译，检查较早的消息为新增行数留出空间、没有重叠；再检查收到下一条消息及打开、关闭输入框后的布局。流程见 [使用说明](chat-standalone.md)。
 
 ## 常见构建失败
 

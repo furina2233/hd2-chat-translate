@@ -353,7 +353,10 @@ translate_adapter.heartbeat()
 observer_read_budget = 0
 local chinese_status, chinese_message = translate_adapter.read_slot(0)
 assert(chinese_status == "ok" and chinese_message.body == "你好，潜兵")
-assert(translate_adapter.apply(chinese_message, chinese_message.body) == "stale")
+-- 模拟下一帧的独立回写预算，不把前一帧扫描开销重复计入。
+observer_read_budget = 0
+local chinese_apply_status = translate_adapter.apply(chinese_message, chinese_message.body)
+assert(chinese_apply_status == "stale", tostring(chinese_apply_status) .. ":" .. tostring(observer_faulted))
 assert(native_spy_calls == 0, "unchanged Chinese source reached the native setter")
 
 prepare_widget_case({body = widget_body_bytes("Hello, divers")})
@@ -363,6 +366,7 @@ translate_adapter.heartbeat()
 observer_read_budget = 0
 local read_status, captured = translate_adapter.read_slot(0)
 assert(read_status == "ok" and captured.body == "Hello, divers")
+observer_read_budget = 0
 local apply_text = "Hello, divers\n译文：各位潜兵，集合撤离"
 local apply_status = translate_adapter.apply(captured, apply_text)
 assert(apply_status == "called_confirmed" and native_spy_calls == 1)
@@ -385,6 +389,7 @@ translate_adapter.heartbeat()
 observer_read_budget = 0
 local max_status, max_message = translate_adapter.read_slot(0)
 assert(max_status == "ok")
+observer_read_budget = 0
 local oversized_status = translate_adapter.apply(
     max_message, string.rep("D", translate_core.MAX_DISPLAY_BYTES + 1))
 local nul_status = translate_adapter.apply(max_message, "bad" .. string.char(0) .. "text")
@@ -600,6 +605,22 @@ local translate_heartbeat_next_poll, translate_cached_heartbeat
 local translate_heartbeat_fresh = false
 local translate_owned_tokens = {}
 local translate_file_sequence = 0
+local translate_layout
+translate_layout = {
+    verified = true,
+    instance = {
+        prepare = function(context, target_row)
+            return "ready", {context = context, target_row = target_row}
+        end,
+        verify_prepared = function() return "ready" end,
+        reflow = function() return "called_confirmed" end,
+        disable = function() end,
+        stats = function()
+            return {verified = true, reflows_confirmed = 1, failures = 0, rows_positioned = 1}
+        end,
+    },
+    new = function() return translate_layout.instance end,
+}
 
 local function mock_wide(text)
     local value = ffi.new("HD2Probe_U16[?]", #text + 1)

@@ -40,6 +40,7 @@ DELIVERY_NAME_PATTERN = re.compile(r"^HD2ChatTranslate([0-9]{14})\.zip$", re.ASC
 STANDALONE_DLL = ROOT / "artifacts" / "native" / "hd2ct_http.dll"
 STANDALONE_META = ROOT / "artifacts" / "native" / "hd2ct_http.meta.json"
 STANDALONE_LICENSE = ROOT / "native" / "vendor" / "cjson" / "LICENSE"
+PROJECT_LICENSE = ROOT / "LICENSE"
 SHARED_LOADER_ZIP = ROOT / "artifacts" / "Bingus-Shared-Loader-v18.zip"
 SHARED_LOADER_ZIP_SHA256 = "53af5698aeacfb27b98dfa00054923d11dc854e1e67b4af14798877812a93ba6"
 SHARED_LOADER_PATCH_SHA256 = "950a1b29c70a5bf3f94f5b6a154a3935d5c354be20cb7191d803c4c7ed9191e2"
@@ -467,6 +468,10 @@ def addon_files(
         "Addon/" + ARCHIVE_NAME + ".gpu_resources": b"",
     }
     try:
+        files["LICENSE"] = PROJECT_LICENSE.read_bytes()
+    except OSError as error:
+        raise ValueError("安装包缺少项目 GPLv3 许可证原文") from error
+    try:
         files["LICENSES/cJSON-LICENSE.txt"] = STANDALONE_LICENSE.read_bytes()
     except OSError as error:
         raise ValueError("standalone包缺少vendor/cJSON许可证原文") from error
@@ -551,7 +556,7 @@ def build_artifact(
         )
     source_paths = (
         entry_path, core_path, observer_path, translate_path, standalone_module_path,
-        dll_path, meta_path, STANDALONE_LICENSE, loader_zip_path,
+        dll_path, meta_path, STANDALONE_LICENSE, PROJECT_LICENSE, loader_zip_path,
     )
     if any(_same_path(output_path, path) for path in source_paths):
         raise ValueError("输出不能覆盖构建输入文件")
@@ -562,6 +567,8 @@ def build_artifact(
         )
     if not STANDALONE_LICENSE.is_file():
         raise ValueError("缺少 native/vendor/cjson/LICENSE")
+    if not PROJECT_LICENSE.is_file():
+        raise ValueError("缺少项目 LICENSE")
     native_module = standalone_module_source(
         standalone_module_path.read_bytes(),
         dll_path.read_bytes(),

@@ -597,6 +597,7 @@ class StandaloneBuilderTests(unittest.TestCase):
             builder.STANDALONE_DLL,
             builder.STANDALONE_META,
             builder.STANDALONE_LICENSE,
+            builder.PROJECT_LICENSE,
             builder.SHARED_LOADER_ZIP,
         )
         for source in inputs:
@@ -854,6 +855,7 @@ class StandaloneBuilderTests(unittest.TestCase):
             set(files),
             {
                 "manifest.json",
+                "LICENSE",
                 "Addon/9ba626afa44a3aa3.patch_0",
                 "Addon/9ba626afa44a3aa3.patch_0.stream",
                 "Addon/9ba626afa44a3aa3.patch_0.gpu_resources",
@@ -933,6 +935,7 @@ class StandaloneBuilderTests(unittest.TestCase):
             with zipfile.ZipFile(built) as package:
                 self.assertIsNone(package.testzip())
                 self.assertEqual(set(package.namelist()), set(files))
+                self.assertEqual(package.read("LICENSE"), builder.PROJECT_LICENSE.read_bytes())
                 self.assertEqual(package.read("LICENSES/cJSON-LICENSE.txt"), builder.STANDALONE_LICENSE.read_bytes())
 
     def test_builder_requires_native_inputs_and_preserves_loader_input(self):
