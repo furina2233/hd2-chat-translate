@@ -6,9 +6,19 @@
 
 协议以 [DeepSeek Chat Completions](https://api-docs.deepseek.com/api/create-chat-completion/) 和 [JSON Output](https://api-docs.deepseek.com/guides/json_mode/) 的公开文档为参考：使用 `messages`、`response_format` JSON mode，读取 `choices[0].message.content`。服务商和模型由用户配置。
 
-系统提示要求先判断正文是否中文，仅对非中文输出简体中文译文，并返回受约束的 JSON。中文结果强制保留本次原文；模型输出只作为文本处理，不执行代码。空内容、无效 JSON、不合法 UTF-8、超长响应、HTTP 错误与超时都保留原文。
+系统提示要求先判断正文是否中文，仅对非中文输出简体中文译文，并返回受约束的 JSON。中文结果强制保留本次原文；模型输出只作为文本处理，不执行代码。成功译文显示在原文下一行；无效响应、HTTP 错误与超时按固定字典显示简短错误，仍保留原文。消息过期或回写门禁失效时不更新聊天行，详见 [请求错误显示](chat-standalone.md#请求错误显示)。
 
 根地址和 `/v1` 地址仅补全到 Chat Completions 路径，其他路径保持用户配置。HTTP 只允许回环服务，HTTPS 保留证书验证；禁用重定向、自动认证与 cookies。只发送聊天正文，不包含玩家账户标识，报告不包含正文、模型地址或密钥。
+
+## 提示词与聊天用语
+
+系统提示词位于 [`native/hd2ct_http.c`](../native/hd2ct_http.c) 的 `HD2CT_SYSTEM_PROMPT`，作为 `system` 消息发送；原始聊天正文单独作为 `user` 消息发送。修改后需要按 [手动构建指南](build.md) 重新编译原生 DLL，再打包，才能让新提示词进入安装包。
+
+整条正文去掉首尾空白后仅为 `gg` 或 `ggs` 时，不区分大小写，提示模型返回 `is_chinese: true` 并逐字保留原始输入；插件据此保留原文和大小写，不追加译文。含其他内容的句子，例如 `gg charger at B2`，仍要求正常翻译。此规则由模型判断，没有新增本地字符串过滤。
+
+缩写按上下文理解，避免替换昵称或较长单词内部的字母；`btw`、`lol`、`afk`、`brb`、`idk`、`imo` 等参考 [Cambridge 的聊天缩写资料](https://www.cambridge.org/core/services/aop-file-manager/file/5bd884d86431f1de07115e65/130-Texting-abbreviations.pdf)。`xd` 作为大笑表情处理，参见 [Slang.net 的 XD 释义](https://slang.net/meaning/xd)；`omw` 表示正在赶来，`rn` 在聊天语境中可表示现在，分别参考 [OMW](https://slang.net/meaning/omw) 和 [RN](https://slang.net/meaning/rn)。完整缩写规则以源码中的提示词为准。
+
+敌人名称采用用户指定的译名，不区分大小写，并覆盖常规复数和同类变体。完整特定名称优先，例如 `Spore Charger` 为“孢子牛”、`Charger` 默认“牛”（口语可用“牛牛”）；`Factory Strider` 为“移动工厂”、`Scout Strider` 及其变体为“小双足”、`War Strider` 为“大双足”。全部名称对应保存在同一提示词中。
 
 ## Windows 依赖
 
@@ -21,5 +31,7 @@
 ## 测试边界
 
 离线回归使用模拟响应、回环 HTTP、假密钥、私有 LuaJIT 状态以及假内存/控件。测试不调用公网模型服务、不读取真实环境中的模型配置、不离线加载 `game.dll`，也不读取外部游戏进程。包格式回归使用独立 TOC parser 和上游构建器生成的黄金摘要。
+
+提示词回归检查编译后 DLL 实际发出的请求以及中文标记的处理，覆盖 `gg`/`ggs` 的大小写、首尾空白和混合句。模拟模型响应只能验证传输与返回处理；真实模型对缩写和敌人名称的理解需要在游戏中确认。
 
 早期伴随服务、DPAPI 配置窗口、文件请求/响应及临时部署流程已退出产品构建链，相关源码和记录可从 Git 历史查阅。当前产品的模型请求与响应都在进程内传递；名称为 `mailbox` 的本机目录仅承载状态报告。
