@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -23,12 +24,107 @@ OBSERVE_FLAG = b"local OBSERVE_ENABLED = false --[[HD2_CHAT_OBSERVER_ENABLED]]"
 DISPLAY_TEST_FLAG = b"local DISPLAY_TEST_ENABLED = false --[[HD2_CHAT_DISPLAY_TEST_ENABLED]]"
 TRANSLATE_MARKER = b"--[[HD2_CHAT_TRANSLATE_CORE]]"
 TRANSLATE_FLAG = b"local TRANSLATE_ENABLED = false --[[HD2_CHAT_TRANSLATE_ENABLED]]"
+STANDALONE_FLAG = b"local STANDALONE_ENABLED = false --[[HD2_CHAT_STANDALONE_ENABLED]]"
+NATIVE_MODULE_MARKER = b"--[[HD2CT_NATIVE_MODULE]]"
+STANDALONE_MARKER = NATIVE_MODULE_MARKER
+NATIVE_PAYLOAD_MARKER = b"--[[HD2CT_NATIVE_PAYLOAD]]"
 MAX_SOURCE_BYTES = 512 * 1024
 DEFAULT_OUTPUT = ROOT / "artifacts" / "HD2ChatProbe.zip"
 OBSERVE_OUTPUT = ROOT / "artifacts" / "HD2ChatObserve.zip"
 DISPLAY_TEST_OUTPUT = ROOT / "artifacts" / "HD2ChatDisplayTest.zip"
 TRANSLATE_OUTPUT = ROOT / "artifacts" / "HD2ChatTranslate.zip"
+STANDALONE_OUTPUT = ROOT / "artifacts" / "HD2ChatTranslateStandalone.zip"
+STANDALONE_DLL = ROOT / "artifacts" / "native" / "hd2ct_http.dll"
+STANDALONE_META = ROOT / "artifacts" / "native" / "hd2ct_http.meta.json"
+STANDALONE_LICENSE = ROOT / "native" / "vendor" / "cjson" / "LICENSE"
 DEPLOYMENT_RECEIPT = ROOT / ".local" / "chat-probe-deployment.json"
+
+
+def validate_native_dll(dll: bytes, metadata: bytes) -> tuple[int, str]:
+    """核验固定原生 helper 的meta、SHA-256和PE入口布局。"""
+    try:
+        meta = json.loads(metadata.decode("utf-8"))
+    except (UnicodeError, json.JSONDecodeError) as error:
+        raise ValueError("原生 helper meta 不是有效 UTF-8 JSON") from error
+    if not isinstance(meta, dict):
+        raise ValueError("原生 helper meta 格式无效")
+    imports = meta.get("imports")
+    if (
+        type(meta.get("schema_version")) is not int
+        or meta.get("schema_version") != 1
+        or type(meta.get("abi_version")) is not int
+        or meta.get("abi_version") != 1
+        or meta.get("filename") != "hd2ct_http.dll"
+        or meta.get("architecture") != "x86_64"
+        or isinstance(meta.get("size"), bool)
+        or not isinstance(meta.get("size"), int)
+        or not isinstance(meta.get("sha256"), str)
+        or len(meta.get("sha256", "")) != 64
+        or any(char not in "0123456789abcdef" for char in meta.get("sha256", ""))
+        or not isinstance(imports, list)
+        or any(not isinstance(item, str) or not item or len(item) > 260 for item in imports)
+    ):
+        raise ValueError("原生 helper meta 的ABI、架构或字段不匹配")
+    size = len(dll)
+    digest = hashlib.sha256(dll).hexdigest()
+    if size == 0 or meta["size"] != size or meta["sha256"].lower() != digest:
+        raise ValueError("原生 helper 的大小或 SHA-256 与meta不匹配")
+    if len(dll) < 0x40 or dll[:2] != b"MZ":
+        raise ValueError("原生 helper 缺少 PE/DOS 头")
+    pe_offset = struct.unpack_from("<I", dll, 0x3C)[0]
+    if pe_offset < 0x40 or pe_offset > len(dll) - 24 or dll[pe_offset : pe_offset + 4] != b"PE\0\0":
+        raise ValueError("原生 helper 的 PE 头位置无效")
+    machine, section_count, _, _, _, optional_size, characteristics = struct.unpack_from(
+        "<HHIIIHH", dll, pe_offset + 4
+    )
+    if machine != 0x8664 or not 1 <= section_count <= 96 or not characteristics & 0x2000:
+        raise ValueError("原生 helper 必须是 x64 PE DLL")
+    optional_offset = pe_offset + 24
+    if optional_size < 112 or optional_offset + optional_size > len(dll):
+        raise ValueError("原生 helper 的可选头长度无效")
+    if struct.unpack_from("<H", dll, optional_offset)[0] != 0x20B:
+        raise ValueError("原生 helper 必须使用 PE32+ 格式")
+    entry_rva = struct.unpack_from("<I", dll, optional_offset + 16)[0]
+    image_size = struct.unpack_from("<I", dll, optional_offset + 56)[0]
+    if image_size == 0 or entry_rva >= image_size and entry_rva != 0:
+        raise ValueError("原生 helper 的入口地址超出映像范围")
+    section_table = optional_offset + optional_size
+    if section_table + section_count * 40 > len(dll):
+        raise ValueError("原生 helper 的节表超出文件范围")
+    if entry_rva:
+        entry_is_executable = False
+        for index in range(section_count):
+            offset = section_table + index * 40
+            virtual_size, virtual_address, raw_size, raw_offset = struct.unpack_from("<IIII", dll, offset + 8)
+            extent = max(virtual_size, raw_size)
+            if virtual_address <= entry_rva < virtual_address + extent:
+                section_flags = struct.unpack_from("<I", dll, offset + 36)[0]
+                entry_is_executable = bool(section_flags & 0x20000000)
+                break
+        if not entry_is_executable:
+            raise ValueError("原生 helper 的入口点不在可执行节中")
+    return size, digest
+
+
+def standalone_module_source(template: bytes, dll: bytes, metadata: bytes) -> bytes:
+    """将已核验的固定DLL作为hex载荷写入Lua加载器的唯一payload标记。"""
+    if template.startswith((b"\xef\xbb\xbf", b"\x1b")) or b"\0" in template:
+        raise ValueError("原生Lua适配器必须是无BOM、无字节码标记且无NUL的UTF-8文本")
+    template.decode("utf-8")
+    if template.count(NATIVE_PAYLOAD_MARKER) != 1:
+        raise ValueError("原生Lua适配器必须恰好包含一个payload标记")
+    size, digest = validate_native_dll(dll, metadata)
+    if len(template) + size * 2 > MAX_SOURCE_BYTES:
+        raise ValueError("DLL hex载荷将超过512 KiB Lua源码上限；请将结果交由主控评估")
+    payload = (
+        f"local HD2CT_DLL_SIZE = {size}\n"
+        f'local HD2CT_DLL_SHA256 = "{digest}"\n'
+        f'local HD2CT_DLL_HEX = "{dll.hex()}"\n'
+    ).encode("ascii")
+    embedded = template.replace(NATIVE_PAYLOAD_MARKER, payload, 1)
+    if len(embedded) > MAX_SOURCE_BYTES:
+        raise ValueError("独立原生Lua模块超过512 KiB源码上限")
+    return embedded
 
 
 def resource_hash(name: str) -> int:
@@ -93,14 +189,18 @@ def entry_source(
     *,
     translate_source: bytes | None = None,
     translate: bool = False,
+    standalone_source: bytes | None = None,
+    standalone: bool = False,
 ) -> bytes:
-    if display_test and translate:
-        raise ValueError("固定显示测试与翻译模式不能同时启用")
+    if sum((bool(display_test), bool(translate), bool(standalone))) > 1:
+        raise ValueError("固定显示测试、伴随翻译和独立翻译模式互斥")
     sources = [source, core_source]
     if observer_source is not None:
         sources.append(observer_source)
     if translate_source is not None:
         sources.append(translate_source)
+    if standalone_source is not None:
+        sources.append(standalone_source)
     if any(len(item) > MAX_SOURCE_BYTES for item in sources):
         raise ValueError("Lua 源文件超过构建大小上限")
     if source.startswith((b"\xef\xbb\xbf", b"\x1b")) or b"\0" in source:
@@ -117,6 +217,10 @@ def entry_source(
         if translate_source.startswith((b"\xef\xbb\xbf", b"\x1b")) or b"\0" in translate_source:
             raise ValueError("翻译核心必须是无 BOM、无字节码标记的 UTF-8 Lua 文本")
         translate_source.decode("utf-8")
+    if standalone_source is not None:
+        if standalone_source.startswith((b"\xef\xbb\xbf", b"\x1b")) or b"\0" in standalone_source:
+            raise ValueError("原生适配器必须是无BOM、无字节码标记的UTF-8 Lua文本")
+        standalone_source.decode("utf-8")
     if source.count(CORE_MARKER) != 1:
         raise ValueError("入口必须恰好包含一个扫描核心嵌入标记")
     embedded = source.replace(CORE_MARKER, core_source.rstrip() + b"\n", 1)
@@ -129,16 +233,30 @@ def entry_source(
         raise ValueError("固定显示测试模式必须嵌入观察核心")
     if display_flag_count > 1:
         raise ValueError("入口包含多个固定显示测试标记")
+    standalone_marker_count = source.count(STANDALONE_MARKER)
+    standalone_flag_count = source.count(STANDALONE_FLAG)
+    if standalone_marker_count > 1 or standalone_flag_count > 1:
+        raise ValueError("入口包含多个独立模块或开关标记")
+    if standalone and (standalone_marker_count != 1 or standalone_flag_count != 1):
+        raise ValueError("独立翻译模式要求入口恰好包含一个模块标记和默认关闭标记")
+    if standalone and (standalone_source is None or observer_source is None):
+        raise ValueError("独立翻译模式必须嵌入原生网络模块和只读适配器")
+    if standalone and translate_source is None:
+        raise ValueError("独立翻译模式必须嵌入翻译核心")
+    if standalone_source is not None and not standalone:
+        raise ValueError("未启用独立模式时不能注入原生网络模块")
+    if translate and standalone:
+        raise ValueError("伴随翻译和独立翻译模式互斥")
     translate_marker_count = source.count(TRANSLATE_MARKER)
     translate_flag_count = source.count(TRANSLATE_FLAG)
     if translate_marker_count > 1 or translate_flag_count > 1:
         raise ValueError("入口包含多个翻译核心或开关标记")
-    if translate and (translate_marker_count != 1 or translate_flag_count != 1):
+    if (translate or standalone) and (translate_marker_count != 1 or translate_flag_count != 1):
         raise ValueError("翻译模式要求入口恰好包含一个核心标记和默认关闭标记")
-    if translate and (translate_source is None or observer_source is None):
+    if (translate or standalone) and (translate_source is None or observer_source is None):
         raise ValueError("翻译模式必须嵌入翻译核心和只读适配器")
     embedded = embedded.replace(OBSERVE_MARKER, (observer_source or b"return nil").rstrip() + b"\n", 1)
-    if observer_source is not None and not translate:
+    if observer_source is not None and not translate and not standalone:
         embedded = embedded.replace(OBSERVE_FLAG, OBSERVE_FLAG.replace(b"= false", b"= true"), 1)
     if display_test:
         embedded = embedded.replace(
@@ -149,11 +267,19 @@ def entry_source(
     if translate_marker_count == 1:
         embedded = embedded.replace(
             TRANSLATE_MARKER,
-            (translate_source if translate else b"return nil").rstrip() + b"\n",
+            (translate_source if translate or standalone else b"return nil").rstrip() + b"\n",
             1,
         )
-    if translate:
+    if translate or standalone:
         embedded = embedded.replace(TRANSLATE_FLAG, TRANSLATE_FLAG.replace(b"= false", b"= true"), 1)
+    if standalone_marker_count == 1:
+        embedded = embedded.replace(
+            STANDALONE_MARKER,
+            (standalone_source if standalone else b"return nil").rstrip() + b"\n",
+            1,
+        )
+    if standalone:
+        embedded = embedded.replace(STANDALONE_FLAG, STANDALONE_FLAG.replace(b"= false", b"= true"), 1)
     if embedded.startswith(b"-- HD2-Addon:"):
         _, separator, embedded = embedded.partition(b"\n")
         if not separator:
@@ -171,9 +297,11 @@ def addon_files(
     observe: bool = False,
     display_test: bool = False,
     translate: bool = False,
+    *,
+    standalone: bool = False,
 ) -> dict[str, bytes]:
-    if sum((bool(observe), bool(display_test), bool(translate))) > 1:
-        raise ValueError("观察、固定显示测试与翻译模式互斥")
+    if sum((bool(observe), bool(display_test), bool(translate), bool(standalone))) > 1:
+        raise ValueError("观察、固定显示测试、伴随翻译和独立翻译模式互斥")
     resource = struct.pack("<II", len(entry), 2) + entry
     archive = make_single_resource_archive(resource_hash(RESOURCE_NAME), resource)
     description = (
@@ -195,11 +323,19 @@ def addon_files(
             "本机聊天翻译桥接：将当前本机游戏会话中符合条件的聊天正文通过固定本地 mailbox 交给本机服务，"
             "再尝试更新本机显示；插件本身不联网、不广播译文。需要 Bingus Shared Loader v15+ / API 1。"
         )
+    elif standalone:
+        description = (
+            "进程内聊天翻译：通过游戏内原生网络线程将聊天交给配置的大模型并更新本机显示，不广播译文。"
+            "无需运行伴随程序。读取 HD2CT_API_URL、HD2CT_MODEL、HD2CT_API_KEY、"
+            "HD2CT_TIMEOUT_SECONDS（默认20）和 HD2CT_ENABLED（默认1）环境变量。"
+            "需要 Bingus Shared Loader v18 / API 1。"
+        )
     manifest = {
         "Version": 1,
         "Guid": str(uuid.UUID(ADDON_GUID)),
         "Name": (
             "HD2 Chat Translate" if translate else
+            "HD2 Chat Translate Standalone" if standalone else
             "HD2 Chat Display Test" if display_test else
             "HD2 Chat Probe Research Tool"
         ),
@@ -208,6 +344,7 @@ def addon_files(
             {
                 "Name": (
                     "HD2 Chat Translate" if translate else
+                    "HD2 Chat Translate Standalone" if standalone else
                     "HD2 Chat Display Test" if display_test else
                     "HD2 Chat Probe Research Tool"
                 ),
@@ -216,12 +353,18 @@ def addon_files(
             }
         ],
     }
-    return {
+    files = {
         "manifest.json": (json.dumps(manifest, ensure_ascii=False, indent=2) + "\n").encode("utf-8"),
         "Addon/" + ARCHIVE_NAME: archive,
         "Addon/" + ARCHIVE_NAME + ".stream": b"",
         "Addon/" + ARCHIVE_NAME + ".gpu_resources": b"",
     }
+    if standalone:
+        try:
+            files["LICENSES/cJSON-LICENSE.txt"] = STANDALONE_LICENSE.read_bytes()
+        except OSError as error:
+            raise ValueError("独立包缺少vendor/cJSON许可证原文") from error
+    return files
 
 
 def _same_path(left: Path, right: Path) -> bool:
@@ -238,7 +381,13 @@ def _protect_deployed_source(output_path: Path) -> None:
 
     is_default = any(
         _same_path(output_path, item)
-        for item in (DEFAULT_OUTPUT, OBSERVE_OUTPUT, DISPLAY_TEST_OUTPUT, TRANSLATE_OUTPUT)
+        for item in (
+            DEFAULT_OUTPUT,
+            OBSERVE_OUTPUT,
+            DISPLAY_TEST_OUTPUT,
+            TRANSLATE_OUTPUT,
+            STANDALONE_OUTPUT,
+        )
     )
     try:
         receipt = json.loads(DEPLOYMENT_RECEIPT.read_text(encoding="utf-8"))
@@ -291,15 +440,20 @@ def build_artifact(
     observe: bool = False,
     display_test: bool = False,
     translate: bool = False,
+    *,
+    standalone: bool = False,
 ) -> Path:
-    if sum((bool(observe), bool(display_test), bool(translate))) > 1:
-        raise ValueError("--observe、--display-test 与 --translate 不能同时使用")
+    if sum((bool(observe), bool(display_test), bool(translate), bool(standalone))) > 1:
+        raise ValueError("--observe、--display-test、--translate 与 --standalone 不能同时使用")
     entry_path = ROOT / "game" / "chat_probe.lua"
     core_path = ROOT / "game" / "chat_probe_core.lua"
     observer_path = ROOT / "game" / "chat_observe_core.lua"
     translate_path = ROOT / "game" / "chat_translate_core.lua"
+    standalone_module_path = ROOT / "game" / "chat_http_native.lua"
     if output is not None:
         output_path = Path(output)
+    elif standalone:
+        output_path = STANDALONE_OUTPUT
     elif display_test:
         output_path = DISPLAY_TEST_OUTPUT
     elif translate:
@@ -307,19 +461,35 @@ def build_artifact(
     else:
         output_path = OBSERVE_OUTPUT if observe else DEFAULT_OUTPUT
     _protect_deployed_source(output_path)
-    if output_path.resolve() in (
-        entry_path.resolve(), core_path.resolve(), observer_path.resolve(), translate_path.resolve()
-    ):
+    source_paths = [entry_path, core_path, observer_path, translate_path, standalone_module_path]
+    if standalone:
+        source_paths.extend((STANDALONE_DLL, STANDALONE_META, STANDALONE_LICENSE))
+    if output_path.resolve() in tuple(path.resolve() for path in source_paths):
         raise ValueError("输出不能覆盖 Lua 源文件")
+    native_module = None
+    if standalone:
+        if not STANDALONE_DLL.is_file() or not STANDALONE_META.is_file():
+            raise ValueError(
+                "缺少 artifacts/native/hd2ct_http.dll 或配套meta；请先构建原生 helper，builder不会自动编译或下载。"
+            )
+        if not STANDALONE_LICENSE.is_file():
+            raise ValueError("缺少 native/vendor/cjson/LICENSE")
+        native_module = standalone_module_source(
+            standalone_module_path.read_bytes(),
+            STANDALONE_DLL.read_bytes(),
+            STANDALONE_META.read_bytes(),
+        )
     packaged_entry = entry_source(
         entry_path.read_bytes(),
         core_path.read_bytes(),
-        observer_path.read_bytes() if (observe or display_test or translate) else None,
+        observer_path.read_bytes() if (observe or display_test or translate or standalone) else None,
         display_test=display_test,
-        translate_source=translate_path.read_bytes() if translate else None,
+        translate_source=translate_path.read_bytes() if (translate or standalone) else None,
         translate=translate,
+        standalone_source=native_module,
+        standalone=standalone,
     )
-    files = addon_files(packaged_entry, observe, display_test, translate)
+    files = addon_files(packaged_entry, observe, display_test, translate, standalone=standalone)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     with zipfile.ZipFile(output_path, "w", compression=zipfile.ZIP_DEFLATED) as package:
         for name, content in sorted(files.items()):
@@ -345,9 +515,16 @@ def main() -> None:
         action="store_true",
         help="构建本机翻译桥接 ZIP，默认输出 artifacts/HD2ChatTranslate.zip",
     )
+    mode.add_argument(
+        "--standalone",
+        action="store_true",
+        help="构建进程内网络翻译 ZIP，默认输出 artifacts/HD2ChatTranslateStandalone.zip",
+    )
     args = parser.parse_args()
     try:
-        result = build_artifact(args.output, args.observe, args.display_test, args.translate)
+        result = build_artifact(
+            args.output, args.observe, args.display_test, args.translate, standalone=args.standalone
+        )
     except (OSError, ValueError) as error:
         parser.error(str(error))
     print(f"已构建HD2聊天插件ZIP：{result}")

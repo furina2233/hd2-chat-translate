@@ -6,11 +6,15 @@ end)()
 local OBSERVE_ENABLED = false --[[HD2_CHAT_OBSERVER_ENABLED]]
 local DISPLAY_TEST_ENABLED = false --[[HD2_CHAT_DISPLAY_TEST_ENABLED]]
 local TRANSLATE_ENABLED = false --[[HD2_CHAT_TRANSLATE_ENABLED]]
+local STANDALONE_ENABLED = false --[[HD2_CHAT_STANDALONE_ENABLED]]
 local observer_core = (function()
 --[[HD2_CHAT_OBSERVER_CORE]]
 end)()
 local translate_core = (function()
 --[[HD2_CHAT_TRANSLATE_CORE]]
+end)()
+local native_http_factory = (function()
+--[[HD2CT_NATIVE_MODULE]]
 end)()
 
 local function initialize_probe()
@@ -39,9 +43,29 @@ local function initialize_probe()
             HD2Probe_U32 Type;
             HD2Probe_U32 Padding2;
         } HD2Probe_MEMORY_BASIC_INFORMATION;
+        typedef struct HD2Probe_BY_HANDLE_FILE_INFORMATION {
+            HD2Probe_U32 dwFileAttributes;
+            HD2Probe_U32 ftCreationTimeLow;
+            HD2Probe_U32 ftCreationTimeHigh;
+            HD2Probe_U32 ftLastAccessTimeLow;
+            HD2Probe_U32 ftLastAccessTimeHigh;
+            HD2Probe_U32 ftLastWriteTimeLow;
+            HD2Probe_U32 ftLastWriteTimeHigh;
+            HD2Probe_U32 dwVolumeSerialNumber;
+            HD2Probe_U32 nFileSizeHigh;
+            HD2Probe_U32 nFileSizeLow;
+            HD2Probe_U32 nNumberOfLinks;
+            HD2Probe_U32 nFileIndexHigh;
+            HD2Probe_U32 nFileIndexLow;
+        } HD2Probe_BY_HANDLE_FILE_INFORMATION;
 
         HD2Probe_HANDLE GetCurrentProcess(void);
         HD2Probe_HMODULE GetModuleHandleA(const char *module_name);
+        HD2Probe_HMODULE LoadLibraryExW(const HD2Probe_U16 *path, void *file, HD2Probe_U32 flags);
+        void *GetProcAddress(HD2Probe_HMODULE module, const char *name);
+        HD2Probe_U32 GetFileSize(HD2Probe_HANDLE file, HD2Probe_U32 *high);
+        HD2Probe_U32 GetLastError(void);
+        int GetFileInformationByHandle(HD2Probe_HANDLE file, HD2Probe_BY_HANDLE_FILE_INFORMATION *information);
         HD2Probe_U32 GetModuleFileNameW(HD2Probe_HMODULE module, HD2Probe_U16 *path, HD2Probe_U32 capacity);
         HD2Probe_SIZE_T VirtualQuery(const void *address, HD2Probe_MEMORY_BASIC_INFORMATION *information, HD2Probe_SIZE_T information_size);
         int ReadProcessMemory(HD2Probe_HANDLE process, const void *address, void *buffer, HD2Probe_SIZE_T length, HD2Probe_SIZE_T *bytes_read);
@@ -171,6 +195,14 @@ local function initialize_probe()
         local result = finish_sha256(algorithm, hash, digest)
         if not result then error("candidate hash failed") end
         return result
+    end
+
+    local native_http_loader
+    if STANDALONE_ENABLED and type(native_http_factory) == "function" then
+        local loader_ok, loader = pcall(native_http_factory, ffi, kernel, bcrypt, hash_bytes, u16_ascii)
+        if loader_ok and type(loader) == "table" and type(loader.load) == "function" then
+            native_http_loader = loader
+        end
     end
 
     local function query(rva)
@@ -320,6 +352,10 @@ local function initialize_probe()
     local translate_heartbeat_fresh = false
     local translate_owned_tokens = {}
     local translate_file_sequence = 0
+    local native_transport_api
+    local native_init_status
+    local native_last_status
+    local native_disabled = false
 
     local MAX_OBSERVER_ADDRESS = 0x7fffffffffff
     local MAX_OBSERVER_READ = 16 * 1024
@@ -960,6 +996,31 @@ local function initialize_probe()
     end
 
     local function observer_translate_heartbeat(force)
+        if STANDALONE_ENABLED then
+            if not force and observer_now < translate_heartbeat_next_poll then
+                observer_translate_heartbeat_is_fresh(translate_cached_heartbeat)
+                return translate_cached_heartbeat
+            end
+            local read_completed_ms = tonumber(kernel.GetTickCount64())
+            if not read_completed_ms or read_completed_ms < 0
+                or read_completed_ms ~= math.floor(read_completed_ms)
+                or read_completed_ms < observer_now then
+                error("translation clock failure")
+            end
+            observer_now = read_completed_ms
+            translate_heartbeat_next_poll = observer_now + 250
+            translate_cached_heartbeat = nil
+            if native_transport_api then
+                local status = native_transport_api.last_status()
+                if status ~= nil then native_last_status = status end
+                if native_init_status == 0 and native_transport_api.enabled() then
+                    translate_cached_heartbeat = string.format("HD2CT1 %.0f\n", observer_now)
+                end
+                native_transport_api.retry_cancels(4)
+            end
+            observer_translate_heartbeat_is_fresh(translate_cached_heartbeat)
+            return translate_cached_heartbeat
+        end
         if not force and observer_now < translate_heartbeat_next_poll then
             observer_translate_heartbeat_is_fresh(translate_cached_heartbeat)
             return translate_cached_heartbeat
@@ -1006,6 +1067,18 @@ local function initialize_probe()
     end
 
     local function observer_translate_publish_request(token, body)
+        if STANDALONE_ENABLED then
+            if not TRANSLATE_ENABLED or not translate_heartbeat_fresh
+                or not observer_translate_valid_token(token)
+                or not native_transport_api or native_init_status ~= 0
+                or type(body) ~= "string" or #body == 0 or #body > TRANSLATE_MAX_REQUEST_BYTES
+                or not translate_core or type(translate_core.valid_text) ~= "function"
+                or not translate_core.valid_text(body, TRANSLATE_MAX_REQUEST_BYTES) then
+                return false
+            end
+            native_transport_api.retry_cancels(4)
+            return native_transport_api.submit(token, body) == true
+        end
         if not TRANSLATE_ENABLED or not translate_heartbeat_fresh
             or not observer_translate_valid_token(token)
             or type(body) ~= "string" or #body == 0 or #body > TRANSLATE_MAX_REQUEST_BYTES
@@ -1042,6 +1115,13 @@ local function initialize_probe()
     end
 
     local function observer_translate_read_response(token)
+        if STANDALONE_ENABLED then
+            if not observer_translate_valid_token(token) or not native_transport_api
+                or native_init_status ~= 0 then
+                return nil
+            end
+            return native_transport_api.response(token)
+        end
         if not translate_owned_tokens[token] or not observer_translate_valid_token(token) then return nil end
         local path = observer_translate_path("\\" .. token .. ".res")
         if not path then return nil end
@@ -1052,6 +1132,10 @@ local function initialize_probe()
     end
 
     local function observer_translate_cancel(token)
+        if STANDALONE_ENABLED then
+            if not observer_translate_valid_token(token) or not native_transport_api then return false end
+            return native_transport_api.cancel(token) == true
+        end
         if not translate_owned_tokens[token] or not observer_translate_valid_token(token) then return false end
         local request_path = observer_translate_path("\\" .. token .. ".req")
         local response_path = observer_translate_path("\\" .. token .. ".res")
@@ -1344,10 +1428,12 @@ local function initialize_probe()
             local count = raw_counters[name]
             counters[name] = observer_translate_safe_count(count, 9007199254740991) and count or 0
         end
-        return {
+        local report = {
             schema_version = 1,
+            mode = STANDALONE_ENABLED and "standalone" or "companion",
             status = status,
             code = code,
+            transport = STANDALONE_ENABLED and "in_process_winhttp" or "companion_mailbox",
             done = value.done == true,
             heartbeat_active = value.heartbeat_active == true,
             baseline_remaining = observer_translate_safe_count(value.baseline_remaining, 64)
@@ -1355,6 +1441,15 @@ local function initialize_probe()
             pending_count = observer_translate_safe_count(value.pending_count, 32) and value.pending_count or 0,
             counters = counters,
         }
+        if STANDALONE_ENABLED then
+            if observer_translate_safe_count(native_init_status, 4) then
+                report.native_init_status = native_init_status
+            end
+            if observer_translate_safe_count(native_last_status, 65535) then
+                report.native_last_status = native_last_status
+            end
+        end
+        return report
     end
 
     local function observer_translate_write_report(manifest)
@@ -1594,8 +1689,26 @@ local function initialize_probe()
         return adapter
     end
 
-    local function make_translate_adapter()
+    local function make_translate_adapter(target_verified)
         observer_translate_prepare_paths()
+        if STANDALONE_ENABLED then
+            native_transport_api = nil
+            native_init_status = nil
+            native_last_status = nil
+            native_disabled = false
+            if target_verified == true and native_http_loader then
+                local load_ok, api, init_status = pcall(native_http_loader.load)
+                if load_ok and type(api) == "table" then
+                    native_transport_api = api
+                    local initialized = tonumber(init_status)
+                    native_init_status = observer_translate_safe_count(initialized, 4) and initialized or 2
+                    local last = api.last_status()
+                    native_last_status = tonumber(last)
+                else
+                    native_init_status = 2
+                end
+            end
+        end
         local adapter = {}
         local function protect(callback)
             return function(...)
@@ -1615,7 +1728,7 @@ local function initialize_probe()
             end
             return observer_now
         end)
-        -- 核心每次显式轮询时都重新读取固定心跳文件，避免缓存掩盖停用状态。
+        -- 心跳按传输模式读取，不把伴随模式的文件规则带入独立模式。
         adapter.heartbeat = protect(function() return observer_translate_heartbeat(true) end)
         adapter.read_slot = protect(observer_translate_read_slot)
         adapter.submit = protect(observer_translate_publish_request)
@@ -1707,7 +1820,7 @@ local function initialize_probe()
     end
 
     local function start_translation(target_verified)
-        local adapter_ok, translate_adapter = pcall(make_translate_adapter)
+        local adapter_ok, translate_adapter = pcall(make_translate_adapter, target_verified == true)
         if not adapter_ok then
             observer_log_stopped()
             return false
@@ -1724,7 +1837,14 @@ local function initialize_probe()
         return true
     end
 
+    local function observer_translate_disable_native()
+        if not STANDALONE_ENABLED or native_disabled then return end
+        native_disabled = true
+        if native_transport_api then pcall(native_transport_api.disable) end
+    end
+
     local function observer_finish_translation_with_error(_reason)
+        observer_translate_disable_native()
         if translate_state and translate_core and type(translate_core.manifest) == "function" then
             local manifest_ok, manifest = pcall(translate_core.manifest, translate_state)
             if manifest_ok and type(manifest) == "table" then
@@ -1789,6 +1909,7 @@ local function initialize_probe()
             local step_ok, done = pcall(translate_core.step, translate_state)
             if not step_ok then return observer_finish_translation_with_error("internal_error") end
             if observer_faulted then return observer_finish_translation_with_error("adapter_error") end
+            if done == true then observer_translate_disable_native() end
             return done == true
         end
         if not observer_state then return true end

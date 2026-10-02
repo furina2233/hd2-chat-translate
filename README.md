@@ -2,9 +2,17 @@
 
 绝地潜兵 2 本机聊天翻译插件。新聊天正文交给用户配置的大模型检测语言；中文保留原文，其他语言翻译为简体中文，并替换对应的本机聊天行。译文不会发送给其他玩家。
 
-**当前状态：完整插件已部署并通过本机真实游戏验证。新聊天经用户配置的模型翻译后，原聊天行成功替换为中文，原生属性读回与用户画面确认一致。** 66 项离线测试通过。游戏接口来自实际代码采集和控件读回，适配目前核验的构建，详情见 [运行与兼容性说明](docs/chat-translate.md)。
+支持两种运行方式：独立版从 Windows 环境变量读取模型配置，在游戏内的后台线程完成请求；伴随程序版保留配置窗口。两者都使用已经过真实游戏验证的聊天原位回写路径。独立版的构建与验收记录见 [独立版说明](docs/chat-standalone.md)，接口适配与限制见 [运行与兼容性说明](docs/chat-translate.md)。
 
-## 配置与启动
+## 独立版：Arsenal 安装后直接启动游戏
+
+游戏关闭时，在 HD2Arsenal 导入 `artifacts/HD2ChatTranslateStandalone.zip`，启用并部署；同时需要 Bingus Shared Loader v18。已有旧版聊天 addon 时，先停用旧版。安装包只携带聊天 addon，loader 作为独立依赖安装。
+
+在 Windows 用户或系统环境变量中填写 `HD2CT_API_URL`、`HD2CT_MODEL`、`HD2CT_API_KEY`，然后启动游戏。无需运行 `run.ps1`、Python 或伴随程序。配置在游戏启动时读取，修改后重启游戏即可。密钥只在本机填写。
+
+URL 为根地址时补全 `/chat/completions`，为 `/v1` 或 `/v1/` 时补全 `/v1/chat/completions`；完整接口和其他自定义路径原样保留，不进行拼写纠正。可选超时和停用变量、安装及回滚步骤见 [独立版说明](docs/chat-standalone.md)。
+
+## 伴随程序版：配置窗口
 
 需要 Windows 和 Python 3.10 或更新版本，伴随程序仅使用 Python 标准库。在项目目录运行：
 
@@ -20,7 +28,7 @@ pwsh -File .\run.ps1
 
 默认地址、模型和密钥为空，翻译关闭。密钥由当前 Windows 用户的 DPAPI 加密，保存在 `%LOCALAPPDATA%/HD2ChatTranslate/config.json`，不进入游戏 patch 或项目。启用后聊天正文会发送至配置的服务商，只提交正文，不提交玩家账户信息。停止会阻止新请求和游戏回写；已经发送的网络请求仍可能处理至返回或超时。
 
-## 游戏安装与回滚
+## 伴随程序版的游戏安装与回滚
 
 安装包为 `artifacts/HD2ChatTranslate.zip`，需要 Bingus Shared Loader v18。现有本机部署使用独立 patch 槽和带指纹的收据，保留原 Arsenal patch 0–20；来源包与 `.local` 收据需保留至回滚完成。安装与移除前正常退出游戏。
 
@@ -47,7 +55,7 @@ pwsh -NoProfile -File tools/deploy_probe.ps1 -Translate -Rollback
 python -m unittest discover -s tests -v
 ```
 
-66 项测试通过，零失败、零跳过，覆盖伴随服务、配置与密钥保护、连接测试、UTF-8、队列及心跳、原子邮箱、控件生命周期复核、原生 setter 模拟和 ZIP 构建。适配器使用本机私有 LuaJIT、假内核与内存缓冲区，不读取外部游戏进程或调用真实 setter。HTTP 回归使用模拟响应和本机端点；真实提供商连接另以固定示例核验。
+101 项测试通过，零失败、零跳过，覆盖伴随服务、配置与密钥保护、连接测试、UTF-8、队列及心跳、原子邮箱、控件生命周期复核、原生 setter 模拟、WinHTTP 后台请求、文件信息 ABI 和 ZIP 构建。适配器使用本机私有 LuaJIT、假内核与内存缓冲区，不读取外部游戏进程或调用真实 setter；文件结构回归另调用真实 Windows API 读取测试临时文件并检查保护字节。HTTP 回归使用模拟响应和本机端点；真实提供商连接另以固定示例核验。
 
 ## 研究资料
 
@@ -55,4 +63,4 @@ python -m unittest discover -s tests -v
 - [其他代码模组与原生聊天路径研究](docs/native-chat-research.md)：发送、事件环、控件属性与字符串生命周期的证据。
 - [诊断包与真实固定中文显示记录](docs/chat-probe.md)：只读采集、控件定位及原生替换验证。
 
-游戏 Lua 通过本机文件邮箱与伴随程序通信，网络请求由后台 worker 处理。研究阶段的默认探针与只读观察模式保留，不会执行普通聊天翻译。
+独立版使用原生 DLL 中的后台 worker，伴随程序版使用本机文件邮箱。研究阶段的默认探针与只读观察模式保留，不会执行普通聊天翻译。

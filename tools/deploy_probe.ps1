@@ -10,13 +10,14 @@ param(
     [switch]$ObserveOffset,
     [switch]$ObserveWidget,
     [switch]$DisplayTest,
-    [switch]$Translate
+    [switch]$Translate,
+    [switch]$Standalone
 )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
-if (@(@($Followup, $Observe, $ObserveFix, $ObserveDiag, $ObserveOffset, $ObserveWidget, $DisplayTest, $Translate) | Where-Object { $_.IsPresent }).Count -gt 1) {
-    throw "Followup、Observe、ObserveFix、ObserveDiag、ObserveOffset、ObserveWidget、DisplayTest 与 Translate 只能指定一个。"
+if (@(@($Followup, $Observe, $ObserveFix, $ObserveDiag, $ObserveOffset, $ObserveWidget, $DisplayTest, $Translate, $Standalone) | Where-Object { $_.IsPresent }).Count -gt 1) {
+    throw "Followup、Observe、ObserveFix、ObserveDiag、ObserveOffset、ObserveWidget、DisplayTest、Translate 与 Standalone 只能指定一个。"
 }
 
 $script:ProjectRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot ".."))
@@ -73,6 +74,12 @@ if ($Translate) {
     $script:ExpectedProbeZipSha256 = "7533a7889025baa8e5d793de437bc9898b30b1c888c5b5e15a9a8e4b522a613d"
     $script:ProbeZipName = "HD2ChatTranslate.zip"
     $script:ExpectedProbePatchLength = 178720L
+}
+# 独立版来源单独固定，伴随程序版的旧包继续保留用于按原收据回滚。
+if ($Standalone) {
+    $script:ExpectedProbeZipSha256 = "5cbe8bc56ae50d73148a7f814cc8d17b6940efa566c10f2045edd736628f4948"
+    $script:ProbeZipName = "HD2ChatTranslateStandalone.zip"
+    $script:ExpectedProbePatchLength = 307664L
 }
 $script:LoaderResourceId = [Convert]::ToUInt64("7251fdd9bb62480a", 16)
 $script:ProbeResourceId = [Convert]::ToUInt64("c509c11199f753c2", 16)
