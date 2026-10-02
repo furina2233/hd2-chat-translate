@@ -4,8 +4,8 @@ import json
 import re
 import unittest
 
+from lua_support import LUA_DLL, ROOT, LuaJIT
 from test_chat_observe import LUA_OBSERVER_ADAPTER_HARNESS
-from test_chat_probe import LUA_DLL, ROOT, LuaJIT
 
 
 WIDGET_ADAPTER_CHECKS = r'''

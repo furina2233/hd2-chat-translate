@@ -1,10 +1,11 @@
+# 本机研究、收据和构建输入不进入源码仓库。
 .research/
+.local/
+artifacts/
+build/
+dist/
+
+# Python 开发缓存。
 __pycache__/
 *.py[cod]
 .venv/
-build/
-dist/
-artifacts/
-.local/
-*.spec
-*.egg-info/

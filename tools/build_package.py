@@ -1,4 +1,4 @@
-"""构建 HD2 聊天代码研究、只读观察、固定显示测试或翻译桥接的 Bingus addon ZIP。"""
+"""从源码构建 HD2 Chat Translate 的 standalone Arsenal ZIP。"""
 
 # 格式依据公开实现核对：https://github.com/CowboyBingus/BingusSharedLoader/tree/main/scripts
 
@@ -34,11 +34,6 @@ NATIVE_PAYLOAD_MARKER = b"--[[HD2CT_NATIVE_PAYLOAD]]"
 MAX_SOURCE_BYTES = 512 * 1024
 MAX_ARCHIVE_LUA_RESOURCES = 16
 MAX_ARCHIVE_SIZE = 8 * 1024 * 1024
-DEFAULT_OUTPUT = ROOT / "artifacts" / "HD2ChatProbe.zip"
-OBSERVE_OUTPUT = ROOT / "artifacts" / "HD2ChatObserve.zip"
-DISPLAY_TEST_OUTPUT = ROOT / "artifacts" / "HD2ChatDisplayTest.zip"
-TRANSLATE_OUTPUT = ROOT / "artifacts" / "HD2ChatTranslate.zip"
-STANDALONE_OUTPUT = ROOT / "artifacts" / "HD2ChatTranslateStandalone.zip"
 DELIVERY_PREFIX = "HD2ChatTranslate"
 BEIJING_TIMEZONE = timezone(timedelta(hours=8))
 DELIVERY_NAME_PATTERN = re.compile(r"^HD2ChatTranslate([0-9]{14})\.zip$", re.ASCII)
@@ -55,7 +50,6 @@ SHARED_LOADER_STREAM_MEMBER = SHARED_LOADER_PATCH_MEMBER + ".stream"
 SHARED_LOADER_GPU_MEMBER = SHARED_LOADER_PATCH_MEMBER + ".gpu_resources"
 SHARED_LOADER_README_MEMBER = "BingusSharedLoader-README.txt"
 SHARED_LOADER_MANIFEST_MEMBER = "BingusSharedLoader-manifest.json"
-DEPLOYMENT_RECEIPT = ROOT / ".local" / "chat-probe-deployment.json"
 
 
 def validate_native_dll(dll: bytes, metadata: bytes) -> tuple[int, str]:
@@ -239,11 +233,6 @@ def make_lua_resource_archive(resources: list[tuple[int, bytes]]) -> bytes:
     return bytes(archive)
 
 
-def make_single_resource_archive(name_hash: int, resource: bytes) -> bytes:
-    """保留旧单资源archive接口与字节布局。"""
-    return make_lua_resource_archive([(name_hash, resource)])
-
-
 def _verified_shared_loader_resource(patch: bytes) -> bytes:
     """校验固定v18 patch布局后返回原始resource blob。"""
     if len(patch) != 20816 or hashlib.sha256(patch).hexdigest() != SHARED_LOADER_PATCH_SHA256:
@@ -282,15 +271,16 @@ def _verified_shared_loader_resource(patch: bytes) -> bytes:
     return resource
 
 
-def load_shared_loader_assets() -> tuple[bytes, bytes, bytes]:
+def load_shared_loader_assets(loader_zip: Path | str | None = None) -> tuple[bytes, bytes, bytes]:
     """从本机固定v18 ZIP读取白名单资源与原始说明文件，不解压其他条目。"""
+    loader_zip_path = Path(loader_zip) if loader_zip is not None else SHARED_LOADER_ZIP
     try:
-        zip_size = SHARED_LOADER_ZIP.stat().st_size
+        zip_size = loader_zip_path.stat().st_size
         if zip_size <= 0 or zip_size > 4 * 1024 * 1024:
             raise ValueError("本机 Bingus Shared Loader v18 ZIP 超出大小上限")
-        package_bytes = SHARED_LOADER_ZIP.read_bytes()
+        package_bytes = loader_zip_path.read_bytes()
     except OSError as error:
-        raise ValueError("缺少本机 artifacts/Bingus-Shared-Loader-v18.zip") from error
+        raise ValueError(f"缺少 Bingus Shared Loader v18 ZIP：{loader_zip_path}") from error
     if len(package_bytes) != zip_size or hashlib.sha256(package_bytes).hexdigest() != SHARED_LOADER_ZIP_SHA256:
         raise ValueError("本机 Bingus Shared Loader v18 ZIP SHA-256不匹配")
 
@@ -438,70 +428,32 @@ def entry_source(
 
 def addon_files(
     entry: bytes,
-    observe: bool = False,
-    display_test: bool = False,
-    translate: bool = False,
     *,
-    standalone: bool = False,
+    loader_zip: Path | str | None = None,
 ) -> dict[str, bytes]:
-    if sum((bool(observe), bool(display_test), bool(translate), bool(standalone))) > 1:
-        raise ValueError("观察、固定显示测试、伴随翻译和独立翻译模式互斥")
     resource = struct.pack("<II", len(entry), 2) + entry
-    if standalone:
-        loader_resource, loader_readme, loader_manifest = load_shared_loader_assets()
-        archive = make_lua_resource_archive(
-            [
-                (SHARED_LOADER_RESOURCE_HASH, loader_resource),
-                (resource_hash(RESOURCE_NAME), resource),
-            ]
-        )
-    else:
-        archive = make_single_resource_archive(resource_hash(RESOURCE_NAME), resource)
-    description = (
-        "只读研究探针：验证指定 game.dll 构建并导出候选字节，不连接聊天或调用游戏函数。"
-        "需要 Bingus Shared Loader v15+ / API 1。"
+    loader_resource, loader_readme, loader_manifest = load_shared_loader_assets(loader_zip)
+    archive = make_lua_resource_archive(
+        [
+            (SHARED_LOADER_RESOURCE_HASH, loader_resource),
+            (resource_hash(RESOURCE_NAME), resource),
+        ]
     )
-    if display_test:
-        description = (
-            "固定聊天显示测试：仅将插件识别出的固定 ASCII 测试消息替换为“聊天翻译测试成功”。"
-            "不联网、不广播；不会替换其他聊天正文。需要 Bingus Shared Loader v15+ / API 1。"
-        )
-    elif observe:
-        description = (
-            "只读聊天观察器：校验指定构建后读取有界历史和 UI 元数据，只报告固定测试消息是否出现。"
-            "不保存普通聊天，不调用游戏函数、不写游戏内存、不连接大模型。需要 Bingus Shared Loader v15+ / API 1。"
-        )
-    elif translate:
-        description = (
-            "本机聊天翻译桥接：将当前本机游戏会话中符合条件的聊天正文通过固定本地 mailbox 交给本机服务，"
-            "再尝试更新本机显示；插件本身不联网、不广播译文。需要 Bingus Shared Loader v15+ / API 1。"
-        )
-    elif standalone:
-        description = (
-            "进程内聊天翻译：通过游戏内原生网络线程将聊天交给配置的大模型并更新本机显示，不广播译文。"
-            "无需运行伴随程序。读取 HD2CT_API_URL、HD2CT_MODEL、HD2CT_API_KEY、"
-            "HD2CT_TIMEOUT_SECONDS（默认20）和 HD2CT_ENABLED（默认1）环境变量。"
-            "内置 Bingus Shared Loader v18，无需另外导入。Arsenal 默认优先级请放在列表最底；"
-            "启用 first-mod-wins 时请放在列表最顶。"
-        )
+    description = (
+        "进程内聊天翻译：通过游戏内原生网络线程将聊天交给配置的大模型并更新本机显示，不广播译文。"
+        "无需运行伴随程序。读取 HD2CT_API_URL、HD2CT_MODEL、HD2CT_API_KEY、"
+        "HD2CT_TIMEOUT_SECONDS（默认20）和 HD2CT_ENABLED（默认1）环境变量。"
+        "内置 Bingus Shared Loader v18，无需另外导入。Arsenal 默认优先级请放在列表最底；"
+        "启用 first-mod-wins 时请放在列表最顶。"
+    )
     manifest = {
         "Version": 1,
         "Guid": str(uuid.UUID(ADDON_GUID)),
-        "Name": (
-            "HD2 Chat Translate" if translate else
-            "HD2 Chat Translate Standalone" if standalone else
-            "HD2 Chat Display Test" if display_test else
-            "HD2 Chat Probe Research Tool"
-        ),
+        "Name": "HD2 Chat Translate Standalone",
         "Description": description,
         "Options": [
             {
-                "Name": (
-                    "HD2 Chat Translate" if translate else
-                    "HD2 Chat Translate Standalone" if standalone else
-                    "HD2 Chat Display Test" if display_test else
-                    "HD2 Chat Probe Research Tool"
-                ),
+                "Name": "HD2 Chat Translate Standalone",
                 "Description": description,
                 "Include": ["Addon"],
             }
@@ -513,22 +465,27 @@ def addon_files(
         "Addon/" + ARCHIVE_NAME + ".stream": b"",
         "Addon/" + ARCHIVE_NAME + ".gpu_resources": b"",
     }
-    if standalone:
-        try:
-            files["LICENSES/cJSON-LICENSE.txt"] = STANDALONE_LICENSE.read_bytes()
-        except OSError as error:
-            raise ValueError("独立包缺少vendor/cJSON许可证原文") from error
-        source_note = (
-            "Bingus Shared Loader v18 来源说明\n\n"
-            "上游项目：https://github.com/CowboyBingus/BingusSharedLoader\n"
-            "本机构建输入：artifacts/Bingus-Shared-Loader-v18.zip\n"
-            f"输入 ZIP SHA-256：{SHARED_LOADER_ZIP_SHA256}\n\n"
-            "本包从用户本机已有的上游 ZIP 中读取固定白名单条目。Loader Lua resource 在合并进本插件 patch 时保持原始字节。\n"
-            "随包保留的 README 和 manifest 是上游文件原文。本说明不为 Bingus Shared Loader 声明或新增许可证。\n"
-        ).encode("utf-8")
-        files["LICENSES/BingusSharedLoader-README.txt"] = loader_readme
-        files["LICENSES/BingusSharedLoader-manifest.json"] = loader_manifest
-        files["LICENSES/BingusSharedLoader-SOURCE.txt"] = source_note
+    try:
+        files["LICENSES/cJSON-LICENSE.txt"] = STANDALONE_LICENSE.read_bytes()
+    except OSError as error:
+        raise ValueError("standalone包缺少vendor/cJSON许可证原文") from error
+    loader_zip_path = Path(loader_zip) if loader_zip is not None else SHARED_LOADER_ZIP
+    loader_input_note = (
+        "artifacts/Bingus-Shared-Loader-v18.zip"
+        if _same_path(loader_zip_path, SHARED_LOADER_ZIP)
+        else "命令行 --loader-zip 指定的 ZIP"
+    )
+    source_note = (
+        "Bingus Shared Loader v18 来源说明\n\n"
+        "上游项目：https://github.com/CowboyBingus/BingusSharedLoader\n"
+        f"本机构建输入：{loader_input_note}\n"
+        f"输入 ZIP SHA-256：{SHARED_LOADER_ZIP_SHA256}\n\n"
+        "本包从用户本机已有的上游 ZIP 中读取固定白名单条目。Loader Lua resource 在合并进本插件 patch 时保持原始字节。\n"
+        "随包保留的 README 和 manifest 是上游文件原文。本说明不为 Bingus Shared Loader 声明或新增许可证。\n"
+    ).encode("utf-8")
+    files["LICENSES/BingusSharedLoader-README.txt"] = loader_readme
+    files["LICENSES/BingusSharedLoader-manifest.json"] = loader_manifest
+    files["LICENSES/BingusSharedLoader-SOURCE.txt"] = source_note
     return files
 
 
@@ -566,124 +523,58 @@ def _select_output_path(
     *,
     now: datetime | None = None,
 ) -> Path:
-    """CLI默认模式共用时间戳名称；build_artifact仍允许测试传入临时fixture路径。"""
+    """CLI默认使用时间戳名称；内部测试可传入临时输出路径。"""
     return Path(output) if output is not None else default_output_path(now)
-
-
-def _protect_deployed_source(output_path: Path) -> None:
-    """部署收据仍引用旧 ZIP 时，拒绝覆盖可用于回滚的来源包。"""
-    if not DEPLOYMENT_RECEIPT.exists():
-        return
-
-    is_default = any(
-        _same_path(output_path, item)
-        for item in (
-            DEFAULT_OUTPUT,
-            OBSERVE_OUTPUT,
-            DISPLAY_TEST_OUTPUT,
-            TRANSLATE_OUTPUT,
-            STANDALONE_OUTPUT,
-        )
-    ) or is_delivery_filename(output_path.name)
-    try:
-        receipt = json.loads(DEPLOYMENT_RECEIPT.read_text(encoding="utf-8"))
-    except (OSError, UnicodeError, json.JSONDecodeError) as error:
-        if is_default:
-            raise ValueError(
-                "无法读取部署收据；为保护可能仍在使用的旧来源 ZIP，拒绝覆盖默认输出。"
-                "请先核实并回滚部署，或指定新的 --output 路径。"
-            ) from error
-        return
-
-    if not isinstance(receipt, dict):
-        if is_default:
-            raise ValueError("部署收据格式无效，拒绝覆盖默认输出；请先核实并回滚部署。")
-        return
-    source_zips = receipt.get("sourceZips")
-    if not isinstance(source_zips, dict):
-        if is_default:
-            raise ValueError("部署收据缺少 sourceZips，拒绝覆盖默认输出；请先核实并回滚部署。")
-        return
-
-    source_paths: list[Path] = []
-    malformed_sources = not all(
-        isinstance(source_zips.get(role), dict)
-        and isinstance(source_zips[role].get("path"), str)
-        and bool(source_zips[role]["path"].strip())
-        for role in ("probe", "loader")
-    )
-    for source in source_zips.values():
-        if not isinstance(source, dict):
-            malformed_sources = True
-            continue
-        source_path = source.get("path")
-        if not isinstance(source_path, str) or not source_path.strip():
-            malformed_sources = True
-            continue
-        path = Path(source_path)
-        source_paths.append(path)
-        if _same_path(output_path, path):
-            raise ValueError(
-                "输出路径仍被部署收据引用为来源 ZIP，拒绝覆盖；"
-                "请先回滚部署，或指定新的 --output 路径。"
-            )
-    if (malformed_sources or not source_paths) and is_default:
-        raise ValueError("部署收据的来源路径不完整，拒绝覆盖默认输出；请先核实并回滚部署。")
 
 
 def build_artifact(
     output: Path | str | None = None,
-    observe: bool = False,
-    display_test: bool = False,
-    translate: bool = False,
     *,
-    standalone: bool = False,
+    loader_zip: Path | str | None = None,
+    native_dll: Path | str | None = None,
+    native_meta: Path | str | None = None,
 ) -> Path:
-    if sum((bool(observe), bool(display_test), bool(translate), bool(standalone))) > 1:
-        raise ValueError("--observe、--display-test、--translate 与 --standalone 不能同时使用")
     entry_path = ROOT / "game" / "chat_probe.lua"
     core_path = ROOT / "game" / "chat_probe_core.lua"
     observer_path = ROOT / "game" / "chat_observe_core.lua"
     translate_path = ROOT / "game" / "chat_translate_core.lua"
     standalone_module_path = ROOT / "game" / "chat_http_native.lua"
+    dll_path = Path(native_dll) if native_dll is not None else STANDALONE_DLL
+    meta_path = Path(native_meta) if native_meta is not None else STANDALONE_META
+    loader_zip_path = Path(loader_zip) if loader_zip is not None else SHARED_LOADER_ZIP
     output_path = _select_output_path(output)
     if output is None and os.path.lexists(output_path):
         raise ValueError(
             f"默认交付包已存在，拒绝覆盖：{output_path.name}。"
             "请等待下一秒重新构建，或通过 --output 指定新的时间戳文件名。"
         )
-    _protect_deployed_source(output_path)
-    source_paths = [entry_path, core_path, observer_path, translate_path, standalone_module_path]
-    if standalone:
-        source_paths.extend(
-            (STANDALONE_DLL, STANDALONE_META, STANDALONE_LICENSE, SHARED_LOADER_ZIP)
-        )
-    if output_path.resolve() in tuple(path.resolve() for path in source_paths):
+    source_paths = (
+        entry_path, core_path, observer_path, translate_path, standalone_module_path,
+        dll_path, meta_path, STANDALONE_LICENSE, loader_zip_path,
+    )
+    if any(_same_path(output_path, path) for path in source_paths):
         raise ValueError("输出不能覆盖构建输入文件")
-    native_module = None
-    if standalone:
-        if not STANDALONE_DLL.is_file() or not STANDALONE_META.is_file():
-            raise ValueError(
-                "缺少 artifacts/native/hd2ct_http.dll 或配套meta；请先构建原生 helper，builder不会自动编译或下载。"
-            )
-        if not STANDALONE_LICENSE.is_file():
-            raise ValueError("缺少 native/vendor/cjson/LICENSE")
-        native_module = standalone_module_source(
-            standalone_module_path.read_bytes(),
-            STANDALONE_DLL.read_bytes(),
-            STANDALONE_META.read_bytes(),
+    if not dll_path.is_file() or not meta_path.is_file():
+        raise ValueError(
+            f"缺少原生 helper DLL 或配套meta：{dll_path} / {meta_path}；"
+            "请先构建原生 helper，package builder不会自动编译或下载。"
         )
+    if not STANDALONE_LICENSE.is_file():
+        raise ValueError("缺少 native/vendor/cjson/LICENSE")
+    native_module = standalone_module_source(
+        standalone_module_path.read_bytes(),
+        dll_path.read_bytes(),
+        meta_path.read_bytes(),
+    )
     packaged_entry = entry_source(
         entry_path.read_bytes(),
         core_path.read_bytes(),
-        observer_path.read_bytes() if (observe or display_test or translate or standalone) else None,
-        display_test=display_test,
-        translate_source=translate_path.read_bytes() if (translate or standalone) else None,
-        translate=translate,
+        observer_path.read_bytes(),
+        translate_source=translate_path.read_bytes(),
         standalone_source=native_module,
-        standalone=standalone,
+        standalone=True,
     )
-    files = addon_files(packaged_entry, observe, display_test, translate, standalone=standalone)
+    files = addon_files(packaged_entry, loader_zip=loader_zip_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     with zipfile.ZipFile(output_path, "x", compression=zipfile.ZIP_DEFLATED) as package:
         for name, content in sorted(files.items()):
@@ -696,39 +587,23 @@ def build_artifact(
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    default_help = "默认输出 artifacts/HD2ChatTranslateYYYYMMDDHHMMSS.zip（北京时间）"
     parser.add_argument(
         "--output",
         type=Path,
-        help=(
-            "显式指定ZIP路径；CLI交付文件名须为 "
-            "HD2ChatTranslateYYYYMMDDHHMMSS.zip。未指定时所有模式 "
-            + default_help
-        ),
+        help="显式指定ZIP路径；文件名须为HD2ChatTranslateYYYYMMDDHHMMSS.zip。",
     )
-    mode = parser.add_mutually_exclusive_group()
-    mode.add_argument("--observe", action="store_true", help=f"构建持续只读观察器；{default_help}")
-    mode.add_argument(
-        "--display-test",
-        action="store_true",
-        help=f"构建固定中文显示测试 ZIP；{default_help}",
-    )
-    mode.add_argument(
-        "--translate",
-        action="store_true",
-        help=f"构建本机翻译桥接 ZIP；{default_help}",
-    )
-    mode.add_argument(
-        "--standalone",
-        action="store_true",
-        help=f"构建进程内网络翻译 ZIP；{default_help}",
-    )
+    parser.add_argument("--loader-zip", type=Path, help="Bingus Shared Loader v18来源ZIP；默认使用项目artifacts路径。")
+    parser.add_argument("--native-dll", type=Path, help="原生HTTP helper DLL；默认使用项目artifacts/native路径。")
+    parser.add_argument("--native-meta", type=Path, help="原生HTTP helper meta JSON；默认使用项目artifacts/native路径。")
     args = parser.parse_args()
     if args.output is not None and not is_delivery_filename(args.output.name):
         parser.error("CLI交付文件名必须为 HD2ChatTranslateYYYYMMDDHHMMSS.zip，时间使用北京时间")
     try:
         result = build_artifact(
-            args.output, args.observe, args.display_test, args.translate, standalone=args.standalone
+            args.output,
+            loader_zip=args.loader_zip,
+            native_dll=args.native_dll,
+            native_meta=args.native_meta,
         )
     except (OSError, ValueError) as error:
         parser.error(str(error))

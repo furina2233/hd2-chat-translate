@@ -3,18 +3,15 @@
 from __future__ import annotations
 
 import json
-import io
 from pathlib import Path
 import re
-import struct
 import sys
-import tempfile
 import unittest
-from contextlib import redirect_stdout
-from unittest import mock
-import zipfile
 
-from test_chat_probe import LUA_DLL, ROOT, LuaJIT, builder
+from lua_support import LUA_DLL, ROOT, LuaJIT
+
+sys.path.insert(0, str(ROOT / "tools"))
+import build_package as builder  # noqa: E402
 
 
 LUA_OBSERVE_HARNESS = r'''
@@ -911,8 +908,8 @@ class ObserveLuaCoreTests(unittest.TestCase):
         self.assertEqual(overflow["ui_diagnostics_dropped"], 9007199254740991)
 
 
-class ObserveBuilderAndAdapterTests(unittest.TestCase):
-    """检查两种构建模式、来源包保护及无需游戏进程的适配器静态边界。"""
+class ObserveEntryAndAdapterTests(unittest.TestCase):
+    """检查 Lua mock 兼容入口与无需游戏进程的适配器静态边界。"""
 
     @classmethod
     def setUpClass(cls):
@@ -952,18 +949,6 @@ class ObserveBuilderAndAdapterTests(unittest.TestCase):
         self.compile_only(default_entry)
         self.compile_only(observe_entry)
 
-        files = builder.addon_files(observe_entry, observe=True)
-        manifest = json.loads(files["manifest.json"])
-        self.assertIn("只读聊天观察器", manifest["Description"])
-        archive = files["Addon/9ba626afa44a3aa3.patch_0"]
-        record = struct.unpack_from("<7Q6I", archive, 104)
-        payload = archive[record[2] : record[2] + record[7]]
-        source = payload[8:]
-        self.assertIn(b"local OBSERVE_ENABLED = true", source)
-        self.assertIn(b"TEST_ASCII", source)
-        self.assertIn(b"TEST_CJK", source)
-        self.assertEqual(files["Addon/9ba626afa44a3aa3.patch_0.stream"], b"")
-        self.assertEqual(files["Addon/9ba626afa44a3aa3.patch_0.gpu_resources"], b"")
 
     def test_builder_rejects_merged_source_over_512_kib(self):
         source = (
@@ -979,41 +964,6 @@ class ObserveBuilderAndAdapterTests(unittest.TestCase):
         self.assertLessEqual(max(map(len, (source, scan_core, observe_core))), builder.MAX_SOURCE_BYTES)
         with self.assertRaisesRegex(ValueError, "嵌入后的 Lua 源文件超过构建大小上限"):
             builder.entry_source(source, scan_core, observe_core)
-
-    def test_observe_cli_builds_crc_valid_archive_with_embedded_core(self):
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            output = root / "HD2ChatTranslate20260101000000.zip"
-            receipt = root / "no-deployment-receipt.json"
-            arguments = ["build_chat_probe.py", "--observe", "--output", str(output)]
-            with (
-                mock.patch.object(builder, "DEPLOYMENT_RECEIPT", receipt),
-                mock.patch.object(sys, "argv", arguments),
-                redirect_stdout(io.StringIO()),
-            ):
-                builder.main()
-
-            with zipfile.ZipFile(output) as package:
-                self.assertIsNone(package.testzip())
-                self.assertEqual(
-                    set(package.namelist()),
-                    {
-                        "Addon/9ba626afa44a3aa3.patch_0",
-                        "Addon/9ba626afa44a3aa3.patch_0.gpu_resources",
-                        "Addon/9ba626afa44a3aa3.patch_0.stream",
-                        "manifest.json",
-                    },
-                )
-                manifest = json.loads(package.read("manifest.json"))
-                self.assertIn("只读聊天观察器", manifest["Description"])
-                archive = package.read("Addon/9ba626afa44a3aa3.patch_0")
-                record = struct.unpack_from("<7Q6I", archive, 104)
-                payload = archive[record[2] : record[2] + record[7]]
-                source = payload[8:]
-                self.assertIn(b"local OBSERVE_ENABLED = true", source)
-                self.assertIn(b"TEST_ASCII", source)
-                self.assertIn(b"TEST_CJK", source)
-                self.assertNotIn(builder.OBSERVE_MARKER, source)
 
     def test_adapter_memory_and_ui_behaviors_with_own_process_fake_kernel(self):
         source = (ROOT / "game" / "chat_probe.lua").read_text(encoding="utf-8")
@@ -1036,29 +986,7 @@ class ObserveBuilderAndAdapterTests(unittest.TestCase):
         )
         self.assertEqual(self.lua.run(script), "adapter fake-kernel mocks ok")
 
-    def test_builder_protects_receipt_referenced_source_zip(self):
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            old_zip = root / "deployed-source.zip"
-            old_zip.write_bytes(b"keep the deployed source unchanged")
-            other_zip = root / "loader.zip"
-            receipt = root / "receipt.json"
-            receipt.write_text(
-                json.dumps(
-                    {
-                        "sourceZips": {
-                            "probe": {"path": str(old_zip), "sha256": "a" * 64},
-                            "loader": {"path": str(other_zip), "sha256": "b" * 64},
-                        }
-                    }
-                ),
-                encoding="utf-8",
-            )
-            original = old_zip.read_bytes()
-            with mock.patch.object(builder, "DEPLOYMENT_RECEIPT", receipt):
-                with self.assertRaisesRegex(ValueError, "仍被部署收据引用"):
-                    builder.build_artifact(old_zip, observe=True)
-            self.assertEqual(old_zip.read_bytes(), original)
+
 
 if __name__ == "__main__":
     unittest.main()

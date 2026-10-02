@@ -1,4 +1,4 @@
-"""使用仓库中固定的 MinGW 编译器构建游戏内网络 worker DLL。"""
+"""使用 MinGW-w64 GCC 构建并核验游戏内网络 worker DLL。"""
 
 from __future__ import annotations
 
@@ -6,22 +6,21 @@ import argparse
 import hashlib
 import json
 import re
+import shutil
 import subprocess
 import sys
 from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
-COMPILER = Path(r"E:\mingw64\bin\gcc.exe")
-OBJDUMP = Path(r"E:\mingw64\bin\objdump.exe")
 DEFAULT_DLL = ROOT / "artifacts" / "native" / "hd2ct_http.dll"
-DEFAULT_META = ROOT / "artifacts" / "native" / "hd2ct_http.meta.json"
 SOURCE = ROOT / "native" / "hd2ct_http.c"
 CJSON_SOURCE = ROOT / "native" / "vendor" / "cjson" / "cJSON.c"
 ALLOWED_IMPORTS = {
     "ADVAPI32.DLL",
     "KERNEL32.DLL",
     "MSVCRT.DLL",
+    "UCRTBASE.DLL",
     "WINHTTP.DLL",
 }
 REQUIRED_EXPORTS = {
@@ -56,14 +55,35 @@ def run(command: list[str]) -> str:
     return completed.stdout
 
 
-def imported_dlls(dll: Path) -> list[str]:
-    output = run([str(OBJDUMP), "-p", str(dll)])
+def resolve_tool(value: str) -> Path:
+    """接受显式工具路径或 PATH 中的命令名。"""
+    candidate = Path(value).expanduser()
+    if candidate.is_file():
+        return candidate.resolve()
+    located = shutil.which(value)
+    if located is None:
+        raise RuntimeError(f"找不到构建工具：{value}；请配置 PATH 或使用 --cc / --objdump 指定路径")
+    return Path(located).resolve()
+
+
+def resolve_objdump(compiler: Path, explicit: str | None) -> Path:
+    """优先使用与 GCC 同目录、同前缀的 Binutils 工具。"""
+    if explicit is not None:
+        return resolve_tool(explicit)
+    sibling = compiler.with_name(compiler.name.replace("gcc", "objdump"))
+    if sibling != compiler and sibling.is_file():
+        return sibling.resolve()
+    return resolve_tool("objdump")
+
+
+def imported_dlls(dll: Path, objdump: Path) -> list[str]:
+    output = run([str(objdump), "-p", str(dll)])
     found = re.findall(r"(?im)^\s*DLL Name:\s*(\S+)\s*$", output)
     return sorted({name.upper() for name in found})
 
 
-def exported_names(dll: Path) -> set[str]:
-    output = run([str(OBJDUMP), "-p", str(dll)])
+def exported_names(dll: Path, objdump: Path) -> set[str]:
+    output = run([str(objdump), "-p", str(dll)])
     names: set[str] = set()
     in_exports = False
     for line in output.splitlines():
@@ -84,19 +104,21 @@ def exported_names(dll: Path) -> set[str]:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--cc", default="gcc", help="MinGW-w64 GCC 命令名或完整路径，默认从 PATH 查找 gcc")
+    parser.add_argument("--objdump", help="objdump 命令名或完整路径，默认使用 GCC 同目录的工具")
     parser.add_argument("--output", type=Path, default=DEFAULT_DLL)
     parser.add_argument("--meta", type=Path, default=None)
     args = parser.parse_args()
     output = args.output.resolve()
     metadata = args.meta.resolve() if args.meta else output.with_name("hd2ct_http.meta.json")
-    if not COMPILER.is_file() or not OBJDUMP.is_file():
-        raise RuntimeError("固定构建工具缺失：E:\\mingw64\\bin\\gcc.exe / objdump.exe")
+    compiler = resolve_tool(args.cc)
+    objdump = resolve_objdump(compiler, args.objdump)
     if not SOURCE.is_file() or not CJSON_SOURCE.is_file():
         raise RuntimeError("原生源码或已固定版本的 cJSON 源文件缺失")
     output.parent.mkdir(parents=True, exist_ok=True)
     metadata.parent.mkdir(parents=True, exist_ok=True)
     command = [
-        str(COMPILER),
+        str(compiler),
         "-std=c11",
         "-O2",
         "-shared",
@@ -119,10 +141,10 @@ def main() -> int:
     compile_output = run(command)
     if compile_output.strip():
         sys.stdout.write(compile_output)
-    file_description = run([str(OBJDUMP), "-f", str(output)])
+    file_description = run([str(objdump), "-f", str(output)])
     if "pei-x86-64" not in file_description:
         raise RuntimeError("构建产物不是 Win64 PE DLL")
-    imports = imported_dlls(output)
+    imports = imported_dlls(output, objdump)
     unexpected = {
         name
         for name in imports
@@ -136,11 +158,11 @@ def main() -> int:
         for name in imports
     ):
         raise RuntimeError("DLL 缺少预期的 WinHTTP、注册表或 Windows CRT 系统导入")
-    exports = exported_names(output)
+    exports = exported_names(output, objdump)
     missing = REQUIRED_EXPORTS - exports
     if missing:
         raise RuntimeError(f"DLL 缺少 ABI 导出：{', '.join(sorted(missing))}")
-    compiler_version = run([str(COMPILER), "--version"]).splitlines()[0]
+    compiler_version = run([str(compiler), "--version"]).splitlines()[0]
     binary = output.read_bytes()
     manifest = {
         "schema_version": 1,
@@ -150,7 +172,7 @@ def main() -> int:
         "sha256": hashlib.sha256(binary).hexdigest(),
         "architecture": "x86_64",
         "imports": imports,
-        "compiler": str(COMPILER),
+        "compiler": str(compiler),
         "compiler_version": compiler_version,
     }
     metadata.write_text(

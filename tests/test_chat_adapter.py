@@ -1,23 +1,14 @@
-"""翻译桥接 mailbox、适配器和 addon ZIP 的离线 mock 验证。"""
+"""聊天回写适配器的 LuaJIT fake-kernel mock 回归。"""
 
 from __future__ import annotations
 
 import json
 from pathlib import Path
 import re
-import struct
-import sys
-import tempfile
-import threading
-import time
 import unittest
-from unittest import mock
-import zipfile
 
-from hd2_translate.config import AppConfig
-from hd2_translate.service import CompanionService
+from lua_support import LUA_DLL, LuaJIT, ROOT
 from test_chat_observe import LUA_OBSERVER_ADAPTER_HARNESS
-from test_chat_probe import LUA_DLL, LuaJIT, ROOT, builder
 from test_chat_widgets import WIDGET_ADAPTER_CHECKS
 
 
@@ -463,90 +454,6 @@ end
 '''
 
 
-class ChatTranslateBuilderTests(unittest.TestCase):
-    """验证四种addon模式的嵌入和原始三参数构建兼容。"""
-
-    @classmethod
-    def setUpClass(cls) -> None:
-        if LUA_DLL is None:
-            raise RuntimeError("本机未提供LuaJIT lua51.dll，不能编译验证addon入口")
-        cls.lua = LuaJIT(LUA_DLL)
-
-    def test_mode_flags_are_mutually_exclusive_and_lua_sources_compile(self) -> None:
-        entry = (ROOT / "game" / "chat_probe.lua").read_bytes()
-        scan_core = (ROOT / "game" / "chat_probe_core.lua").read_bytes()
-        observe_core = (ROOT / "game" / "chat_observe_core.lua").read_bytes()
-        translate_core = (ROOT / "game" / "chat_translate_core.lua").read_bytes()
-
-        # 旧的两个位置参数和第三个观察核心参数继续有效。
-        default = builder.entry_source(entry, scan_core)
-        observe = builder.entry_source(entry, scan_core, observe_core)
-        display = builder.entry_source(entry, scan_core, observe_core, display_test=True)
-        translate = builder.entry_source(
-            entry, scan_core, observe_core, translate_source=translate_core, translate=True
-        )
-
-        self.assertIn(b"local OBSERVE_ENABLED = false", default)
-        self.assertIn(b"local DISPLAY_TEST_ENABLED = false", default)
-        self.assertIn(b"local TRANSLATE_ENABLED = false", default)
-        self.assertIn(b"local OBSERVE_ENABLED = true", observe)
-        self.assertIn(b"local OBSERVE_ENABLED = true", display)
-        self.assertIn(b"local DISPLAY_TEST_ENABLED = true", display)
-        self.assertIn(b"local OBSERVE_ENABLED = false", translate)
-        self.assertIn(b"local TRANSLATE_ENABLED = true", translate)
-        self.assertNotIn(builder.TRANSLATE_MARKER, translate)
-        self.assertIn(translate_core.rstrip(), translate)
-        self.assertIn("display_target_verified(manifest)".encode(), translate)
-
-        for name, source in (("default", default), ("observe", observe), ("display", display), ("translate", translate)):
-            with self.subTest(mode=name):
-                quoted = "[========[" + source.decode("utf-8") + "]========]"
-                self.assertEqual(self.lua.run(
-                    "local chunk, err=loadstring(" + quoted + "); assert(chunk,err); RESULT='syntax ok'"
-                ), "syntax ok")
-
-        with self.assertRaises(ValueError):
-            builder.entry_source(entry, scan_core, observe_core, display_test=True,
-                                 translate_source=translate_core, translate=True)
-        with self.assertRaises(ValueError):
-            builder.addon_files(translate, observe=True, translate=True)
-
-    def test_translate_zip_has_valid_container_and_receipt_source_is_protected(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            output = root / "translate.zip"
-            receipt = root / "receipt.json"
-            with mock.patch.object(builder, "DEPLOYMENT_RECEIPT", receipt):
-                builder.build_artifact(output, translate=True)
-                with zipfile.ZipFile(output) as package:
-                    self.assertIsNone(package.testzip())
-                    self.assertEqual(set(package.namelist()), {
-                        "Addon/" + builder.ARCHIVE_NAME,
-                        "Addon/" + builder.ARCHIVE_NAME + ".gpu_resources",
-                        "Addon/" + builder.ARCHIVE_NAME + ".stream",
-                        "manifest.json",
-                    })
-                    manifest = json.loads(package.read("manifest.json"))
-                    self.assertEqual(manifest["Name"], "HD2 Chat Translate")
-                    self.assertIn("本机聊天翻译桥接", manifest["Description"])
-                    archive = package.read("Addon/" + builder.ARCHIVE_NAME)
-                    record = struct.unpack_from("<7Q6I", archive, 104)
-                    payload = archive[record[2]:record[2] + record[7]]
-                    self.assertEqual(struct.unpack_from("<II", payload), (record[7] - 8, 2))
-                    source = payload[8:]
-                    self.assertIn(b"local TRANSLATE_ENABLED = true", source)
-                    self.assertIn(b"local OBSERVE_ENABLED = false", source)
-                    self.assertNotIn(builder.TRANSLATE_MARKER, source)
-
-                expected = output.read_bytes()
-                receipt.write_text(json.dumps({"sourceZips": {
-                    "probe": {"path": str(output)}, "loader": {"path": str(root / "loader.zip")},
-                }}), encoding="utf-8")
-                with self.assertRaisesRegex(ValueError, "仍被部署收据引用"):
-                    builder.build_artifact(output, translate=True)
-                self.assertEqual(output.read_bytes(), expected)
-
-
 class ChatTranslateAdapterTests(unittest.TestCase):
     """用LuaJIT内存页和纯内存Win32文件mock测试受限adapter。"""
 
@@ -663,149 +570,6 @@ end
         self.assertLessEqual(result["report_bytes"], 64 * 1024)
 
 
-class ChatTranslateMailboxE2ETests(unittest.TestCase):
-    """用临时邮箱和确定性翻译器串起Lua核心与Python companion。"""
-
-    @classmethod
-    def setUpClass(cls) -> None:
-        if LUA_DLL is None:
-            raise RuntimeError("本机未提供LuaJIT lua51.dll，不能运行桥接端到端验证")
-        cls.lua = LuaJIT(LUA_DLL)
-
-    def test_lua_core_companion_mailbox_response_and_fake_apply(self) -> None:
-        if sys.platform != "win32":
-            self.skipTest("此端到端夹具通过LuaJIT FFI Sleep让出Windows companion线程")
-
-        source = "Regroup at A1 and wait for reinforcements."
-        translated = "请在 A1 集合，等待增援。"
-        seen_sources: list[str] = []
-        seen_lock = threading.Lock()
-
-        class FakeTranslator:
-            config = AppConfig(enabled=True)
-
-            def translate(self, text: str, *, stop_event=None, deadline=None) -> str:
-                with seen_lock:
-                    seen_sources.append(text)
-                return translated
-
-        with tempfile.TemporaryDirectory() as directory:
-            mailbox = Path(directory)
-            fake_translator = FakeTranslator()
-            service = CompanionService(
-                AppConfig(enabled=True), mailbox=mailbox, poll_interval=0.02,
-                translator=fake_translator,
-            )
-            service.start()
-            try:
-                self.assertTrue(self._wait_for_path(mailbox / "bridge.flag", 3.0))
-                script = self._e2e_script(mailbox, source)
-                result = json.loads(self.lua.run(script))
-                self.assertTrue(result["applied"], "Lua core did not consume the companion response")
-                self.assertEqual(result["applied_text"], translated)
-                self.assertEqual(result["submitted_body"], source)
-                self.assertEqual(result["apply_count"], 1)
-                self.assertEqual(seen_sources, [source], "companion did not process exactly one request")
-                token = result["token"]
-                self.assertEqual(result["response_text"], f"OK\n{translated}")
-                self.assertFalse((mailbox / f"{token}.req").exists())
-                self.assertFalse((mailbox / f"{token}.res").exists())
-                self.assertFalse((mailbox / f"{token}.processing").exists())
-            finally:
-                service.stop()
-                self._wait_for_service_stop(service)
-
-    @staticmethod
-    def _wait_for_path(path: Path, timeout: float) -> bool:
-        deadline = time.monotonic() + timeout
-        while time.monotonic() < deadline:
-            if path.is_file():
-                return True
-            time.sleep(0.02)
-        return path.is_file()
-
-    def _wait_for_service_stop(self, service: CompanionService) -> None:
-        deadline = time.monotonic() + 3.0
-        while time.monotonic() < deadline:
-            threads = [thread for thread in [service._poll_thread, *service._workers] if thread]
-            if all(not thread.is_alive() for thread in threads) and service._mailbox_lock is None:
-                return
-            time.sleep(0.02)
-        self.fail("companion test threads did not stop")
-
-    @staticmethod
-    def _e2e_script(mailbox: Path, source: str) -> str:
-        mailbox_literal = "[==[" + mailbox.as_posix() + "]==]"
-        source_literal = "[==[" + source + "]==]"
-        return r'''
-local ffi = require("ffi")
-ffi.cdef[[void Sleep(unsigned long milliseconds);]]
-local json_core = dofile([[SCAN_CORE_PATH]])
-local core = dofile([[TRANSLATE_CORE_PATH]])
-local mailbox = MAILBOX_LITERAL
-local source = SOURCE_LITERAL
-local function read_small(path, maximum)
-    local file = io.open(path, "rb")
-    if not file then return nil end
-    local value = file:read(maximum)
-    file:close()
-    return value
-end
-local submitted_body, applied_text, applied_count, last_token, response_text = nil, nil, 0, nil, nil
-local state
-local message = {widget_slot = 0, event_slot = 4, owner_id = 9, body = source, proof = {private = true}}
-local adapter = {
-    now_ms = function()
-        local raw = read_small(mailbox .. "/bridge.flag", 65)
-        local stamp = raw and raw:match("^HD2CT1 ([0-9]+)\n$")
-        return tonumber(stamp) or 0
-    end,
-    heartbeat = function() return read_small(mailbox .. "/bridge.flag", 65) end,
-    read_slot = function(slot)
-        if slot == 0 and state and state.baseline_remaining == 0 then return "ok", message end
-        return "empty"
-    end,
-    submit = function(token, body)
-        local file = io.open(mailbox .. "/" .. token .. ".req", "wb")
-        if not file then return false end
-        file:write(body)
-        file:close()
-        submitted_body, last_token = body, token
-        return true
-    end,
-    response = function(token)
-        response_text = read_small(mailbox .. "/" .. token .. ".res", 16388)
-        return response_text
-    end,
-    apply = function(_, text)
-        applied_text = text
-        applied_count = applied_count + 1
-        return "called_confirmed"
-    end,
-    cancel = function(token)
-        os.remove(mailbox .. "/" .. token .. ".req")
-        os.remove(mailbox .. "/" .. token .. ".res")
-        return true
-    end,
-    output = function() end,
-}
-state = core.new(adapter, {target_verified = true, session_id = "e2e_session"})
-for _ = 1, 500 do
-    core.step(state)
-    if applied_text then break end
-    ffi.C.Sleep(10)
-end
-RESULT = json_core.encode_json({
-    applied = applied_text ~= nil,
-    applied_text = applied_text or "",
-    apply_count = applied_count,
-    submitted_body = submitted_body or "",
-    token = last_token or "",
-    response_text = response_text or "",
-})
-'''.replace("SCAN_CORE_PATH", (ROOT / "game" / "chat_probe_core.lua").as_posix()).replace(
-            "TRANSLATE_CORE_PATH", (ROOT / "game" / "chat_translate_core.lua").as_posix()
-        ).replace("MAILBOX_LITERAL", mailbox_literal).replace("SOURCE_LITERAL", source_literal)
 
 
 if __name__ == "__main__":

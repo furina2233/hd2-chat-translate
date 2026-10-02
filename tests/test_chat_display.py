@@ -1,21 +1,14 @@
-"""固定中文显示测试的 LuaJIT 隔离回归。"""
+"""聊天显示 setter 与目标签名门禁的 LuaJIT mock 回归。"""
 
 from __future__ import annotations
 
 import json
-import io
 from pathlib import Path
 import re
-import struct
-import sys
-import tempfile
 import unittest
-from contextlib import redirect_stderr, redirect_stdout
-from unittest import mock
-import zipfile
 
 from test_chat_observe import LUA_OBSERVER_ADAPTER_HARNESS
-from test_chat_probe import LUA_DLL, ROOT, LuaJIT, builder
+from lua_support import LUA_DLL, ROOT, LuaJIT
 from test_chat_widgets import WIDGET_ADAPTER_CHECKS
 
 
@@ -318,7 +311,7 @@ local display_spy_add_extra_key = false
         script = script.replace('RESULT = "adapter fake-kernel mocks ok"', checks, 1)
         self.assertEqual(self.lua.run(script), "display fake-setter checks ok")
 
-    def test_target_signature_and_display_builder_are_separate_from_default_and_observe(self):
+    def test_target_signature_and_display_gate_reject_unverified_or_out_of_window_candidates(self):
         source = (ROOT / "game" / "chat_probe.lua").read_text(encoding="utf-8")
         scan_core = (ROOT / "game" / "chat_probe_core.lua").read_bytes()
         observe_core = (ROOT / "game" / "chat_observe_core.lua").read_bytes()
@@ -375,70 +368,6 @@ RESULT = json_core.encode_json({
             "absent": False,
         })
 
-        entry = source.encode("utf-8")
-        default_entry = builder.entry_source(entry, scan_core)
-        observe_entry = builder.entry_source(entry, scan_core, observe_core)
-        display_entry = builder.entry_source(entry, scan_core, observe_core, display_test=True)
-        self.assertIn(b"local DISPLAY_TEST_ENABLED = false", default_entry)
-        self.assertIn(b"local DISPLAY_TEST_ENABLED = false", observe_entry)
-        self.assertIn(b"local DISPLAY_TEST_ENABLED = true", display_entry)
-        self.assertIn(b"local OBSERVE_ENABLED = true", display_entry)
-        self.assertIn("聊天翻译测试成功".encode("utf-8"), display_entry)
-        self.assertLessEqual(len(display_entry), builder.MAX_SOURCE_BYTES)
-
-        minimal_old_entry = (
-            b"local core = (function()\n" + builder.CORE_MARKER + b"\nend)()\n"
-            + builder.OBSERVE_FLAG + b"\nlocal observer_core = (function()\n"
-            + builder.OBSERVE_MARKER + b"\nend)()\n"
-        )
-        compat_default = builder.entry_source(minimal_old_entry, b"return {}", b"return nil")
-        self.assertIn(b"local OBSERVE_ENABLED = true", compat_default)
-
-        for packed in (default_entry, observe_entry, display_entry):
-            text = packed.decode("utf-8")
-            quoted = "[========[" + text + "]========]"
-            self.assertEqual(self.lua.run("local chunk, err=loadstring(" + quoted + "); assert(chunk,err); RESULT='syntax ok'"), "syntax ok")
-
-        files = builder.addon_files(display_entry, display_test=True)
-        manifest = json.loads(files["manifest.json"])
-        self.assertIn("固定聊天显示测试", manifest["Description"])
-        self.assertIn("聊天翻译测试成功", manifest["Description"])
-        self.assertNotIn("只读聊天观察器", manifest["Description"])
-
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            output = root / "HD2ChatTranslate20260101000000.zip"
-            receipt = root / "receipt.json"
-            args = ["build_chat_probe.py", "--display-test", "--output", str(output)]
-            with mock.patch.object(builder, "DEPLOYMENT_RECEIPT", receipt), \
-                    mock.patch.object(sys, "argv", args), redirect_stdout(io.StringIO()):
-                builder.main()
-            with zipfile.ZipFile(output) as package:
-                self.assertIsNone(package.testzip())
-                packaged_manifest = json.loads(package.read("manifest.json"))
-                self.assertIn("固定聊天显示测试", packaged_manifest["Description"])
-                archive = package.read("Addon/" + builder.ARCHIVE_NAME)
-                record = struct.unpack_from("<7Q6I", archive, 104)
-                payload = archive[record[2] : record[2] + record[7]]
-                packaged_source = payload[8:]
-                self.assertIn(b"local DISPLAY_TEST_ENABLED = true", packaged_source)
-                self.assertIn("聊天翻译测试成功".encode("utf-8"), packaged_source)
-
-            referenced = root / "deployed-display.zip"
-            referenced.write_bytes(b"preserve deployed source")
-            receipt.write_text(json.dumps({"sourceZips": {
-                "probe": {"path": str(referenced)}, "loader": {"path": str(root / "loader.zip")},
-            }}), encoding="utf-8")
-            with mock.patch.object(builder, "DEPLOYMENT_RECEIPT", receipt):
-                with self.assertRaisesRegex(ValueError, "仍被部署收据引用"):
-                    builder.build_artifact(referenced, display_test=True)
-            self.assertEqual(referenced.read_bytes(), b"preserve deployed source")
-
-            with mock.patch.object(builder, "DEPLOYMENT_RECEIPT", root / "missing-receipt.json"), \
-                    mock.patch.object(sys, "argv", ["build_chat_probe.py", "--observe", "--display-test"]), \
-                    redirect_stderr(io.StringIO()):
-                with self.assertRaises(SystemExit):
-                    builder.main()
 
 
 if __name__ == "__main__":

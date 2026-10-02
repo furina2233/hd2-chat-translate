@@ -1,4 +1,4 @@
-"""完整聊天翻译桥接纯核心与离线端到端测试。"""
+"""聊天翻译核心的 LuaJIT mock 回归。"""
 
 from __future__ import annotations
 
@@ -6,7 +6,7 @@ import json
 from pathlib import Path
 import unittest
 
-from test_chat_probe import LUA_DLL, LuaJIT, ROOT
+from lua_support import LUA_DLL, LuaJIT, ROOT
 
 
 CORE_SCENARIOS = r'''
