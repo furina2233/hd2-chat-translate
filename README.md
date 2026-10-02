@@ -13,6 +13,8 @@ We need reinforcements at A1
 
 当前版本通过 Windows 环境变量配置，网络请求在游戏进程内的后台线程执行。Arsenal 安装包已合并 Bingus Shared Loader v18，进入游戏即可运行。
 
+> **使用风险：** 本插件属于注入类程序，会在游戏进程中加载并执行代码，并调用游戏内部函数修改聊天显示。此类行为可能违反游戏或反作弊规则，并可能导致账号处罚或封禁。
+
 ## 安装
 
 1. 正常关闭游戏，在 HD2Arsenal 导入 `HD2ChatTranslateYYYYMMDDHHMMSS.zip`，更新同名模组并启用。
@@ -56,3 +58,7 @@ python tools/build_package.py
 游戏入口中的诊断内核仍用于签名校验和适配器回归；沿用的 `chat_probe` 文件名及资源名保证已安装模组的身份连续。构建入口生成独立翻译包。早期 Python 伴随程序、临时部署工具和旧诊断发行包已移除，历史源码可从 Git 找回。
 
 目前适配 Steam build `25480438`、EXE `1.8.46015.0` 的固定游戏指纹。独立翻译路径已完成真实中文回写，合并包的 TOC 错误已修正。用户后续反馈能在英文界面运行且系统通知没有被翻译。本次双语显示和错误提示更新仍需游戏内验收。边界与依据见 [接入研究](docs/native-chat-research.md) 和 [崩溃修复记录](docs/crash-analysis-2026-10-02.md)。
+
+## 开源许可证
+
+本项目原创代码采用 GNU General Public License v3.0 only（SPDX：`GPL-3.0-only`），完整文本见 [LICENSE](LICENSE)。第三方 cJSON 保留 MIT 许可证，见 [native/vendor/cjson/LICENSE](native/vendor/cjson/LICENSE)。合并包中的 Bingus Shared Loader v18 及其内容遵循上游许可和来源说明；本项目不重新许可该上游内容。
