@@ -49,7 +49,7 @@ pwsh -NoProfile -File tools/deploy_probe.ps1 -Translate -Rollback
 
 ## 构建与验收
 
-构建命令为 `python tools/build_chat_probe.py --translate`，输出 `artifacts/HD2ChatTranslate.zip`，仅含 addon 与 manifest，不含伴随程序或用户配置。需要单独运行本项目伴随程序。
+构建命令为 `python tools/build_chat_probe.py --translate`，新的输出统一为 `artifacts/HD2ChatTranslateYYYYMMDDHHMMSS.zip`（北京时间），仅含 addon 与 manifest，不含伴随程序或用户配置。需要单独运行本项目伴随程序及安装 Shared Loader；下文旧文件名与摘要保留当时的验收记录。
 
 - ZIP：34,966 字节，SHA-256 `7533a7889025baa8e5d793de437bc9898b30b1c888c5b5e15a9a8e4b522a613d`。
 - addon 主 patch：178,720 字节，SHA-256 `05646782605c5f37ae6fbac32f1dc05cc1e700580a62d58fd8901014b6adcfee`。

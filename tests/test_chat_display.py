@@ -407,7 +407,7 @@ RESULT = json_core.encode_json({
 
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            output = root / "display-test.zip"
+            output = root / "HD2ChatTranslate20260101000000.zip"
             receipt = root / "receipt.json"
             args = ["build_chat_probe.py", "--display-test", "--output", str(output)]
             with mock.patch.object(builder, "DEPLOYMENT_RECEIPT", receipt), \

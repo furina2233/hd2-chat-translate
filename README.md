@@ -4,11 +4,13 @@
 
 支持两种运行方式：独立版从 Windows 环境变量读取模型配置，在游戏内的后台线程完成请求；伴随程序版保留配置窗口。两者都使用已经过真实游戏验证的聊天原位回写路径。独立版的构建与验收记录见 [独立版说明](docs/chat-standalone.md)，接口适配与限制见 [运行与兼容性说明](docs/chat-translate.md)。
 
-2026-10-02 修订独立版已完成一次真实游戏验收：进程内模型请求成功，用户确认原聊天行替换为中文，运行报告确认回写 1 次且翻译与回写错误为零。修订包含启动时文件信息结构越界的修复，101 项测试通过。
+2026-10-02 修订独立版已完成一次真实游戏验收：进程内模型请求成功，用户确认原聊天行替换为中文，运行报告确认回写 1 次且翻译与回写错误为零。修订包含启动时文件信息结构越界的修复，当前 111 项测试通过；本次合并安装包的 Arsenal 导入与游戏验证记录见下方说明。
 
 ## 独立版：Arsenal 安装后直接启动游戏
 
-游戏关闭时，在 HD2Arsenal 导入 `artifacts/HD2ChatTranslateStandalone.zip`，启用并部署；同时需要 Bingus Shared Loader v18。已有旧版聊天 addon 时，先停用旧版。安装包只携带聊天 addon，loader 作为独立依赖安装。
+游戏关闭时，在 HD2Arsenal 导入最新独立版 `HD2ChatTranslate年月日时分秒.zip`，选择更新同名模组，启用并部署。新包将 Bingus Shared Loader v18 和聊天 addon 放在同一个 patch 内，无需另外导入加载器。默认优先级下把本模组放在列表最底端；若启用了“第一个模组优先”，则放最顶端。不要同时启用旧版聊天 addon。
+
+所有新构建包统一使用北京时间命名，例如 `HD2ChatTranslate20261002163000.zip`。此前的 `HD2ChatTranslateStandalone.zip` 只含 addon，单独部署它不会启动插件；安装问题与修订包核验见 [独立版说明](docs/chat-standalone.md)。
 
 在 Windows 用户或系统环境变量中填写 `HD2CT_API_URL`、`HD2CT_MODEL`、`HD2CT_API_KEY`，然后启动游戏。无需运行 `run.ps1`、Python 或伴随程序。配置在游戏启动时读取，修改后重启游戏即可。密钥只在本机填写。
 
@@ -32,7 +34,7 @@ pwsh -File .\run.ps1
 
 ## 伴随程序版的游戏安装与回滚
 
-安装包为 `artifacts/HD2ChatTranslate.zip`，需要 Bingus Shared Loader v18。现有本机部署使用独立 patch 槽和带指纹的收据，保留原 Arsenal patch 0–20；来源包与 `.local` 收据需保留至回滚完成。安装与移除前正常退出游戏。
+此前验收的安装包为 `artifacts/HD2ChatTranslate.zip`，需要另外安装 Bingus Shared Loader v18。本项目的历史脚本部署使用独立 patch 槽和带指纹的收据，保留原 Arsenal patch 0–20；来源包与 `.local` 收据需保留至回滚完成。安装与移除前正常退出游戏。新构建输出统一采用上述时间命名；以下脚本仍核验历史固定来源包，不用于部署新的合并独立包。
 
 ```pwsh
 pwsh -NoProfile -File tools/deploy_probe.ps1 -Translate -DryRun
@@ -57,7 +59,7 @@ pwsh -NoProfile -File tools/deploy_probe.ps1 -Translate -Rollback
 python -m unittest discover -s tests -v
 ```
 
-101 项测试通过，零失败、零跳过，覆盖伴随服务、配置与密钥保护、连接测试、UTF-8、队列及心跳、原子邮箱、控件生命周期复核、原生 setter 模拟、WinHTTP 后台请求、文件信息 ABI 和 ZIP 构建。适配器使用本机私有 LuaJIT、假内核与内存缓冲区，不读取外部游戏进程或调用真实 setter；文件结构回归另调用真实 Windows API 读取测试临时文件并检查保护字节。HTTP 回归使用模拟响应和本机端点；真实提供商连接另以固定示例核验。
+111 项测试通过，零失败、零跳过，覆盖伴随服务、配置与密钥保护、连接测试、UTF-8、队列及心跳、原子邮箱、控件生命周期复核、原生 setter 模拟、WinHTTP 后台请求、文件信息 ABI、合并资源 ZIP、时间命名及输入和同名文件保护。适配器使用本机私有 LuaJIT、假内核与内存缓冲区，不读取外部游戏进程或调用真实 setter；文件结构回归另调用真实 Windows API 读取测试临时文件并检查保护字节。HTTP 回归使用模拟响应和本机端点；真实提供商连接另以固定示例核验。
 
 ## 研究资料
 

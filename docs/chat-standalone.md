@@ -6,9 +6,11 @@
 
 ## 安装与配置
 
-在游戏正常关闭时，向 HD2Arsenal 导入 `HD2ChatTranslateStandalone.zip`，启用并部署。依赖已经兼容的 Bingus Shared Loader v18，它作为独立模组安装并保持足够高的优先级。不要同时启用旧聊天翻译 addon；独立版使用同一个 Lua 资源作为升级。
+在游戏正常关闭时，向 HD2Arsenal 导入最新独立版 `HD2ChatTranslate年月日时分秒.zip`，更新同名模组，启用并部署。新包将 Bingus Shared Loader v18 的原始启动资源与聊天 addon 合入同一个 patch，无需另外导入加载器。默认优先级时将本模组放在列表最底端；若启用“第一个模组优先”，则放最顶端。不要同时启用旧聊天翻译 addon；独立版保留相同 Guid 与 Lua 资源作为升级。
 
-Arsenal 的 [导入说明](https://docs.rsnl.gg/mod-management/adding-mods) 支持 archive 内的 patch 文件；本包继续使用已采用的单 addon patch 和 V1 manifest 格式，不合并 loader 的 patch 或 manifest。
+Arsenal 的 [导入说明](https://docs.rsnl.gg/mod-management/adding-mods) 支持包内的 patch 文件。新包保持 V1 manifest 的单个 `Include: ["Addon"]` 选项，只部署一个含两条 Lua 资源的 patch，避免两份同名 patch 覆盖。`Include` 仅选择包内文件夹，不会自动安装外部依赖；参见 [manifest 说明](https://docs.rsnl.gg/mod-builder/manifest)。loader 的 [发现器](https://github.com/CowboyBingus/BingusSharedLoader/blob/main/src/discover.lua) 会逐条扫描 patch 中的 Lua 资源，支持在同一个 TOC 内找到聊天 addon。
+
+已配置环境变量的用户只需更新安装包并重新部署，随后启动游戏，等待约一分钟再发送英文测试消息。出现问题时先检查本说明中的状态报告是否生成了新会话，避免把旧的成功报告当成本次安装结果。
 
 在 Windows 的“环境变量”设置中添加：
 
@@ -52,9 +54,9 @@ Arsenal 的 [导入说明](https://docs.rsnl.gg/mod-management/adding-mods) 支�
 
 ## 回滚
 
-正常关闭游戏后，在 Arsenal 禁用或移除独立 addon 并重新部署；按需保留其他模组使用的 Shared Loader。提取的本插件 DLL 缓存可以在游戏关闭后删除，它只位于本插件专用的 `native` 目录。环境变量可以自行删除或将 `HD2CT_ENABLED` 设为 `0`。
+正常关闭游戏后，在 Arsenal 禁用或移除独立包并重新部署。新包移除时其内置启动资源一并移除；其他模组如果依赖 Shared Loader，需保留或恢复它们的独立加载器。提取的本插件 DLL 缓存可以在游戏关闭后删除，它只位于本插件专用的 `native` 目录。环境变量可以自行删除或将 `HD2CT_ENABLED` 设为 `0`。
 
-本机游戏核验使用独立槽位与指纹收据部署。如仍存在这类部署，改由 Arsenal 管理前，先正常退出游戏并执行 `pwsh -NoProfile -File tools/deploy_probe.ps1 -Standalone -Rollback`，再导入和部署本包及 loader，避免重复部署。该脚本仅删除收据拥有且摘要匹配的六个文件。旧伴随程序版的来源包仍保留。
+此前本机游戏核验使用独立槽位与指纹收据部署。如仍存在这类历史部署，改由 Arsenal 管理前，先正常退出游戏并执行 `pwsh -NoProfile -File tools/deploy_probe.ps1 -Standalone -Rollback`，再导入和部署新包，避免重复部署。该脚本仅删除历史收据拥有且摘要匹配的六个文件，不管理新的 Arsenal 合并包。旧伴随程序版的来源包仍保留。
 
 2026-10-02 核验完成后，按用户要求移除了本机部署：patch 21 的聊天 addon、patch 22 的本次配套 loader，共六个文件，以及活动部署收据；另删除了摘要匹配的网络 DLL 缓存。原 Arsenal patch 0–20 的 21 个主文件摘要未变。源码、来源 ZIP、验收记录和模型环境变量均保留；游戏不会继续加载本次翻译插件，需要使用时可重新安装。
 
@@ -67,7 +69,9 @@ python tools/build_native_http.py
 python tools/build_chat_probe.py --standalone
 ```
 
-网络模块静态编译官方 [cJSON v1.7.19](https://github.com/DaveGamble/cJSON/tree/v1.7.19)，在源码和 ZIP 中保留其 MIT 许可。
+输出统一为 `artifacts/HD2ChatTranslateYYYYMMDDHHMMSS.zip`，时间取北京时间；同秒同名包已存在时拒绝覆盖。CLI 的 `--output` 也需遵守该文件名格式。网络模块静态编译官方 [cJSON v1.7.19](https://github.com/DaveGamble/cJSON/tree/v1.7.19)，在源码和 ZIP 中保留其 MIT 许可。合并包构建还需本机已有的固定官方 `artifacts/Bingus-Shared-Loader-v18.zip`；构建器核验其摘要并原样保留启动资源及上游说明、元数据，不自动下载或改写加载器。
+
+以下大小、摘要及 101 项测试为此前单 addon 包的验收记录，新的 Arsenal 合并包另见下方修复记录：
 
 - 修订 ZIP：70,292 字节，SHA-256 `5cbe8bc56ae50d73148a7f814cc8d17b6940efa566c10f2045edd736628f4948`。
 - addon 主 patch：307,664 字节，SHA-256 `1d6bc3b6fb77fc715b8fe6e6280b372bf0bb3451603e2f71d9fe07e83b41ec58`。
@@ -83,3 +87,13 @@ ZIP CRC、内嵌 DLL 指纹、许可条目及 manifest 已核验。临时目录�
 修订版部署后，用户按直接启动游戏的流程验证，并确认“原聊天行已变成中文”。16:22:29 的新会话报告为 `mode: standalone`、`transport: in_process_winhttp`，原生初始化和最后状态均为 `0`。共执行 6,308 个更新步，提交 1 条消息、收到 1 条译文、确认原位回写 1 次；翻译错误、适配器错误和回写错误均为 `0`，待处理数为 `0`。这确认了环境变量配置与进程内翻译路径在真实游戏中完成一次请求和替换。
 
 不含聊天、地址或密钥的报告已保存到本机忽略目录 `artifacts/standalone-runtime/confirmed.json`，SHA-256 为 `0e74c582224ccdf3ecfe4a455d884bce3b9e221dd732a4e78da48b0eee7c9b41`。这是单次功能验收，尚未覆盖长时间游玩、多人连续消息或所有服务商；此前转储也不能单独证明所有启动异常都来自已修复的结构越界。
+
+## Arsenal 安装修复（2026-10-02）
+
+移除临时部署后，用户仅导入旧的单 addon ZIP。取证确认 Arsenal 的 `patch_21` 与旧包聊天资源完全匹配，但游戏目录没有 Shared Loader 的对应资源，加载器日志和翻译报告仍停在之前的成功会话；三个模型环境变量均已配置。因此聊天代码虽然被部署，缺少负责启动它的加载器。
+
+本次修复只调整构建与包装：把经固定摘要验证的原始 v18 启动资源和原聊天资源放入一个 archive，保持上游启动内容、聊天逻辑与原生网络 DLL 不变，并保留上游说明及来源信息。新包的实际 Arsenal 导入和游戏内翻译需要本轮重新核验，此前临时脚本部署的成功不能代替这个验证。
+
+新包为 `HD2ChatTranslate20261002170232.zip`，83,094 字节，SHA-256 `9053e33dba45a6d54b6114ef43f68e14d5e682588b4411565e030bc0a09af071`。唯一主 patch 为 328,368 字节，SHA-256 `81b4fde7e8bfedaad7ee507cd21312c3d22c2612278d0e477b954d77024d180f`。两条资源位于对齐的偏移 272 与 20,896，边界和填充均已检查；启动资源与原始 v18 包逐字节一致，聊天资源与此前游戏验证过的单 addon 包逐字节一致。内嵌 DLL 指纹、实际包内完整 LuaJIT 语法、ZIP CRC、单个 Include 选项和上游原文文件均通过检查。数值证据保存在本机忽略目录 `artifacts/arsenal-repair/package-verified.json`。
+
+本轮全套 `python -X utf8 -m unittest discover -s tests -v` 为 111 项通过，零失败、零跳过，28.598 秒；新增覆盖双资源 TOC、原始 loader 内容保留、错误来源包与非空 sidecar 拒绝、构建输入保护、北京时间命名，以及文件预检查后出现同名包时拒绝覆盖。源码语法和 `git diff --check` 通过，完整 UTF-8 日志位于 `artifacts/arsenal-repair/full-tests.log`。本机 Arsenal 0.36.2 没有查证可用的外部 ZIP 导入、部署接口；需要在其界面导入更新，启用并 Deploy，再检查实际部署指纹及新游戏会话。

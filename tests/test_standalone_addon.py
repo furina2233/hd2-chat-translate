@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import contextlib
+from datetime import datetime, timezone
 import hashlib
+import io
 import json
 import os
 from pathlib import Path
@@ -40,6 +43,75 @@ def fake_x64_dll() -> bytes:
     struct.pack_into("<IIII", output, section + 8, 0x1000, 0x1000, 0x200, 0x200)
     struct.pack_into("<I", output, section + 36, 0x60000020)
     return bytes(output)
+
+
+def synthetic_shared_loader_package(
+    *,
+    stream: bytes = b"",
+    gpu_resources: bytes = b"",
+    include_readme: bool = True,
+    include_manifest: bool = True,
+    entry_data_offset: int = 192,
+) -> tuple[bytes, bytes, bytes, bytes, bytes]:
+    """生成独立测试用的v18结构ZIP，不执行也不依赖本机官方包。"""
+    lua_bytes = b"\x1bLJ\x02" + b"L" * (20612 - 4)
+    resource = struct.pack("<II", len(lua_bytes), 2) + lua_bytes
+    patch = bytearray(20816)
+    struct.pack_into("<III20sQQ24s", patch, 0, 0xF0000011, 1, 1, bytes(20), 20816, 0, bytes(24))
+    struct.pack_into("<IIQIIII", patch, 72, 0, 0, builder.RESOURCE_TYPE, 1, 0, 16, 16)
+    struct.pack_into(
+        "<7Q6I",
+        patch,
+        104,
+        builder.SHARED_LOADER_RESOURCE_HASH,
+        builder.RESOURCE_TYPE,
+        entry_data_offset,
+        0,
+        0,
+        0,
+        0,
+        len(resource),
+        0,
+        0,
+        16,
+        16,
+        0,
+    )
+    patch[192 : 192 + len(resource)] = resource
+    readme = b"Upstream README fixture\r\n"
+    manifest = b'{"name":"loader fixture"}\r\n'
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w", compression=zipfile.ZIP_DEFLATED) as package:
+        package.writestr(builder.SHARED_LOADER_PATCH_MEMBER, patch)
+        package.writestr(builder.SHARED_LOADER_STREAM_MEMBER, stream)
+        package.writestr(builder.SHARED_LOADER_GPU_MEMBER, gpu_resources)
+        if include_readme:
+            package.writestr(builder.SHARED_LOADER_README_MEMBER, readme)
+        if include_manifest:
+            package.writestr(builder.SHARED_LOADER_MANIFEST_MEMBER, manifest)
+        package.writestr("manifest.json", b"must not be copied")
+        package.writestr("thumbnail.png", b"not read")
+    return buffer.getvalue(), bytes(patch), resource, readme, manifest
+
+
+def read_synthetic_shared_loader_assets(
+    path: Path,
+    package_bytes: bytes,
+    patch: bytes,
+    resource: bytes,
+) -> tuple[bytes, bytes, bytes]:
+    path.write_bytes(package_bytes)
+    with (
+        mock.patch.object(builder, "SHARED_LOADER_ZIP", path),
+        mock.patch.object(
+            builder, "SHARED_LOADER_ZIP_SHA256", hashlib.sha256(package_bytes).hexdigest()
+        ),
+        mock.patch.object(builder, "SHARED_LOADER_PATCH_SHA256", hashlib.sha256(patch).hexdigest()),
+        mock.patch.object(
+            builder, "SHARED_LOADER_RESOURCE_SHA256", hashlib.sha256(resource).hexdigest()
+        ),
+    ):
+        return builder.load_shared_loader_assets()
 
 
 def fake_metadata(dll: bytes) -> bytes:
@@ -403,6 +475,196 @@ class StandaloneBuilderTests(unittest.TestCase):
     def setUpClass(cls):
         cls.lua = LuaJIT(LUA_DLL) if LUA_DLL is not None else None
 
+    def test_delivery_name_uses_fixed_beijing_time_and_valid_cli_format(self):
+        instant = datetime(2026, 10, 2, 16, 4, 5, tzinfo=timezone.utc)
+        with tempfile.TemporaryDirectory() as directory:
+            with mock.patch.object(builder, "ROOT", Path(directory)):
+                output = builder.default_output_path(instant)
+        self.assertEqual(output.name, "HD2ChatTranslate20261003000405.zip")
+        self.assertTrue(builder.is_delivery_filename(output.name))
+        self.assertFalse(builder.is_delivery_filename("HD2ChatTranslate20261303000405.zip"))
+        self.assertFalse(builder.is_delivery_filename("HD2ChatTranslate.zip"))
+
+    def test_all_modes_use_the_timestamped_default_and_custom_fixture_paths_remain_supported(self):
+        with tempfile.TemporaryDirectory() as directory:
+            temporary = Path(directory)
+            outputs = [
+                temporary / f"HD2ChatTranslate2026100212000{index}.zip"
+                for index in range(5)
+            ]
+            native = temporary / "hd2ct_http.dll"
+            metadata = temporary / "hd2ct_http.meta.json"
+            license_file = temporary / "LICENSE"
+            native.write_bytes(fake_x64_dll())
+            metadata.write_bytes(fake_metadata(native.read_bytes()))
+            license_file.write_text("license", encoding="utf-8")
+            modes = (
+                {},
+                {"observe": True},
+                {"display_test": True},
+                {"translate": True},
+                {"standalone": True},
+            )
+            with (
+                mock.patch.object(builder, "default_output_path", side_effect=outputs),
+                mock.patch.object(builder, "DEPLOYMENT_RECEIPT", temporary / "missing-receipt.json"),
+                mock.patch.object(builder, "STANDALONE_DLL", native),
+                mock.patch.object(builder, "STANDALONE_META", metadata),
+                mock.patch.object(builder, "STANDALONE_LICENSE", license_file),
+                mock.patch.object(builder, "standalone_module_source", return_value=b"module"),
+                mock.patch.object(builder, "entry_source", return_value=b"entry"),
+                mock.patch.object(builder, "addon_files", return_value={"manifest.json": b"{}"}),
+            ):
+                for mode, expected in zip(modes, outputs):
+                    self.assertEqual(builder.build_artifact(**mode), expected)
+                    self.assertTrue(expected.is_file())
+
+            fixture = temporary / "internal-fixture.zip"
+            self.assertEqual(builder._select_output_path(fixture), fixture)
+
+    def test_default_output_collision_and_corrupt_receipt_never_overwrite_or_create(self):
+        with tempfile.TemporaryDirectory() as directory:
+            temporary = Path(directory)
+            existing = temporary / "HD2ChatTranslate20261002120000.zip"
+            existing.write_bytes(b"keep this package")
+            receipt = temporary / "receipt.json"
+            receipt.write_text("{broken", encoding="utf-8")
+            with (
+                mock.patch.object(builder, "default_output_path", return_value=existing),
+                mock.patch.object(builder, "DEPLOYMENT_RECEIPT", receipt),
+            ):
+                with self.assertRaisesRegex(ValueError, "拒绝覆盖"):
+                    builder.build_artifact()
+            self.assertEqual(existing.read_bytes(), b"keep this package")
+
+            with mock.patch.object(builder, "DEPLOYMENT_RECEIPT", receipt):
+                not_created = temporary / "HD2ChatTranslate20261002120001.zip"
+                with self.assertRaisesRegex(ValueError, "拒绝覆盖默认输出"):
+                    builder._protect_deployed_source(not_created)
+                self.assertFalse(not_created.exists())
+
+                receipt.write_text(
+                    json.dumps(
+                        {
+                            "sourceZips": {
+                                "probe": {"path": str(existing)},
+                                "loader": {"path": str(temporary / "loader.zip")},
+                            }
+                        }
+                    ),
+                    encoding="utf-8",
+                )
+                with self.assertRaisesRegex(ValueError, "仍被部署收据引用"):
+                    builder._protect_deployed_source(existing)
+                self.assertEqual(existing.read_bytes(), b"keep this package")
+
+    def test_cli_rejects_non_timestamp_output_name(self):
+        with (
+            mock.patch.object(sys, "argv", ["build_chat_probe.py", "--output", "custom.zip"]),
+            contextlib.redirect_stderr(io.StringIO()),
+            self.assertRaises(SystemExit) as raised,
+        ):
+            builder.main()
+        self.assertEqual(raised.exception.code, 2)
+
+    def test_output_creation_refuses_a_collision_after_the_precheck(self):
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "HD2ChatTranslate20261002120000.zip"
+            output.write_bytes(b"preserve the concurrently created package")
+            with (
+                mock.patch.object(builder, "default_output_path", return_value=output),
+                mock.patch.object(builder.os.path, "lexists", return_value=False),
+                mock.patch.object(builder, "DEPLOYMENT_RECEIPT", Path(directory) / "missing.json"),
+                self.assertRaises(FileExistsError),
+            ):
+                builder.build_artifact()
+            self.assertEqual(output.read_bytes(), b"preserve the concurrently created package")
+
+    def test_cli_accepts_timestamped_output_path(self):
+        output = Path("HD2ChatTranslate20261002123456.zip")
+        with (
+            mock.patch.object(sys, "argv", ["build_chat_probe.py", "--output", str(output)]),
+            mock.patch.object(builder, "build_artifact", return_value=output) as build,
+            contextlib.redirect_stdout(io.StringIO()),
+        ):
+            builder.main()
+        build.assert_called_once_with(output, False, False, False, standalone=False)
+
+    def test_lua_archive_helper_preserves_legacy_single_resource_bytes_and_bounds_list(self):
+        resource = struct.pack("<II", 4, 2) + b"data"
+        archive = builder.make_single_resource_archive(0x1234, resource)
+        self.assertEqual(
+            hashlib.sha256(archive).hexdigest(),
+            "aabae1880d3785ba7c14a4787f7d08ee635bccd0685d032c8eba26ee36397675",
+        )
+        self.assertEqual(builder.make_lua_resource_archive([(0x1234, resource)]), archive)
+        with self.assertRaisesRegex(ValueError, "重复"):
+            builder.make_lua_resource_archive([(0x1234, resource), (0x1234, resource)])
+        with self.assertRaisesRegex(ValueError, "数量上限"):
+            builder.make_lua_resource_archive(
+                [(index, resource) for index in range(builder.MAX_ARCHIVE_LUA_RESOURCES + 1)]
+            )
+
+    def test_local_shared_loader_zip_is_pinned_and_reads_only_required_assets(self):
+        package_bytes, patch, resource, readme, manifest = synthetic_shared_loader_package()
+        with tempfile.TemporaryDirectory() as directory:
+            actual = read_synthetic_shared_loader_assets(
+                Path(directory) / "loader.zip", package_bytes, patch, resource
+            )
+        self.assertEqual(actual, (resource, readme, manifest))
+
+    def test_local_shared_loader_rejects_missing_bad_and_nonempty_sidecars(self):
+        with tempfile.TemporaryDirectory() as directory:
+            temporary = Path(directory)
+            missing = temporary / "missing.zip"
+            with mock.patch.object(builder, "SHARED_LOADER_ZIP", missing):
+                with self.assertRaisesRegex(ValueError, "缺少本机"):
+                    builder.load_shared_loader_assets()
+
+            package_bytes, patch, resource, _, _ = synthetic_shared_loader_package()
+            path = temporary / "wrong-sha.zip"
+            path.write_bytes(package_bytes)
+            with (
+                mock.patch.object(builder, "SHARED_LOADER_ZIP", path),
+                mock.patch.object(builder, "SHARED_LOADER_ZIP_SHA256", "0" * 64),
+            ):
+                with self.assertRaisesRegex(ValueError, "ZIP SHA-256"):
+                    builder.load_shared_loader_assets()
+
+            for sidecars in ({"stream": b"unexpected"}, {"gpu_resources": b"unexpected"}):
+                invalid_zip, invalid_patch, invalid_resource, _, _ = synthetic_shared_loader_package(
+                    **sidecars
+                )
+                with self.assertRaisesRegex(ValueError, "sidecar.*必须为空"):
+                    read_synthetic_shared_loader_assets(
+                        temporary / "nonempty-sidecar.zip",
+                        invalid_zip,
+                        invalid_patch,
+                        invalid_resource,
+                    )
+
+            malformed_zip, malformed_patch, malformed_resource, _, _ = synthetic_shared_loader_package(
+                entry_data_offset=208
+            )
+            with self.assertRaisesRegex(ValueError, "TOC entry布局"):
+                read_synthetic_shared_loader_assets(
+                    temporary / "wrong-layout.zip",
+                    malformed_zip,
+                    malformed_patch,
+                    malformed_resource,
+                )
+
+            missing_doc_zip, missing_doc_patch, missing_doc_resource, _, _ = (
+                synthetic_shared_loader_package(include_manifest=False)
+            )
+            with self.assertRaisesRegex(ValueError, "缺少或重复白名单条目"):
+                read_synthetic_shared_loader_assets(
+                    temporary / "missing-doc.zip",
+                    missing_doc_zip,
+                    missing_doc_patch,
+                    missing_doc_resource,
+                )
+
     def run_loader(self, mode: str) -> list[str]:
         if self.lua is None:
             self.skipTest("本机未提供LuaJIT lua51.dll")
@@ -448,7 +710,10 @@ class StandaloneBuilderTests(unittest.TestCase):
         self.assertIn(b"local TRANSLATE_ENABLED = true", entry)
         self.assertIn(b"local OBSERVE_ENABLED = false", entry)
 
-        files = builder.addon_files(entry, standalone=True)
+        _, _, loader_resource, loader_readme, loader_manifest = synthetic_shared_loader_package()
+        loader_assets = (loader_resource, loader_readme, loader_manifest)
+        with mock.patch.object(builder, "load_shared_loader_assets", return_value=loader_assets):
+            files = builder.addon_files(entry, standalone=True)
         self.assertEqual(
             set(files),
             {
@@ -457,10 +722,32 @@ class StandaloneBuilderTests(unittest.TestCase):
                 "Addon/9ba626afa44a3aa3.patch_0.stream",
                 "Addon/9ba626afa44a3aa3.patch_0.gpu_resources",
                 "LICENSES/cJSON-LICENSE.txt",
+                "LICENSES/BingusSharedLoader-README.txt",
+                "LICENSES/BingusSharedLoader-manifest.json",
+                "LICENSES/BingusSharedLoader-SOURCE.txt",
             },
         )
+        archive = files["Addon/9ba626afa44a3aa3.patch_0"]
+        header = struct.unpack_from("<III20sQQ24s", archive, 0)
+        self.assertEqual((header[0], header[1], header[2], header[4]), (0xF0000011, 2, 1, len(archive)))
+        type_record = struct.unpack_from("<IIQIIII", archive, 72)
+        self.assertEqual(type_record, (0, 0, builder.RESOURCE_TYPE, 2, 0, 16, 16))
+        entries = [struct.unpack_from("<7Q6I", archive, 104 + 80 * index) for index in range(2)]
+        self.assertEqual([item[0] for item in entries], [builder.SHARED_LOADER_RESOURCE_HASH, builder.resource_hash(builder.RESOURCE_NAME)])
+        self.assertEqual(len({item[0] for item in entries}), 2)
+        for item in entries:
+            self.assertEqual(item[1], builder.RESOURCE_TYPE)
+            self.assertEqual(item[2] % 16, 0)
+            self.assertGreater(item[7], 0)
+            self.assertLessEqual(item[2] + item[7], len(archive))
+        first_blob = archive[entries[0][2] : entries[0][2] + entries[0][7]]
+        chat_blob = archive[entries[1][2] : entries[1][2] + entries[1][7]]
+        self.assertEqual(first_blob, loader_resource)
+        self.assertEqual(chat_blob, struct.pack("<II", len(entry), 2) + entry)
+        self.assertIn(b"HD2CT_DLL_HEX", chat_blob)
         manifest = json.loads(files["manifest.json"])
         self.assertEqual(manifest["Guid"], builder.ADDON_GUID)
+        self.assertEqual(manifest["Name"], "HD2 Chat Translate Standalone")
         self.assertEqual(len(manifest["Options"]), 1)
         self.assertEqual(manifest["Options"][0]["Include"], ["Addon"])
         for text in (manifest["Description"], manifest["Options"][0]["Description"]):
@@ -468,6 +755,16 @@ class StandaloneBuilderTests(unittest.TestCase):
             self.assertIn("HD2CT_API_URL", text)
             self.assertIn("HD2CT_API_KEY", text)
             self.assertIn("Bingus Shared Loader v18", text)
+            self.assertIn("无需另外导入", text)
+            self.assertIn("列表最底", text)
+            self.assertIn("first-mod-wins", text)
+            self.assertIn("列表最顶", text)
+        self.assertEqual(files["LICENSES/BingusSharedLoader-README.txt"], loader_readme)
+        self.assertEqual(files["LICENSES/BingusSharedLoader-manifest.json"], loader_manifest)
+        source_note = files["LICENSES/BingusSharedLoader-SOURCE.txt"].decode("utf-8")
+        self.assertIn("github.com/CowboyBingus/BingusSharedLoader", source_note)
+        self.assertIn(builder.SHARED_LOADER_ZIP_SHA256, source_note)
+        self.assertIn("不为 Bingus Shared Loader 声明或新增许可证", source_note)
 
         with tempfile.TemporaryDirectory() as directory:
             native_dir = Path(directory) / "native"
@@ -480,8 +777,9 @@ class StandaloneBuilderTests(unittest.TestCase):
             with (
                 mock.patch.object(builder, "STANDALONE_DLL", dll_path),
                 mock.patch.object(builder, "STANDALONE_META", meta_path),
-                mock.patch.object(builder, "STANDALONE_OUTPUT", output),
+                mock.patch.object(builder, "default_output_path", return_value=output),
                 mock.patch.object(builder, "DEPLOYMENT_RECEIPT", Path(directory) / "receipt.json"),
+                mock.patch.object(builder, "load_shared_loader_assets", return_value=loader_assets),
             ):
                 built = builder.build_artifact(standalone=True)
             with zipfile.ZipFile(built) as package:
@@ -517,13 +815,17 @@ class StandaloneBuilderTests(unittest.TestCase):
             with (
                 mock.patch.object(builder, "STANDALONE_DLL", missing_dll),
                 mock.patch.object(builder, "STANDALONE_META", missing_meta),
-                mock.patch.object(builder, "STANDALONE_OUTPUT", temporary / "out.zip"),
+                mock.patch.object(
+                    builder,
+                    "default_output_path",
+                    return_value=temporary / "HD2ChatTranslate20261002120000.zip",
+                ),
                 mock.patch.object(builder, "DEPLOYMENT_RECEIPT", receipt),
             ):
                 with self.assertRaisesRegex(ValueError, "请先构建原生 helper"):
                     builder.build_artifact(standalone=True)
 
-            protected_zip = temporary / "HD2ChatTranslateStandalone.zip"
+            protected_zip = temporary / "HD2ChatTranslate20261002120000.zip"
             protected_zip.write_bytes(b"rollback source")
             receipt.write_text(
                 json.dumps(
@@ -539,12 +841,24 @@ class StandaloneBuilderTests(unittest.TestCase):
             with (
                 mock.patch.object(builder, "STANDALONE_DLL", missing_dll),
                 mock.patch.object(builder, "STANDALONE_META", missing_meta),
-                mock.patch.object(builder, "STANDALONE_OUTPUT", protected_zip),
+                mock.patch.object(builder, "default_output_path", return_value=protected_zip),
                 mock.patch.object(builder, "DEPLOYMENT_RECEIPT", receipt),
             ):
                 with self.assertRaisesRegex(ValueError, "拒绝覆盖"):
                     builder.build_artifact(standalone=True)
             self.assertEqual(protected_zip.read_bytes(), b"rollback source")
+
+    def test_standalone_builder_never_overwrites_its_pinned_loader_zip_input(self):
+        with tempfile.TemporaryDirectory() as directory:
+            loader_zip = Path(directory) / "loader.zip"
+            loader_zip.write_bytes(b"pinned loader package")
+            with (
+                mock.patch.object(builder, "SHARED_LOADER_ZIP", loader_zip),
+                mock.patch.object(builder, "DEPLOYMENT_RECEIPT", Path(directory) / "receipt.json"),
+            ):
+                with self.assertRaisesRegex(ValueError, "输出不能覆盖构建输入文件"):
+                    builder.build_artifact(loader_zip, standalone=True)
+            self.assertEqual(loader_zip.read_bytes(), b"pinned loader package")
 
     def test_complete_standalone_entry_passes_luajit_parser(self):
         if LUA_DLL is None:

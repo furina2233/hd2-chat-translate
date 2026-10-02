@@ -10,7 +10,7 @@
 python tools/build_chat_probe.py
 ```
 
-默认生成 `artifacts/HD2ChatProbe.zip`。`--output` 可指定其他 ZIP 路径。源文件是 `game/chat_probe.lua` 与 `game/chat_probe_core.lua`；构建时将核心嵌入单一 Lua resource，并加入加载器需要的 addon 声明。
+当前所有模式默认生成 `artifacts/HD2ChatTranslateYYYYMMDDHHMMSS.zip`，时间取北京时间。`--output` 可指定其他目录，但文件名也需符合这一格式。源文件是 `game/chat_probe.lua` 与 `game/chat_probe_core.lua`；构建时将核心嵌入单一 Lua resource，并加入加载器需要的 addon 声明。以下历史采集命令、固定来源包和摘要保留当时的命名，新构建请使用当前命名规则。
 
 取得游戏生成的 JSON 后执行：
 

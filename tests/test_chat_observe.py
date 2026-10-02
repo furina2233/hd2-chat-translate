@@ -983,7 +983,7 @@ class ObserveBuilderAndAdapterTests(unittest.TestCase):
     def test_observe_cli_builds_crc_valid_archive_with_embedded_core(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            output = root / "observe.zip"
+            output = root / "HD2ChatTranslate20260101000000.zip"
             receipt = root / "no-deployment-receipt.json"
             arguments = ["build_chat_probe.py", "--observe", "--output", str(output)]
             with (
