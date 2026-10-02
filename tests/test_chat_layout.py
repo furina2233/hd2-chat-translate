@@ -146,8 +146,8 @@ local function reset_case(config)
         local slot = (original_head - index - 1) % 64
         slots[index + 1] = slot
         local row = manager + 0x4390 + slot * 0x3D8
-        write_bytes(row + 0x10, float_bytes(scales[index + 1] or 1)
-            .. string.rep("\0", 0x10 - 4) .. float_bytes(heights[index + 1] or 20))
+        write_bytes(row + 0x10, float_bytes(heights[index + 1] or 20)
+            .. string.rep("\0", 0x20 - 0x10 - 4) .. float_bytes(scales[index + 1] or 1))
     end
 
     local target_index = config.target_index or 0
@@ -227,7 +227,7 @@ local function reset_case(config)
         measure = function(row)
             measure_calls = measure_calls + 1
             if throw_measure then error("private measure spy failure") end
-            if measured_height ~= nil then write_bytes(row + 0x20, float_bytes(measured_height)) end
+            if measured_height ~= nil then write_bytes(row + 0x10, float_bytes(measured_height)) end
         end,
         position = function(row, packed, flag)
             assert(flag == 0, "layout must use the verified flag=0 wrapper path")
@@ -303,6 +303,8 @@ local function apply_text()
     return observer_translate_apply(current_message, current_message.body .. "\n译文：localized")
 end
 
+__REPORT_SANITIZER__
+
 -- 最新行增高后，所有更旧行按各自scale与保留的extent让出空间；head/count不动。
 reset_case({head = 0, target_index = 0, scales = {1, 2, 0.5}, heights = {20, 30, 70},
     measured_height = 50, gap = 5})
@@ -317,7 +319,7 @@ assert(positioned[1].row == manager + 0x4390 + 63 * 0x3D8)
 assert(positioned[3].row == manager + 0x4390 + 61 * 0x3D8)
 assert(read_bytes(manager + 0x13990, 4) == pack32(original_head))
 assert(read_bytes(manager + 0x139C0, 4) == pack32(original_count))
-local oldest_after = read_bytes(positioned[3].row + 0x20, 4)
+local oldest_after = read_bytes(positioned[3].row + 0x10, 4)
 near((function() local value = ffi.new("float[1]"); ffi.copy(value, oldest_after, 4); return tonumber(value[0]) end)(), 70)
 
 -- 中间行增高时只测它自身，整个历史仍重排，较新的位置与较旧译文extent保持。
@@ -331,10 +333,15 @@ assert(positioned[3].row == manager + 0x4390 + 62 * 0x3D8)
 near(positioned[1].y, 0)
 near(positioned[2].y, 29)
 near(positioned[3].y, 78)
-near((function() local value = ffi.new("float[1]"); ffi.copy(value, read_bytes(positioned[1].row + 0x20, 4), 4); return tonumber(value[0]) end)(), 25)
-near((function() local value = ffi.new("float[1]"); ffi.copy(value, read_bytes(positioned[3].row + 0x20, 4), 4); return tonumber(value[0]) end)(), 60)
+near((function() local value = ffi.new("float[1]"); ffi.copy(value, read_bytes(positioned[1].row + 0x10, 4), 4); return tonumber(value[0]) end)(), 25)
+near((function() local value = ffi.new("float[1]"); ffi.copy(value, read_bytes(positioned[3].row + 0x10, 4), 4); return tonumber(value[0]) end)(), 60)
 assert(read_bytes(manager + 0x13990, 4) == pack32(original_head))
 assert(read_bytes(manager + 0x139C0, 4) == pack32(original_count))
+
+-- 官方字段映射下，row+0x10的height可为30/90；row+0x20的scale为1。
+reset_case({scales = {1, 1, 1}, heights = {30, 90, 25}, measured_height = 50})
+assert(apply_text() == "called_confirmed")
+assert(setter_calls == 1 and measure_calls == 1 and position_calls == 3)
 
 -- stale root/ring、head/count、行几何、只读页、无效浮点/count及预算不足都不回写。
 local function expect_preflight_failure(config, expected, mutate)
@@ -345,16 +352,29 @@ local function expect_preflight_failure(config, expected, mutate)
     assert(setter_calls == 0 and measure_calls == 0 and position_calls == 0)
 end
 
+local function expect_failure_diagnostic(config, expected_status, expected_code, mutate)
+    reset_case(config)
+    if mutate then mutate() end
+    local status = apply_text()
+    assert(status == expected_status, "unexpected diagnostic status: " .. tostring(status))
+    assert(setter_calls == 0 and measure_calls == 0 and position_calls == 0)
+    local stats = translate_layout.instance.stats()
+    assert(stats.last_failure_code == expected_code,
+        "expected layout failure code " .. expected_code .. ", got " .. tostring(stats.last_failure_code))
+    return stats
+end
+
 expect_preflight_failure({context_stable = false}, "stale")
-expect_preflight_failure({head = 0}, "stale", function()
+local history_drift = expect_failure_diagnostic({head = 0}, "stale", 9, function()
     read_mutation = function(address, count)
         if address == manager + 0x13990 and count == 2 then write_bytes(address, pack32(1)) end
     end
 end)
-expect_preflight_failure({head = 0}, "stale", function()
+assert(history_drift.last_history_head == 1 and history_drift.last_history_count == 3)
+expect_failure_diagnostic({head = 0}, "stale", 10, function()
     local row = target_row
     read_mutation = function(address, count)
-        if address == row + 0x10 and count == 2 then write_bytes(row + 0x20, float_bytes(33)) end
+        if address == row + 0x10 and count == 2 then write_bytes(row + 0x10, float_bytes(33)) end
     end
 end)
 expect_preflight_failure({protect = 0x02}, "read_failed")
@@ -369,6 +389,37 @@ expect_preflight_failure({}, "deferred", function()
     read_failure_address = manager + 0x13990
 end)
 expect_preflight_failure({entry_budget = 2049}, "deferred")
+
+local history_read_failure = expect_failure_diagnostic({}, "read_failed", 2, function()
+    read_failure = "read_failed"
+    read_failure_address = manager + 0x13990
+end)
+assert(history_read_failure.last_history_head == 0 and history_read_failure.last_history_count == 0)
+local history_range_failure = expect_failure_diagnostic({count = 65}, "read_failed", 3)
+assert(history_range_failure.last_history_count == 65)
+expect_failure_diagnostic({protect = 0x02}, "read_failed", 4)
+expect_failure_diagnostic({}, "read_failed", 5, function()
+    read_failure = "private geometry read detail"
+    read_failure_address = target_row + 0x10
+end)
+
+-- scale=30必须拒绝，且失败报告只记录有限、无地址的量化值与分类。
+local bad_scale = expect_failure_diagnostic({heights = {1, 30, 90}, scales = {30, 1, 1}},
+    "read_failed", 6)
+assert(bad_scale.last_geometry_slot == 63)
+assert(bad_scale.last_scale_milli == 30000 and bad_scale.last_height_milli == 1000)
+assert(bad_scale.last_scale_class == 5 and bad_scale.last_height_class == 4)
+local diagnostic_report = observer_translate_sanitize_report({status = "ready", counters = {}})
+assert(diagnostic_report.layout.last_failure_code == 6)
+assert(diagnostic_report.layout.last_geometry_slot == 63)
+assert(diagnostic_report.layout.last_scale_milli == 30000)
+assert(diagnostic_report.layout.last_height_class == 4)
+local bad_height = expect_failure_diagnostic({heights = {-2, 30, 90}, scales = {1, 1, 1}},
+    "read_failed", 7)
+assert(bad_height.last_height_milli == 0 and bad_height.last_height_class == 2)
+assert(bad_height.last_scale_milli == 1000 and bad_height.last_scale_class == 4)
+local nan_scale = expect_failure_diagnostic({scales = {0/0, 1, 1}}, "read_failed", 6)
+assert(nan_scale.last_scale_milli == 0 and nan_scale.last_scale_class == 1)
 
 local function expect_heartbeat_failure(mutate, expected)
     reset_case({measured_height = 40})
@@ -389,7 +440,7 @@ expect_heartbeat_failure(function()
     write_bytes(manager + 0x13990, pack32(1))
 end, "stale")
 expect_heartbeat_failure(function()
-    write_bytes(target_row + 0x20, float_bytes(44))
+    write_bytes(target_row + 0x10, float_bytes(44))
 end, "stale")
 expect_heartbeat_failure(function() region.protect = 0x02 end, "read_failed")
 expect_heartbeat_failure(function() region.allocation_base = 0x200000 end, "read_failed")
@@ -420,6 +471,7 @@ assert(read_bytes(manager + 0x139C0, 4) == pack32(original_count))
 reset_case({measured_height = 40, verify_apply = false})
 assert(apply_text() == "called_unconfirmed")
 assert(setter_calls == 1 and measure_calls == 0 and position_calls == 0)
+assert(translate_layout.instance.stats().last_failure_code == 11)
 observer_read_budget = 0
 assert(apply_text() == "disabled" and setter_calls == 1)
 
@@ -439,6 +491,28 @@ assert(apply_text() == "disabled" and setter_calls == 1)
 reset_case({measured_height = 40, throw_measure = true})
 assert(apply_text() == "called_unconfirmed")
 assert(setter_calls == 1 and measure_calls == 1 and position_calls == 0)
+local stats_method = translate_layout.instance.stats
+translate_layout.instance.stats = function()
+    local stats = stats_method()
+    stats.exception_text = "PRIVATE_LAYOUT_EXCEPTION"
+    return stats
+end
+local safe_report = observer_translate_sanitize_report({
+    status = "ready", code = "invalid_session", body = "PRIVATE_LAYOUT_EXCEPTION",
+    exception = "PRIVATE_LAYOUT_EXCEPTION", counters = {private_count = 7},
+})
+assert(safe_report.layout.last_failure_code == 11)
+assert(safe_report.layout.exception_text == nil and safe_report.exception == nil)
+local function contains_private_value(value)
+    if value == "PRIVATE_LAYOUT_EXCEPTION" then return true end
+    if type(value) == "table" then
+        for key, child in pairs(value) do
+            if key == "PRIVATE_LAYOUT_EXCEPTION" or contains_private_value(child) then return true end
+        end
+    end
+    return false
+end
+assert(not contains_private_value(safe_report))
 observer_read_budget = 0
 assert(apply_text() == "disabled" and setter_calls == 1)
 reset_case({measured_height = 40, throw_position = 2})
@@ -488,9 +562,12 @@ class ChatLayoutTests(unittest.TestCase):
         apply_end = source.index("    local function observer_finish_cycle()", apply_start)
         verify_start = source.index("    local function observer_widget_verify_context(context)")
         verify_end = source.index("    local function observer_widget_read_widget_slot(", verify_start)
+        report_start = source.index("    local TRANSLATE_REPORT_STATUSES = {")
+        report_end = source.index("\n\n    local function observer_translate_write_report(", report_start)
         cls.factory = source[factory_start:factory_end]
         cls.apply = source[apply_start:apply_end]
         cls.verify_values = source[verify_start:verify_end]
+        cls.sanitizer = source[report_start:report_end]
 
     def test_signature_gate_reads_full_verified_windows_and_reasonable_gap(self) -> None:
         checks = r'''
@@ -544,7 +621,10 @@ RESULT = "chat layout signature gate checks ok"
     def test_reflow_preflight_apply_order_and_fail_closed_spies(self) -> None:
         script = self.factory + "\n" + LAYOUT_FAKE_KERNEL.replace(
             "__VERIFY_VALUES__", self.verify_values
-        ).replace("__APPLY_FUNCTION__", self.apply)
+        ).replace("__APPLY_FUNCTION__", self.apply).replace(
+            "__REPORT_SANITIZER__",
+            "local STANDALONE_ENABLED = false\n" + self.sanitizer,
+        )
         self.assertEqual(self.lua.run(script), "chat layout fake-kernel and native-spy checks ok")
 
 

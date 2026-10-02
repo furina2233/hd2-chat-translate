@@ -29,8 +29,8 @@ local translate_layout = (function()
     local HISTORY_SLOT_SIZE = 0x3D8
     local HISTORY_SLOT_COUNT = 64
     local ROW_SIZE = HISTORY_SLOT_SIZE
-    local ROW_SCALE_OFFSET = 0x10
-    local ROW_HEIGHT_OFFSET = 0x20
+    local ROW_HEIGHT_OFFSET = 0x10
+    local ROW_SCALE_OFFSET = 0x20
     local ROW_POSITION_OFFSET = 0x3CC
     local MAX_SAFE_ADDRESS = 0x7fffffffffff
     local MAX_COUNT = 9007199254740991
@@ -111,22 +111,33 @@ local translate_layout = (function()
             reflows_confirmed = 0,
             failures = 0,
             rows_positioned = 0,
+            last_failure_code = 0,
+            last_history_head = 0,
+            last_history_count = 0,
+            last_geometry_slot = 0,
+            last_scale_milli = 0,
+            last_height_milli = 0,
+            last_scale_class = 0,
+            last_height_class = 0,
         }
         local api = {}
 
-        local function fail(status)
-            if status ~= "deferred" then statistics.failures = add_count(statistics.failures, 1) end
+        local function fail(status, code)
+            if status ~= "deferred" then
+                statistics.failures = add_count(statistics.failures, 1)
+                statistics.last_failure_code = code or 12
+            end
             return status
         end
 
         local function context_status(context)
             if type(context) ~= "table" or type(verify_context) ~= "function" then
-                return "read_failed"
+                return "read_failed", 1
             end
             local ok, stable, reason = pcall(verify_context, context)
-            if not ok then return "read_failed" end
+            if not ok then return "read_failed", 12 end
             if stable then return nil end
-            return reason == "unstable" and "stale" or "read_failed"
+            return reason == "unstable" and "stale" or "read_failed", 1
         end
 
         local function read_exact(address, length)
@@ -135,22 +146,26 @@ local translate_layout = (function()
         end
 
         local function read_history(manager)
+            statistics.last_history_head = 0
+            statistics.last_history_count = 0
             local address = manager + HISTORY_HEAD_OFFSET
             local bytes, reason = read_exact(address, 0x34)
-            if not bytes then return nil, read_status(reason) end
+            if not bytes then return nil, read_status(reason), 2 end
             local head = bytes_u32(bytes, 0)
             local count = bytes_u32(bytes, HISTORY_COUNT_OFFSET - HISTORY_HEAD_OFFSET)
-            if head == nil or count == nil then return nil, "read_failed" end
+            if head == nil or count == nil then return nil, "read_failed", 2 end
+            statistics.last_history_head = head >= 65 and 65 or head
+            statistics.last_history_count = count >= 65 and 65 or count
             if head >= HISTORY_SLOT_COUNT or count < 1 or count > HISTORY_SLOT_COUNT then
-                return nil, "read_failed"
+                return nil, "read_failed", 3
             end
             return {bytes = bytes, head = head, count = count}
         end
 
         local function verify_history(manager, expected)
-            local current, status = read_history(manager)
-            if not current then return status end
-            if current.bytes ~= expected.bytes then return "stale" end
+            local current, status, code = read_history(manager)
+            if not current then return status, code end
+            if current.bytes ~= expected.bytes then return "stale", 9 end
             return nil
         end
 
@@ -190,32 +205,57 @@ local translate_layout = (function()
         end
 
         local function capture_geometry(row)
-            local bytes, reason = read_exact(row.address + ROW_SCALE_OFFSET, ROW_HEIGHT_OFFSET - ROW_SCALE_OFFSET + 4)
-            if not bytes then return nil, read_status(reason) end
-            local scale = read_float(ffi, bytes, 0)
-            local height = read_float(ffi, bytes, ROW_HEIGHT_OFFSET - ROW_SCALE_OFFSET)
-            if not valid_scale(scale) or not valid_height(height) then return nil, "read_failed" end
-            return {bytes = bytes, scale_bytes = bytes:sub(1, 4), scale = scale, height = height}
+            local bytes, reason = read_exact(row.address + ROW_HEIGHT_OFFSET,
+                ROW_SCALE_OFFSET - ROW_HEIGHT_OFFSET + 4)
+            if not bytes then return nil, read_status(reason), 5 end
+            local height = read_float(ffi, bytes, 0)
+            local scale = read_float(ffi, bytes, ROW_SCALE_OFFSET - ROW_HEIGHT_OFFSET)
+            if not valid_scale(scale) or not valid_height(height) then
+                local function metric_class(value, is_scale)
+                    if not finite(value) then return 1 end
+                    if value < 0 then return 2 end
+                    if value == 0 then return 3 end
+                    if is_scale and value < 0.01 then return 5 end
+                    if (is_scale and value > 16) or (not is_scale and value > 4096) then return 5 end
+                    return 4
+                end
+                local function metric_milli(value)
+                    if finite(value) and value >= 0 and value <= 1000000 then
+                        return math.floor(value * 1000 + 0.5)
+                    end
+                    return 0
+                end
+                statistics.last_geometry_slot = row.slot
+                statistics.last_scale_milli = metric_milli(scale)
+                statistics.last_height_milli = metric_milli(height)
+                statistics.last_scale_class = metric_class(scale, true)
+                statistics.last_height_class = metric_class(height, false)
+                return nil, "read_failed", not valid_scale(scale) and 6 or 7
+            end
+            local scale_start = ROW_SCALE_OFFSET - ROW_HEIGHT_OFFSET + 1
+            local scale_end = scale_start + 3
+            return {bytes = bytes, scale_bytes = bytes:sub(scale_start, scale_end), scale = scale, height = height}
         end
 
         local function check_context_and_history(context, manager, history)
-            local status = context_status(context)
-            if status then return status end
+            local status, code = context_status(context)
+            if status then return status, code end
             return verify_history(manager, history)
         end
 
         function api.prepare(context, target_row)
             if disabled or not verified then return "disabled" end
-            if not safe_address(target_row) then return fail("read_failed") end
-            local context_error = context_status(context)
-            if context_error then return fail(context_error) end
+            if not safe_address(target_row) then return fail("read_failed", 1) end
+            local context_error, context_code = context_status(context)
+            if context_error then return fail(context_error, context_code) end
             if not safe_address(context.root) or type(manager_for_root) ~= "function" then
-                return fail("read_failed")
+                return fail("read_failed", 1)
             end
             local ok, manager = pcall(manager_for_root, context.root)
-            if not ok or not safe_address(manager) then return fail("read_failed") end
-            local history, history_error = read_history(manager)
-            if not history then return fail(history_error) end
+            if not ok then return fail("read_failed", 12) end
+            if not safe_address(manager) then return fail("read_failed", 1) end
+            local history, history_error, history_code = read_history(manager)
+            if not history then return fail(history_error, history_code) end
 
             local rows = {}
             local target_found = false
@@ -227,33 +267,33 @@ local translate_layout = (function()
                     address + ROW_POSITION_OFFSET, 8, allocation_base)
                 if not safe_address(address) or not row_writable or not position_writable
                     or position_allocation ~= allocation_base then
-                    return fail("read_failed")
+                    return fail("read_failed", 4)
                 end
                 local row = {slot = slot, address = address, allocation_base = allocation_base}
-                local geometry, geometry_error = capture_geometry(row)
-                if not geometry then return fail(geometry_error) end
+                local geometry, geometry_error, geometry_code = capture_geometry(row)
+                if not geometry then return fail(geometry_error, geometry_code) end
                 row.geometry = geometry
                 rows[#rows + 1] = row
                 if address == target_row then target_found = true end
             end
-            if not target_found then return fail("stale") end
+            if not target_found then return fail("stale", 8) end
 
-            local status = check_context_and_history(context, manager, history)
-            if status then return fail(status) end
+            local status, status_code = check_context_and_history(context, manager, history)
+            if status then return fail(status, status_code) end
             for _, row in ipairs(rows) do
                 local row_writable = writable_range(row.address, ROW_SIZE, row.allocation_base)
                 local position_writable, position_allocation = writable_range(
                     row.address + ROW_POSITION_OFFSET, 8, row.allocation_base)
                 if not row_writable or not position_writable
                     or position_allocation ~= row.allocation_base then
-                    return fail("read_failed")
+                    return fail("read_failed", 4)
                 end
-                local geometry, geometry_error = capture_geometry(row)
-                if not geometry then return fail(geometry_error) end
-                if geometry.bytes ~= row.geometry.bytes then return fail("stale") end
+                local geometry, geometry_error, geometry_code = capture_geometry(row)
+                if not geometry then return fail(geometry_error, geometry_code) end
+                if geometry.bytes ~= row.geometry.bytes then return fail("stale", 10) end
             end
-            status = check_context_and_history(context, manager, history)
-            if status then return fail(status) end
+            status, status_code = check_context_and_history(context, manager, history)
+            if status then return fail(status, status_code) end
             return "ready", {
                 context = context,
                 manager = manager,
@@ -266,24 +306,24 @@ local translate_layout = (function()
         function api.verify_prepared(snapshot)
             if disabled or not verified then return "disabled" end
             if type(snapshot) ~= "table" or type(snapshot.rows) ~= "table" then
-                return fail("read_failed")
+                return fail("read_failed", 1)
             end
-            local status = check_context_and_history(snapshot.context, snapshot.manager, snapshot.history)
-            if status then return fail(status) end
+            local status, status_code = check_context_and_history(snapshot.context, snapshot.manager, snapshot.history)
+            if status then return fail(status, status_code) end
             for _, row in ipairs(snapshot.rows) do
                 local row_writable = writable_range(row.address, ROW_SIZE, row.allocation_base)
                 local position_writable, position_allocation = writable_range(
                     row.address + ROW_POSITION_OFFSET, 8, row.allocation_base)
                 if not row_writable or not position_writable
                     or position_allocation ~= row.allocation_base then
-                    return fail("read_failed")
+                    return fail("read_failed", 4)
                 end
-                local geometry, geometry_error = capture_geometry(row)
-                if not geometry then return fail(geometry_error) end
-                if geometry.bytes ~= row.geometry.bytes then return fail("stale") end
+                local geometry, geometry_error, geometry_code = capture_geometry(row)
+                if not geometry then return fail(geometry_error, geometry_code) end
+                if geometry.bytes ~= row.geometry.bytes then return fail("stale", 10) end
             end
-            status = check_context_and_history(snapshot.context, snapshot.manager, snapshot.history)
-            if status then return fail(status) end
+            status, status_code = check_context_and_history(snapshot.context, snapshot.manager, snapshot.history)
+            if status then return fail(status, status_code) end
             return "ready"
         end
 
@@ -293,11 +333,11 @@ local translate_layout = (function()
                 or type(snapshot.rows) ~= "table" or type(measure) ~= "function"
                 or type(position) ~= "function" then
                 disabled = true
-                return fail("called_unconfirmed")
+                return fail("called_unconfirmed", 11)
             end
 
-            local status = check_context_and_history(snapshot.context, snapshot.manager, snapshot.history)
-            if status then disabled = true; return fail("called_unconfirmed") end
+            local status, status_code = check_context_and_history(snapshot.context, snapshot.manager, snapshot.history)
+            if status then disabled = true; return fail("called_unconfirmed", status_code or 11) end
             for _, row in ipairs(snapshot.rows) do
                 local row_writable = writable_range(row.address, ROW_SIZE, row.allocation_base)
                 local position_writable, position_allocation = writable_range(
@@ -305,35 +345,35 @@ local translate_layout = (function()
                 if not row_writable or not position_writable
                     or position_allocation ~= row.allocation_base then
                     disabled = true
-                    return fail("called_unconfirmed")
+                    return fail("called_unconfirmed", 11)
                 end
             end
             local target
             for _, row in ipairs(snapshot.rows) do
                 if row.address == target_row then target = row; break end
             end
-            if not target then disabled = true; return fail("called_unconfirmed") end
+            if not target then disabled = true; return fail("called_unconfirmed", 11) end
 
             local measure_ok = pcall(measure, target.address)
-            if not measure_ok then disabled = true; return fail("called_unconfirmed") end
+            if not measure_ok then disabled = true; return fail("called_unconfirmed", 11) end
 
             for _, row in ipairs(snapshot.rows) do
                 if not writable_range(row.address, ROW_SIZE)
                     or not writable_range(row.address + ROW_POSITION_OFFSET, 8) then
                     disabled = true
-                    return fail("called_unconfirmed")
+                    return fail("called_unconfirmed", 11)
                 end
-                local geometry, geometry_error = capture_geometry(row)
-                if not geometry then disabled = true; return fail("called_unconfirmed") end
+                local geometry, geometry_error, geometry_code = capture_geometry(row)
+                if not geometry then disabled = true; return fail("called_unconfirmed", geometry_code) end
                 if row == target then
                     if geometry.scale_bytes ~= row.geometry.scale_bytes then
                         disabled = true
-                        return fail("called_unconfirmed")
+                        return fail("called_unconfirmed", 10)
                     end
                     row.final_geometry = geometry
                 elseif geometry.bytes ~= row.geometry.bytes then
                     disabled = true
-                    return fail("called_unconfirmed")
+                    return fail("called_unconfirmed", 10)
                 else
                     row.final_geometry = geometry
                 end
@@ -344,7 +384,7 @@ local translate_layout = (function()
                 if not valid_scale(geometry.scale) or not valid_height(geometry.height)
                     or not finite(y) or y > 1000000 then
                     disabled = true
-                    return fail("called_unconfirmed")
+                    return fail("called_unconfirmed", 11)
                 end
                 local vector = ffi.new("float[2]")
                 vector[0] = 0
@@ -357,11 +397,11 @@ local translate_layout = (function()
             end
             if not finite(y) or y > 1000000 then
                 disabled = true
-                return fail("called_unconfirmed")
+                return fail("called_unconfirmed", 11)
             end
 
-            status = check_context_and_history(snapshot.context, snapshot.manager, snapshot.history)
-            if status then disabled = true; return fail("called_unconfirmed") end
+            status, status_code = check_context_and_history(snapshot.context, snapshot.manager, snapshot.history)
+            if status then disabled = true; return fail("called_unconfirmed", status_code or 11) end
             for _, row in ipairs(snapshot.rows) do
                 local row_writable = writable_range(row.address, ROW_SIZE, row.allocation_base)
                 local position_writable, position_allocation = writable_range(
@@ -369,7 +409,7 @@ local translate_layout = (function()
                 if not row_writable or not position_writable
                     or position_allocation ~= row.allocation_base then
                     disabled = true
-                    return fail("called_unconfirmed")
+                    return fail("called_unconfirmed", 11)
                 end
             end
 
@@ -380,27 +420,30 @@ local translate_layout = (function()
                 if not row_writable or not position_writable
                     or position_allocation ~= row.allocation_base then
                     disabled = true
-                    return fail("called_unconfirmed")
+                    return fail("called_unconfirmed", 11)
                 end
                 local position_ok = pcall(position, row.address, row.position_packed, 0)
-                if not position_ok then disabled = true; return fail("called_unconfirmed") end
+                if not position_ok then disabled = true; return fail("called_unconfirmed", 11) end
                 local cached, reason = read_exact(row.address + ROW_POSITION_OFFSET, 8)
                 if not cached or cached ~= row.position_bytes then
                     disabled = true
-                    return fail("called_unconfirmed")
+                    return fail("called_unconfirmed", 11)
                 end
                 statistics.rows_positioned = add_count(statistics.rows_positioned, 1)
             end
 
-            status = check_context_and_history(snapshot.context, snapshot.manager, snapshot.history)
-            if status then disabled = true; return fail("called_unconfirmed") end
+            status, status_code = check_context_and_history(snapshot.context, snapshot.manager, snapshot.history)
+            if status then disabled = true; return fail("called_unconfirmed", status_code or 11) end
             statistics.reflows_confirmed = add_count(statistics.reflows_confirmed, 1)
             return "called_confirmed"
         end
 
-        function api.disable(count_failure)
+        function api.disable(count_failure, code)
             disabled = true
-            if count_failure == true then statistics.failures = add_count(statistics.failures, 1) end
+            if count_failure == true then
+                statistics.failures = add_count(statistics.failures, 1)
+                statistics.last_failure_code = code == 11 and 11 or 12
+            end
         end
 
         function api.stats()
@@ -409,6 +452,14 @@ local translate_layout = (function()
                 reflows_confirmed = statistics.reflows_confirmed,
                 failures = statistics.failures,
                 rows_positioned = statistics.rows_positioned,
+                last_failure_code = statistics.last_failure_code,
+                last_history_head = statistics.last_history_head,
+                last_history_count = statistics.last_history_count,
+                last_geometry_slot = statistics.last_geometry_slot,
+                last_scale_milli = statistics.last_scale_milli,
+                last_height_milli = statistics.last_height_milli,
+                last_scale_class = statistics.last_scale_class,
+                last_height_class = statistics.last_height_class,
             }
         end
 
@@ -1781,12 +1832,12 @@ local function initialize_probe()
 
         local setter_ok, setter_result = pcall(observer_translate_setter, widget_argument, buffer)
         if not setter_ok or setter_result ~= true then
-            if type(layout.disable) == "function" then layout.disable(true) end
+            if type(layout.disable) == "function" then layout.disable(true, 11) end
             return "called_unconfirmed"
         end
         local verify_ok, verify_result = pcall(observer_translate_verify_apply, current.proof, buffer)
         if not verify_ok or not verify_result then
-            if type(layout.disable) == "function" then layout.disable(true) end
+            if type(layout.disable) == "function" then layout.disable(true, 11) end
             return "called_unconfirmed"
         end
         local reflow_ok, reflow_status = pcall(layout.reflow, layout_snapshot, current.proof.widget)
@@ -1919,6 +1970,14 @@ local function initialize_probe()
                 reflows_confirmed = 0,
                 failures = 0,
                 rows_positioned = 0,
+                last_failure_code = 0,
+                last_history_head = 0,
+                last_history_count = 0,
+                last_geometry_slot = 0,
+                last_scale_milli = 0,
+                last_height_milli = 0,
+                last_scale_class = 0,
+                last_height_class = 0,
             },
         }
         if type(translate_layout.instance) == "table"
@@ -1929,6 +1988,20 @@ local function initialize_probe()
                 for _, name in ipairs({"reflows_confirmed", "failures", "rows_positioned"}) do
                     local count = stats[name]
                     report.layout[name] = observer_translate_safe_count(count, 9007199254740991)
+                        and count or 0
+                end
+                for _, field in ipairs({
+                    {"last_failure_code", 12},
+                    {"last_history_head", 65},
+                    {"last_history_count", 65},
+                    {"last_geometry_slot", 63},
+                    {"last_scale_milli", 1000000000},
+                    {"last_height_milli", 1000000000},
+                    {"last_scale_class", 5},
+                    {"last_height_class", 5},
+                }) do
+                    local count = stats[field[1]]
+                    report.layout[field[1]] = observer_translate_safe_count(count, field[2])
                         and count or 0
                 end
             end
