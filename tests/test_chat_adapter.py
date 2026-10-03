@@ -16,6 +16,7 @@ TRANSLATE_ADAPTER_CHECKS = r'''
 local files, directories, handles = {}, {}, {}
 local create_log, move_log, delete_log = {}, {}, {}
 local next_file_handle = 0x700000
+local flush_calls = 0
 local fs_behavior = {
     fail_read = false, read_limit = nil,
     write_limit = nil, fail_flush = false, fail_close = false, fail_move = false,
@@ -83,6 +84,7 @@ kernel.WriteFile = function(handle, buffer, length, written, _)
     return 1
 end
 kernel.FlushFileBuffers = function(handle)
+    flush_calls = flush_calls + 1
     return handle_record(handle) and not fs_behavior.fail_flush and 1 or 0
 end
 kernel.CloseHandle = function(handle)
@@ -333,8 +335,13 @@ local sanitized_input = {
     counters = {steps = 3, submitted = 1, slot_event_filtered = 7,
         error_displays_ready = 2, private_counter = 77},
 }
+local flushes_before_report = flush_calls
 assert(translate_adapter.output(sanitized_input))
 local sanitized = files[report_path].data
+assert(flush_calls == flushes_before_report, "translation report unexpectedly flushed to disk")
+local report_move = move_log[#move_log]
+assert(report_move.flags == 0x1 and report_move.new == report_path,
+    "translation report did not replace the final file atomically")
 assert(not sanitized:find(private_message, 1, true))
 assert(not sanitized:find("PRIVATE_", 1, true))
 assert(sanitized:find('"status":"stopped"', 1, true))
@@ -343,6 +350,25 @@ assert(sanitized:find('"pending_count":0', 1, true))
 assert(sanitized:find('"slot_event_filtered":7', 1, true))
 assert(sanitized:find('"error_displays_ready":2', 1, true))
 assert(not sanitized:find('"private_counter"', 1, true))
+
+-- 报告短写、关闭失败或替换失败时清理临时文件并保留旧报告。
+local function failed_report(behavior)
+    reset_fs_failures()
+    for name, value in pairs(behavior) do fs_behavior[name] = value end
+    local before_moves = #move_log
+    local before_flushes = flush_calls
+    local ok = pcall(observer_translate_write_report, sanitized_input)
+    assert(not ok, "failed report write unexpectedly succeeded")
+    assert(#list_temporary_files() == 0, "failed report write left a temporary file")
+    assert(files[report_path].data == sanitized, "failed report write replaced the last good report")
+    assert(flush_calls == before_flushes, "translation report unexpectedly flushed to disk")
+    return #move_log - before_moves
+end
+local short_report_moves = failed_report({write_limit = 2})
+local close_report_moves = failed_report({fail_close = true})
+local rename_report_moves = failed_report({fail_move = true})
+assert(short_report_moves == 0 and close_report_moves == 0 and rename_report_moves == 1)
+reset_fs_failures()
 
 -- 本native spy只模拟已知setter对目标属性entry的写入，绝不调用game.dll。
 native_spy_calls = 0

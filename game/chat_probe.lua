@@ -2040,13 +2040,12 @@ local function initialize_probe()
         if not file then error("translation temporary file unavailable") end
         local write_ok = kernel.WriteFile(file, bytes, #encoded, written, nil) ~= 0
             and tonumber(written[0]) == #encoded
-        local flush_ok = write_ok and kernel.FlushFileBuffers(file) ~= 0
         local close_ok = kernel.CloseHandle(file) ~= 0
-        if not write_ok or not flush_ok or not close_ok then
+        if not write_ok or not close_ok then
             kernel.DeleteFileW(temporary_path)
             error("translation report write failed")
         end
-        if kernel.MoveFileExW(temporary_path, translate_report_path, 0x1 + 0x8) == 0 then
+        if kernel.MoveFileExW(temporary_path, translate_report_path, 0x1) == 0 then
             kernel.DeleteFileW(temporary_path)
             error("translation report replace failed")
         end

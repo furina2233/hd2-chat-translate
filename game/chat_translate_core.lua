@@ -11,6 +11,8 @@ M.MAX_SUBMITS_PER_STEP = 1
 M.PENDING_TTL_MS = 60000
 M.HEARTBEAT_FRESH_MS = 3000
 M.HEARTBEAT_POLL_MS = 200
+M.SCAN_INTERVAL_MS = 200
+M.RESPONSE_POLL_MS = 200
 M.REPORT_INTERVAL_MS = 5000
 
 local MAX_SAFE_INTEGER = 9007199254740991
@@ -192,6 +194,17 @@ local function set_status(state, status, code)
     state.status_code = code
 end
 
+local function refresh_active_status(state)
+    if not state.heartbeat_active then return end
+    if state.baseline_active then
+        set_status(state, "baseline", nil)
+    elseif #state.pending > 0 then
+        set_status(state, "pending", nil)
+    else
+        set_status(state, "ready", nil)
+    end
+end
+
 function M.manifest(state)
     local counters = {}
     for _, name in ipairs(COUNTER_NAMES) do
@@ -210,14 +223,10 @@ function M.manifest(state)
 end
 
 local function maybe_report(state, now_ms, force)
-    local changed = state.last_report_status ~= state.status
-        or state.last_report_code ~= state.status_code
     local interval_elapsed = state.last_report_ms == nil
         or (now_ms >= state.last_report_ms and now_ms - state.last_report_ms >= M.REPORT_INTERVAL_MS)
-    if not force and not changed and not interval_elapsed then return end
+    if not force and not interval_elapsed then return end
 
-    state.last_report_status = state.status
-    state.last_report_code = state.status_code
     state.last_report_ms = now_ms
     if type(state.adapter.output) ~= "function" then return end
     local ok = pcall(state.adapter.output, M.manifest(state))
@@ -309,6 +318,7 @@ end
 local function set_inactive(state, code)
     state.heartbeat_active = false
     state.heartbeat_uptime_ms = nil
+    state.next_scan_ms = nil
     state.baseline_active = false
     state.baseline_remaining = SLOT_COUNT
     state.baseline_next_slot = 0
@@ -318,14 +328,13 @@ local function set_inactive(state, code)
     if not state.done then set_status(state, "inactive", code or "heartbeat_inactive") end
 end
 
-local function stop_state(state, code, now_ms)
+local function stop_state(state, code)
     if state.done then return end
     state.done = true
     state.heartbeat_active = false
     clear_all_pending(state)
     state.seen = {}
     set_status(state, "stopped", code)
-    maybe_report(state, now_ms or state.last_now_ms or 0, true)
 end
 
 local function read_now(state)
@@ -386,6 +395,7 @@ local function poll_heartbeat(state, now_ms)
         state.baseline_active = true
         state.baseline_remaining = SLOT_COUNT
         state.baseline_next_slot = 0
+        state.next_scan_ms = nil
     end
     if state.baseline_active then
         set_status(state, "baseline", nil)
@@ -574,6 +584,10 @@ local function process_one_pending(state)
     end
 
     if item.display_text == nil then
+        if item.next_response_poll_ms ~= nil and now_ms < item.next_response_poll_ms then
+            return
+        end
+        item.next_response_poll_ms = add_saturated(now_ms, state.response_poll_ms)
         local ok, raw = pcall(state.adapter.response, item.token)
         if not ok then
             bump(state, "adapter_errors")
@@ -611,7 +625,6 @@ local function process_one_pending(state)
     end
 
     set_status(state, "applying", nil)
-    maybe_report(state, now_ms, false)
     bump(state, "apply_attempts")
     local ok, result = pcall(state.adapter.apply, item.message, item.display_text)
     if not ok then
@@ -780,9 +793,20 @@ function M.new(adapter, options)
     options = type(options) == "table" and options or {}
     local counters = {}
     for _, name in ipairs(COUNTER_NAMES) do counters[name] = 0 end
+    local scan_interval_ms = options.scan_interval_ms
+    if not is_small_integer(scan_interval_ms, 0, 1000) then
+        scan_interval_ms = M.SCAN_INTERVAL_MS
+    end
+    local response_poll_ms = options.response_poll_ms
+    if not is_small_integer(response_poll_ms, 0, 60000) then
+        response_poll_ms = M.RESPONSE_POLL_MS
+    end
     local state = {
         adapter = adapter,
         counters = counters,
+        scan_interval_ms = scan_interval_ms,
+        response_poll_ms = response_poll_ms,
+        next_scan_ms = nil,
         status = "inactive",
         status_code = "heartbeat_inactive",
         done = false,
@@ -794,8 +818,6 @@ function M.new(adapter, options)
         last_heartbeat_poll_ms = nil,
         last_now_ms = nil,
         last_report_ms = nil,
-        last_report_status = nil,
-        last_report_code = nil,
         session_id = nil,
         token_counter = 0,
         pending = {},
@@ -849,6 +871,14 @@ function M.step(state)
         return false
     end
 
+    local now_ms = state.last_now_ms or 0
+    if state.next_scan_ms ~= nil and now_ms < state.next_scan_ms then
+        refresh_active_status(state)
+        maybe_report(state, now_ms, false)
+        return false
+    end
+    state.next_scan_ms = add_saturated(now_ms, state.scan_interval_ms)
+
     if state.baseline_active then
         scan_baseline(state)
         if state.done then
@@ -864,13 +894,7 @@ function M.step(state)
         maybe_report(state, state.last_now_ms or 0, true)
         return true
     end
-    if state.heartbeat_active then
-        if #state.pending > 0 then
-            set_status(state, "pending", nil)
-        else
-            set_status(state, "ready", nil)
-        end
-    end
+    refresh_active_status(state)
     maybe_report(state, state.last_now_ms or 0, false)
     return false
 end

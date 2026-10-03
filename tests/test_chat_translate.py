@@ -93,7 +93,8 @@ local function new_env()
             env.output_calls[#env.output_calls + 1] = json_core.encode_json(manifest)
         end,
     }
-    env.state = core.new(adapter, {target_verified = true, session_id = "test_session"})
+    env.state = core.new(adapter, {target_verified = true, session_id = "test_session",
+        scan_interval_ms = 0, response_poll_ms = 0})
     return env
 end
 
@@ -129,7 +130,8 @@ local function one_unverified_case()
         apply = function() return "called_confirmed" end,
         cancel = function() return true end,
     }
-    local state = core.new(adapter, {target_verified = false, session_id = "test_session"})
+    local state = core.new(adapter, {target_verified = false, session_id = "test_session",
+        scan_interval_ms = 0, response_poll_ms = 0})
     core.step(state)
     return {manifest = core.manifest(state), heartbeat = calls.heartbeat, reads = calls.reads}
 end
@@ -556,7 +558,8 @@ local function run_heartbeat_clock_case(mode, stamp)
         cancel = function() return true end,
         output = function(manifest) output[#output + 1] = json_core.encode_json(manifest) end,
     }
-    local state = core.new(adapter, {target_verified = true, session_id = "clock_session"})
+    local state = core.new(adapter, {target_verified = true, session_id = "clock_session",
+        scan_interval_ms = 0, response_poll_ms = 0})
     core.step(state)
     local first_manifest = core.manifest(state)
     local first_step_reads = read_calls
