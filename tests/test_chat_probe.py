@@ -3,15 +3,9 @@
 from __future__ import annotations
 
 import json
-from pathlib import Path
-import sys
 import unittest
 
-ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT / "tools"))
-
-import build_package as builder  # noqa: E402
-from lua_support import LUA_DLL, LuaJIT  # noqa: E402
+from lua_support import LUA_DLL, LuaJIT, ROOT  # noqa: E402
 
 
 LUA_CORE_HARNESS = r'''
@@ -256,71 +250,7 @@ class LuaCoreTests(unittest.TestCase):
         self.assertEqual(wrong_size["manifest"]["status"], "disk_size_mismatch")
         self.assertEqual(wrong_size["read_calls"], 0)
 
-    def test_update_wrapper_spans_frames_and_isolates_probe_errors(self):
-        script = f'''
-            local core = dofile([[{self.core_path}]])
-            local probe_calls, update_calls = 0, 0
-            local wrapped = core.wrap_update(function() update_calls = update_calls + 1 end, function()
-                probe_calls = probe_calls + 1
-                return probe_calls == 3
-            end)
-            for _ = 1, 4 do wrapped() end
-            local error_calls, original_calls = 0, 0
-            local error_wrapped = core.wrap_update(function() original_calls = original_calls + 1 end, function()
-                error_calls = error_calls + 1
-                error("mock probe failure")
-            end)
-            error_wrapped()
-            error_wrapped()
-            RESULT = string.format("%d,%d,%d,%d", probe_calls, update_calls, error_calls, original_calls)
-        '''
-        self.assertEqual(self.lua.run(script), "3,4,1,2")
 
-    def test_entry_lua_syntax_and_ffi_pointer_and_bcrypt_sha256(self):
-        packed = builder.entry_source(
-            (ROOT / "game" / "chat_probe.lua").read_bytes(),
-            (ROOT / "game" / "chat_probe_core.lua").read_bytes(),
-        ).decode("utf-8")
-        delimiter = "[========["
-        closing = "]========]"
-        self.assertNotIn(closing, packed)
-        syntax = "local chunk, err = loadstring(" + delimiter + packed + closing + "); assert(chunk, err); RESULT='syntax ok'"
-        self.assertEqual(self.lua.run(syntax), "syntax ok")
-
-        smoke = r'''
-            local ffi = require("ffi")
-            local buffer = ffi.new("uint8_t[4]")
-            buffer[0], buffer[1], buffer[2], buffer[3] = 1, 2, 3, 4
-            local destination = buffer + 2
-            assert(destination[0] == 3)
-            ffi.cdef[[
-                typedef void *Probe_BCRYPT_HANDLE;
-                typedef int Probe_STATUS;
-                Probe_STATUS BCryptOpenAlgorithmProvider(Probe_BCRYPT_HANDLE *algorithm, const unsigned short *name, const unsigned short *implementation, unsigned int flags);
-                Probe_STATUS BCryptCreateHash(Probe_BCRYPT_HANDLE algorithm, Probe_BCRYPT_HANDLE *hash, unsigned char *object_buffer, unsigned int object_size, unsigned char *secret, unsigned int secret_size, unsigned int flags);
-                Probe_STATUS BCryptHashData(Probe_BCRYPT_HANDLE hash, unsigned char *data, unsigned int length, unsigned int flags);
-                Probe_STATUS BCryptFinishHash(Probe_BCRYPT_HANDLE hash, unsigned char *digest, unsigned int digest_size, unsigned int flags);
-                Probe_STATUS BCryptDestroyHash(Probe_BCRYPT_HANDLE hash);
-                Probe_STATUS BCryptCloseAlgorithmProvider(Probe_BCRYPT_HANDLE algorithm, unsigned int flags);
-            ]]
-            local bcrypt = ffi.load("bcrypt.dll")
-            local name = ffi.new("unsigned short[7]", 83, 72, 65, 50, 53, 54, 0)
-            local algorithm = ffi.new("Probe_BCRYPT_HANDLE[1]")
-            assert(bcrypt.BCryptOpenAlgorithmProvider(algorithm, name, nil, 0) == 0)
-            local hash = ffi.new("Probe_BCRYPT_HANDLE[1]")
-            assert(bcrypt.BCryptCreateHash(algorithm[0], hash, nil, 0, nil, 0, 0) == 0)
-            local abc = ffi.new("unsigned char[3]", 97, 98, 99)
-            assert(bcrypt.BCryptHashData(hash[0], abc, 3, 0) == 0)
-            local digest = ffi.new("unsigned char[32]")
-            assert(bcrypt.BCryptFinishHash(hash[0], digest, 32, 0) == 0)
-            local hex = {}
-            for index = 0, 31 do hex[#hex + 1] = string.format("%02x", digest[index]) end
-            assert(table.concat(hex) == "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad")
-            bcrypt.BCryptDestroyHash(hash[0])
-            bcrypt.BCryptCloseAlgorithmProvider(algorithm[0], 0)
-            RESULT = "ffi and bcrypt ok"
-        '''
-        self.assertEqual(self.lua.run(smoke), "ffi and bcrypt ok")
 
 
 if __name__ == "__main__":

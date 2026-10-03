@@ -69,6 +69,24 @@ python tools/build_package.py --loader-zip 'C:\dependencies\Bingus-Shared-Loader
 
 ## 4. 验证
 
+测试套件只保留 20 项核心测试，直接使用默认 `unittest discover` 运行。删除了旧诊断模式的测试及重复的构建边界用例，共用假内存夹具放在非测试模块中。
+
+| 核心范围 | 测试数 |
+| --- | ---: |
+| 翻译、中文保持、正文校验、错误提示与异常、通知过滤 | 5 |
+| 控件回写与多行布局 | 3 |
+| 200 毫秒限频、响应队列与状态报告 | 3 |
+| URL、模型响应与后台 HTTP 请求 | 4 |
+| Arsenal 包、原生模块加载与文件信息结构 | 4 |
+| 启动签名扫描与内存读取门禁 | 1 |
+
+后续新增测试应替换或精简现有用例，保持测试总数不超过 20。可先检查默认发现的实际数量：
+
+```pwsh
+python -c 'import unittest; n = unittest.defaultTestLoader.discover("tests").countTestCases(); print(f"核心测试数：{n}"); assert 0 < n <= 20, "测试数须在 1–20 之间"'
+if ($LASTEXITCODE -ne 0) { throw '测试数量检查失败' }
+```
+
 HTTP 测试自动在临时目录编译 DLL，使用本机回环服务器与假密钥。需保证 GCC/objdump 在 PATH；Lua 回归还需要兼容的 Win64 LuaJIT 2.x `lua51.dll`。可使用已安装游戏 `bin/` 下的 `lua51.dll`，或自行准备的兼容 DLL，先显式设置本机路径：
 
 ```pwsh

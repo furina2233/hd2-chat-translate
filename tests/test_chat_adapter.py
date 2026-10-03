@@ -8,8 +8,7 @@ import re
 import unittest
 
 from lua_support import LUA_DLL, LuaJIT, ROOT
-from test_chat_observe import LUA_OBSERVER_ADAPTER_HARNESS
-from test_chat_widgets import WIDGET_ADAPTER_CHECKS
+from chat_fixtures import LUA_OBSERVER_ADAPTER_HARNESS, WIDGET_ADAPTER_CHECKS
 
 
 TRANSLATE_ADAPTER_CHECKS = r'''
@@ -682,8 +681,7 @@ end
         self.assertIn('RESULT = "adapter fake-kernel mocks ok"', script)
         # 将夹具和断言放在独立Lua prototype中，避免Lua 5.1的200-local限制
         # 与生产适配器定义共享同一主chunk。
-        fixture_end = WIDGET_ADAPTER_CHECKS.index("local function expect_widget_status(")
-        widget_fixture = WIDGET_ADAPTER_CHECKS[:fixture_end].replace(
+        widget_fixture = WIDGET_ADAPTER_CHECKS.replace(
             'pack32(key) .. pack32(0) .. pack64(value)',
             'pack32(key) .. pack32(matching_indices[index] and 1 or 0) .. pack64(value)',
         )

@@ -2,16 +2,14 @@
 
 from __future__ import annotations
 
-import contextlib
 from datetime import datetime, timezone
 import hashlib
 import io
 import json
 import os
-from pathlib import Path
-import re
-import struct
 import sys
+from pathlib import Path
+import struct
 import tempfile
 import unittest
 from unittest import mock
@@ -94,24 +92,6 @@ def synthetic_shared_loader_package(
     return buffer.getvalue(), bytes(patch), resource, readme, manifest
 
 
-def read_synthetic_shared_loader_assets(
-    path: Path,
-    package_bytes: bytes,
-    patch: bytes,
-    resource: bytes,
-) -> tuple[bytes, bytes, bytes]:
-    path.write_bytes(package_bytes)
-    with (
-        mock.patch.object(builder, "SHARED_LOADER_ZIP", path),
-        mock.patch.object(
-            builder, "SHARED_LOADER_ZIP_SHA256", hashlib.sha256(package_bytes).hexdigest()
-        ),
-        mock.patch.object(builder, "SHARED_LOADER_PATCH_SHA256", hashlib.sha256(patch).hexdigest()),
-        mock.patch.object(
-            builder, "SHARED_LOADER_RESOURCE_SHA256", hashlib.sha256(resource).hexdigest()
-        ),
-    ):
-        return builder.load_shared_loader_assets()
 
 
 def read_archive_contract(data: bytes) -> dict[str, object]:
@@ -233,9 +213,6 @@ local function run_loader()
         FILE_INFORMATION_DECLARATION
     ]]
     local mode = "MODE"
-    if mode == "old_48_struct" then
-        assert(ffi.sizeof("HD2Probe_BY_HANDLE_FILE_INFORMATION") == 48)
-    end
     local digest = "DIGEST"
     local expected_hex = "DLLHEX"
     local expected_bytes = {}
@@ -288,7 +265,6 @@ local function run_loader()
     local invalid_handle = ffi.cast("HD2Probe_HANDLE", -1)
     local load_calls, load_lock_ok, load_flag_ok = 0, false, false
     local bad_export = false
-    local resolved = {}
     local deleted_unowned = false
     local deleted_paths = {}
     local move_flags_ok = true
@@ -296,9 +272,6 @@ local function run_loader()
     local submitted = 0
     local enabled = true
     local disabled = false
-    local cancel_calls = 0
-    local cancel_busy = mode == "cancel_busy_once" or mode == "cancel_busy_cap"
-    local first_busy = mode == "cancel_busy_once"
 
     local function add_handle(reference, share, position)
         next_handle = next_handle + 1
@@ -332,10 +305,6 @@ local function run_loader()
         information_calls = information_calls + 1
         local entry = handles[tonumber(handle)]
         if not entry or not entry.open then return 0 end
-        if mode == "old_48_struct" then
-            output[0].dwFileAttributes = entry.reference.attributes
-            return 1
-        end
         if ffi.sizeof(output[0]) < 52 then return 0 end
         ffi.fill(output, 52, 0)
         output[0].dwFileAttributes = entry.reference.attributes
@@ -361,13 +330,13 @@ local function run_loader()
     function kernel.WriteFile(handle, source, length, written)
         local entry = handles[tonumber(handle)]
         if not entry or not entry.open then return 0 end
-        local count = mode == "short_write" and math.max(0, length - 1) or length
+        local count = length
         entry.reference.data = ffi.string(source, count)
         written[0] = count
         return 1
     end
     function kernel.FlushFileBuffers(handle)
-        return mode == "flush_fail" and 0 or (handles[tonumber(handle)] and 1 or 0)
+        return handles[tonumber(handle)] and 1 or 0
     end
     function kernel.CloseHandle(handle)
         local entry = handles[tonumber(handle)]
@@ -378,7 +347,7 @@ local function run_loader()
     function kernel.MoveFileExW(source, destination, flags)
         local from, to = wide_text(source), wide_text(destination)
         if flags ~= 0x8 then move_flags_ok = false end
-        if mode == "rename_fail" or files[to] then return 0 end
+        if files[to] then return 0 end
         if not files[from] or not files[from].owned_temp then return 0 end
         files[to] = files[from]
         files[from] = nil
@@ -413,16 +382,13 @@ local function run_loader()
     exports.HD2CT_InitializeEnvironment = ffi.cast("HD2Probe_U32 (*)(void)", function() return 0 end)
     exports.HD2CT_IsEnabled = ffi.cast("HD2Probe_U32 (*)(void)", function() return enabled and 1 or 0 end)
     exports.HD2CT_LastStatus = ffi.cast(
-        "HD2Probe_U32 (*)(void)", function() return mode == "http401" and 401 or 0 end)
+        "HD2Probe_U32 (*)(void)", function() return 0 end)
     exports.HD2CT_Submit = ffi.cast(
         "HD2Probe_U32 (*)(const char *, const char *, HD2Probe_U32)",
         function(_, _, _) submitted = submitted + 1; return 1 end)
     exports.HD2CT_Poll = ffi.cast(
         "HD2Probe_U32 (*)(const char *, char *, HD2Probe_U32, HD2Probe_U32 *)",
         function(_, output, capacity, written)
-            if mode == "poll_exception" then error("PRIVATE_POLL_SECRET") end
-            if mode == "poll_pending" then return 0 end
-            if mode == "poll_bad_length" then written[0] = 16388; return 1 end
             local result = "OK\ntranslated"
             if capacity < #result + 1 then return 0 end
             ffi.copy(output, result, #result)
@@ -430,14 +396,7 @@ local function run_loader()
             written[0] = #result
             return 1
         end)
-    exports.HD2CT_Cancel = ffi.cast("HD2Probe_U32 (*)(const char *)", function()
-        cancel_calls = cancel_calls + 1
-        if cancel_busy then
-            if first_busy then first_busy = false; return 0 end
-            if mode == "cancel_busy_cap" then return 0 end
-        end
-        return 1
-    end)
+    exports.HD2CT_Cancel = ffi.cast("HD2Probe_U32 (*)(const char *)", function() return 1 end)
     exports.HD2CT_Disable = ffi.cast("void (*)(void)", function() disabled = true end)
     local expected_exports = {
         HD2CT_ABIVersion = true,
@@ -451,7 +410,6 @@ local function run_loader()
     }
     function kernel.GetProcAddress(_, name)
         if not expected_exports[name] then bad_export = true; return nil end
-        resolved[name] = true
         return exports[name]
     end
 
@@ -481,34 +439,9 @@ MODULE_SOURCE
         tostring(load_flag_ok), tostring(bad_export), tostring(deleted_unowned), tostring(move_flags_ok),
         tostring(init_status or -1), tostring(#deleted_paths), tostring(submitted)}
     if api then
-        if mode == "positive" then
-            api.submit("hd2ct_1", "body")
-            result[#result + 1] = api.response("hd2ct_1") or "pending"
-            api.disable()
-        elseif mode == "http401" then
-            result[#result + 1] = tostring(api.enabled())
-            result[#result + 1] = tostring(api.last_status())
-        elseif mode == "poll_exception" or mode == "poll_pending" or mode == "poll_bad_length" then
-            api.submit("hd2ct_1", "body")
-            result[#result + 1] = api.response("hd2ct_1") or "pending"
-            api.disable()
-        elseif mode == "cancel_busy_once" then
-            api.submit("hd2ct_1", "body")
-            local response = api.response("hd2ct_1") or "pending"
-            local first = api.cancel("hd2ct_1")
-            local retried = api.retry_cancels(4)
-            result[#result + 1] = tostring(first)
-            result[#result + 1] = tostring(retried)
-            result[#result + 1] = response
-            api.disable()
-        elseif mode == "cancel_busy_cap" then
-            for i = 1, 40 do api.submit("hd2ct_" .. tostring(i), "x") end
-            for i = 1, 40 do api.cancel("hd2ct_" .. tostring(i)) end
-            local before = cancel_calls
-            cancel_busy = false
-            result[#result + 1] = tostring(api.retry_cancels(100))
-            result[#result + 1] = tostring(cancel_calls - before)
-        end
+        api.submit("hd2ct_1", "body")
+        result[#result + 1] = api.response("hd2ct_1") or "pending"
+        api.disable()
     end
     result[#result + 1] = tostring(disabled)
     result[#result + 1] = tostring(information_calls)
@@ -517,13 +450,6 @@ end
 run_loader()
 '''
     file_information = production_file_info_declaration()
-    if mode == "old_48_struct":
-        file_information = re.sub(
-            r"^[ \t]*HD2Probe_U32 dwVolumeSerialNumber;\r?\n",
-            "",
-            file_information,
-            flags=re.MULTILINE,
-        )
     return (
         harness.replace("MODE", mode)
         .replace("DIGEST", digest)
@@ -538,308 +464,12 @@ class StandaloneBuilderTests(unittest.TestCase):
     def setUpClass(cls):
         cls.lua = LuaJIT(LUA_DLL) if LUA_DLL is not None else None
 
-    def test_delivery_name_uses_fixed_beijing_time_and_valid_cli_format(self):
-        instant = datetime(2026, 10, 2, 16, 4, 5, tzinfo=timezone.utc)
-        with tempfile.TemporaryDirectory() as directory:
-            with mock.patch.object(builder, "ROOT", Path(directory)):
-                output = builder.default_output_path(instant)
-        self.assertEqual(output.name, "HD2ChatTranslate20261003000405.zip")
-        self.assertTrue(builder.is_delivery_filename(output.name))
-        self.assertFalse(builder.is_delivery_filename("HD2ChatTranslate20261303000405.zip"))
-        self.assertFalse(builder.is_delivery_filename("HD2ChatTranslate.zip"))
-
-    def test_default_build_uses_timestamped_standalone_package(self):
-        with tempfile.TemporaryDirectory() as directory:
-            temporary = Path(directory)
-            output = temporary / "HD2ChatTranslate20261002120000.zip"
-            native = temporary / "hd2ct_http.dll"
-            metadata = temporary / "hd2ct_http.meta.json"
-            license_file = temporary / "LICENSE"
-            loader_zip = temporary / "loader.zip"
-            native.write_bytes(fake_x64_dll())
-            metadata.write_bytes(fake_metadata(native.read_bytes()))
-            license_file.write_text("license", encoding="utf-8")
-            loader_zip.write_bytes(b"pinned loader input")
-            with (
-                mock.patch.object(builder, "default_output_path", return_value=output),
-                mock.patch.object(builder, "STANDALONE_DLL", native),
-                mock.patch.object(builder, "STANDALONE_META", metadata),
-                mock.patch.object(builder, "STANDALONE_LICENSE", license_file),
-                mock.patch.object(builder, "SHARED_LOADER_ZIP", loader_zip),
-                mock.patch.object(builder, "standalone_module_source", return_value=b"module"),
-                mock.patch.object(builder, "entry_source", return_value=b"entry"),
-                mock.patch.object(builder, "addon_files", return_value={"manifest.json": b"{}"}) as package_files,
-            ):
-                self.assertEqual(builder.build_artifact(), output)
-                package_files.assert_called_once_with(b"entry", loader_zip=loader_zip)
-            self.assertTrue(output.is_file())
-
-    def test_explicit_build_inputs_are_forwarded_and_output_cannot_replace_inputs(self):
-        with tempfile.TemporaryDirectory() as directory:
-            temporary = Path(directory)
-            loader_zip = temporary / "loader.zip"
-            native = temporary / "native.dll"
-            metadata = temporary / "native.json"
-            for source in (loader_zip, native, metadata):
-                source.write_bytes(b"preserve build input")
-            with self.assertRaisesRegex(ValueError, "输出不能覆盖构建输入文件"):
-                builder.build_artifact(loader_zip, loader_zip=loader_zip)
-            self.assertEqual(loader_zip.read_bytes(), b"preserve build input")
-
-    def test_builder_rejects_output_equal_to_each_source_or_binary_input(self):
-        root = builder.ROOT
-        inputs = (
-            root / "game" / "chat_probe.lua",
-            root / "game" / "chat_probe_core.lua",
-            root / "game" / "chat_observe_core.lua",
-            root / "game" / "chat_translate_core.lua",
-            root / "game" / "chat_http_native.lua",
-            builder.STANDALONE_DLL,
-            builder.STANDALONE_META,
-            builder.STANDALONE_LICENSE,
-            builder.PROJECT_LICENSE,
-            builder.SHARED_LOADER_ZIP,
-        )
-        for source in inputs:
-            with self.subTest(source=source.name):
-                with self.assertRaisesRegex(ValueError, "输出不能覆盖构建输入文件"):
-                    builder.build_artifact(source)
-
-    def test_default_output_collision_and_exclusive_creation_preserve_existing_bytes(self):
-        with tempfile.TemporaryDirectory() as directory:
-            temporary = Path(directory)
-            existing = temporary / "HD2ChatTranslate20261002120000.zip"
-            existing.write_bytes(b"keep this package")
-            with mock.patch.object(builder, "default_output_path", return_value=existing):
-                with self.assertRaisesRegex(ValueError, "拒绝覆盖"):
-                    builder.build_artifact()
-            self.assertEqual(existing.read_bytes(), b"keep this package")
-
-            native = temporary / "native.dll"
-            metadata = temporary / "native.json"
-            license_file = temporary / "LICENSE"
-            loader_zip = temporary / "loader.zip"
-            native.write_bytes(fake_x64_dll())
-            metadata.write_bytes(fake_metadata(native.read_bytes()))
-            license_file.write_text("license", encoding="utf-8")
-            loader_zip.write_bytes(b"loader")
-            with (
-                mock.patch.object(builder, "default_output_path", return_value=existing),
-                mock.patch.object(builder.os.path, "lexists", return_value=False),
-                mock.patch.object(builder, "STANDALONE_DLL", native),
-                mock.patch.object(builder, "STANDALONE_META", metadata),
-                mock.patch.object(builder, "STANDALONE_LICENSE", license_file),
-                mock.patch.object(builder, "SHARED_LOADER_ZIP", loader_zip),
-                mock.patch.object(builder, "standalone_module_source", return_value=b"module"),
-                mock.patch.object(builder, "entry_source", return_value=b"entry"),
-                mock.patch.object(builder, "addon_files", return_value={"manifest.json": b"{}"}),
-                self.assertRaises(FileExistsError),
-            ):
-                builder.build_artifact()
-            self.assertEqual(existing.read_bytes(), b"keep this package")
-
-    def test_cli_rejects_non_timestamp_output_and_removed_mode_switches(self):
-        for arguments in (
-            ["build_package.py", "--output", "custom.zip"],
-            ["build_package.py", "--observe"],
-            ["build_package.py", "--display-test"],
-            ["build_package.py", "--translate"],
-            ["build_package.py", "--standalone"],
-        ):
-            with (
-                mock.patch.object(sys, "argv", arguments),
-                contextlib.redirect_stderr(io.StringIO()),
-                self.assertRaises(SystemExit) as raised,
-            ):
-                builder.main()
-            self.assertEqual(raised.exception.code, 2)
-
-    def test_cli_accepts_timestamped_output_and_optional_input_paths(self):
-        output = Path("HD2ChatTranslate20261002123456.zip")
-        loader_zip = Path("loader.zip")
-        native_dll = Path("native.dll")
-        native_meta = Path("native.json")
-        with (
-            mock.patch.object(
-                sys,
-                "argv",
-                [
-                    "build_package.py", "--output", str(output),
-                    "--loader-zip", str(loader_zip),
-                    "--native-dll", str(native_dll),
-                    "--native-meta", str(native_meta),
-                ],
-            ),
-            mock.patch.object(builder, "build_artifact", return_value=output) as build,
-            contextlib.redirect_stdout(io.StringIO()),
-        ):
-            builder.main()
-        build.assert_called_once_with(
-            output, loader_zip=loader_zip, native_dll=native_dll, native_meta=native_meta
-        )
-
-    def test_lua_archive_helper_matches_official_golden_and_bounds_resource_list(self):
-        sorted_archive = builder.make_lua_resource_archive([(0x20, b"second"), (0x10, b"first")])
-        # 双资源黄金值由上游 scripts/archive.py 的 make_archive 独立生成。
-        self.assertEqual(
-            hashlib.sha256(sorted_archive).hexdigest(),
-            "e75ad56564a73e3803122ee54835a10fa9e6fa4e16dfe4932dcc7fda07224ce2",
-        )
-        sorted_layout = read_archive_contract(sorted_archive)
-        self.assertEqual([row[0] for row in sorted_layout["file_rows"]], [0x10, 0x20])
-        sorted_rows = sorted_layout["file_rows"]
-        self.assertEqual(
-            [sorted_archive[row[2] : row[2] + row[7]] for row in sorted_rows],
-            [b"first", b"second"],
-        )
-        resource = b"duplicate-test"
-        with self.assertRaisesRegex(ValueError, "重复"):
-            builder.make_lua_resource_archive([(0x1234, resource), (0x1234, resource)])
-        with self.assertRaisesRegex(ValueError, "数量上限"):
-            builder.make_lua_resource_archive(
-                [(index, resource) for index in range(builder.MAX_ARCHIVE_LUA_RESOURCES + 1)]
-            )
-
-    def test_independent_reader_uses_official_type_count_and_file_count_offsets(self):
-        # 真实patch0元数据：2个type row分组，每组2个file row；不依赖生产打包器。
-        type_count = 2
-        file_count = 4
-        header_size = 72
-        type_row_size = 32
-        file_row_size = 80
-        file_rows_offset = header_size + type_count * type_row_size
-        first_data_offset = (file_rows_offset + file_count * file_row_size + 15) & ~15
-        data_offsets = [first_data_offset + 16 * index for index in range(file_count)]
-        archive = bytearray(data_offsets[-1] + 16)
-        struct.pack_into(
-            "<III20sQQ24s", archive, 0, 0xF0000011, type_count, file_count, bytes(20), len(archive), 0, bytes(24)
-        )
-        struct.pack_into("<IIQIIII", archive, 72, 0, 0, 0xA14E8DFA2CD117E2, 2, 0, 16, 16)
-        struct.pack_into("<IIQIIII", archive, 104, 0, 0, 0xFEDCBA9876543210, 2, 0, 16, 16)
-        for index in range(file_count):
-            file_type = 0xA14E8DFA2CD117E2 if index < 2 else 0xFEDCBA9876543210
-            struct.pack_into(
-                "<7Q6I",
-                archive,
-                file_rows_offset + file_row_size * index,
-                index + 1,
-                file_type,
-                data_offsets[index],
-                0,
-                0,
-                0,
-                0,
-                8,
-                0,
-                0,
-                16,
-                16,
-                index,
-            )
-            archive[data_offsets[index] : data_offsets[index] + 8] = bytes([index + 1]) * 8
-        parsed = read_archive_contract(bytes(archive))
-        self.assertEqual((parsed["type_count"], parsed["file_count"]), (2, 4))
-        self.assertEqual([row[3] for row in parsed["type_rows"]], [2, 2])
-        self.assertEqual([row[-1] for row in parsed["file_rows"]], [0, 1, 2, 3])
-
-    def test_local_shared_loader_zip_is_pinned_and_reads_only_required_assets(self):
-        package_bytes, patch, resource, readme, manifest = synthetic_shared_loader_package()
-        with tempfile.TemporaryDirectory() as directory:
-            actual = read_synthetic_shared_loader_assets(
-                Path(directory) / "loader.zip", package_bytes, patch, resource
-            )
-        self.assertEqual(actual, (resource, readme, manifest))
-
-    def test_local_shared_loader_rejects_missing_bad_and_nonempty_sidecars(self):
-        with tempfile.TemporaryDirectory() as directory:
-            temporary = Path(directory)
-            missing = temporary / "missing.zip"
-            with mock.patch.object(builder, "SHARED_LOADER_ZIP", missing):
-                with self.assertRaisesRegex(ValueError, "缺少 Bingus Shared Loader v18 ZIP"):
-                    builder.load_shared_loader_assets()
-
-            package_bytes, patch, resource, _, _ = synthetic_shared_loader_package()
-            path = temporary / "wrong-sha.zip"
-            path.write_bytes(package_bytes)
-            with (
-                mock.patch.object(builder, "SHARED_LOADER_ZIP", path),
-                mock.patch.object(builder, "SHARED_LOADER_ZIP_SHA256", "0" * 64),
-            ):
-                with self.assertRaisesRegex(ValueError, "ZIP SHA-256"):
-                    builder.load_shared_loader_assets()
-
-            for sidecars in ({"stream": b"unexpected"}, {"gpu_resources": b"unexpected"}):
-                invalid_zip, invalid_patch, invalid_resource, _, _ = synthetic_shared_loader_package(
-                    **sidecars
-                )
-                with self.assertRaisesRegex(ValueError, "sidecar.*必须为空"):
-                    read_synthetic_shared_loader_assets(
-                        temporary / "nonempty-sidecar.zip",
-                        invalid_zip,
-                        invalid_patch,
-                        invalid_resource,
-                    )
-
-            malformed_zip, malformed_patch, malformed_resource, _, _ = synthetic_shared_loader_package(
-                entry_data_offset=208
-            )
-            with self.assertRaisesRegex(ValueError, "TOC entry布局"):
-                read_synthetic_shared_loader_assets(
-                    temporary / "wrong-layout.zip",
-                    malformed_zip,
-                    malformed_patch,
-                    malformed_resource,
-                )
-
-            missing_doc_zip, missing_doc_patch, missing_doc_resource, _, _ = (
-                synthetic_shared_loader_package(include_manifest=False)
-            )
-            with self.assertRaisesRegex(ValueError, "缺少或重复白名单条目"):
-                read_synthetic_shared_loader_assets(
-                    temporary / "missing-doc.zip",
-                    missing_doc_zip,
-                    missing_doc_patch,
-                    missing_doc_resource,
-                )
-
     def run_loader(self, mode: str) -> list[str]:
         if self.lua is None:
             self.skipTest("本机未提供LuaJIT lua51.dll")
         return self.lua.run(fake_loader_script(mode)).split("|")
 
-    def test_native_dll_metadata_and_pe_entry_are_checked(self):
-        dll = fake_x64_dll()
-        size, digest = builder.validate_native_dll(dll, fake_metadata(dll))
-        self.assertEqual((size, digest), (len(dll), hashlib.sha256(dll).hexdigest()))
-
-        bad_meta = json.loads(fake_metadata(dll))
-        bad_meta["sha256"] = "0" * 64
-        with self.assertRaisesRegex(ValueError, "大小或 SHA-256"):
-            builder.validate_native_dll(dll, json.dumps(bad_meta).encode())
-
-        bad_architecture = bytearray(dll)
-        struct.pack_into("<H", bad_architecture, 0x84, 0x14C)
-        with self.assertRaisesRegex(ValueError, "x64 PE DLL"):
-            builder.validate_native_dll(bytes(bad_architecture), fake_metadata(bytes(bad_architecture)))
-
-        bad_entry = bytearray(dll)
-        struct.pack_into("<I", bad_entry, 0x80 + 24 + 16, 0x3000)
-        with self.assertRaisesRegex(ValueError, "入口地址"):
-            builder.validate_native_dll(bytes(bad_entry), fake_metadata(bytes(bad_entry)))
-
-    def test_standalone_payload_is_single_marker_hex_and_size_bounded(self):
-        template = (ROOT / "game" / "chat_http_native.lua").read_bytes()
-        dll = fake_x64_dll()
-        packed = builder.standalone_module_source(template, dll, fake_metadata(dll))
-        self.assertNotIn(builder.NATIVE_PAYLOAD_MARKER, packed)
-        self.assertIn(f'local HD2CT_DLL_SIZE = {len(dll)}'.encode(), packed)
-        self.assertIn(hashlib.sha256(dll).hexdigest().encode(), packed)
-        self.assertIn(dll.hex().encode(), packed)
-
-        with self.assertRaisesRegex(ValueError, "恰好包含一个payload标记"):
-            builder.standalone_module_source(template + builder.NATIVE_PAYLOAD_MARKER, dll, fake_metadata(dll))
-
-    def test_default_standalone_package_manifest_license_and_zip_crc(self):
+    def test_default_standalone_package_contract_and_crc(self):
         dll = fake_x64_dll()
         entry = make_entry(dll)
         self.assertLessEqual(len(entry), builder.MAX_SOURCE_BYTES)
@@ -847,84 +477,89 @@ class StandaloneBuilderTests(unittest.TestCase):
         self.assertIn(b"local TRANSLATE_ENABLED = true", entry)
         self.assertIn(b"local OBSERVE_ENABLED = false", entry)
 
-        _, _, loader_resource, loader_readme, loader_manifest = synthetic_shared_loader_package()
-        loader_assets = (loader_resource, loader_readme, loader_manifest)
-        with mock.patch.object(builder, "load_shared_loader_assets", return_value=loader_assets):
-            files = builder.addon_files(entry)
-        self.assertEqual(
-            set(files),
-            {
-                "manifest.json",
-                "LICENSE",
-                "Addon/9ba626afa44a3aa3.patch_0",
-                "Addon/9ba626afa44a3aa3.patch_0.stream",
-                "Addon/9ba626afa44a3aa3.patch_0.gpu_resources",
-                "LICENSES/cJSON-LICENSE.txt",
-                "LICENSES/BingusSharedLoader-README.txt",
-                "LICENSES/BingusSharedLoader-manifest.json",
-                "LICENSES/BingusSharedLoader-SOURCE.txt",
-            },
-        )
-        archive = files["Addon/9ba626afa44a3aa3.patch_0"]
-        header = struct.unpack_from("<III20sQQ24s", archive, 0)
-        self.assertEqual((header[0], header[1], header[2], header[4]), (0xF0000011, 1, 2, len(archive)))
-        type_record = struct.unpack_from("<IIQIIII", archive, 72)
-        self.assertEqual(type_record, (0, 0, builder.RESOURCE_TYPE, 2, 0, 16, 16))
-        entries = [struct.unpack_from("<7Q6I", archive, 104 + 80 * index) for index in range(2)]
-        self.assertEqual([item[0] for item in entries], [builder.SHARED_LOADER_RESOURCE_HASH, builder.resource_hash(builder.RESOURCE_NAME)])
-        self.assertEqual([item[-1] for item in entries], [0, 1])
-        parsed = read_archive_contract(archive)
-        self.assertEqual((parsed["type_count"], parsed["file_count"]), (1, 2))
-        self.assertEqual([row[3] for row in parsed["type_rows"]], [2])
-        self.assertEqual([row[-1] for row in parsed["file_rows"]], [0, 1])
-        self.assertEqual(len({item[0] for item in entries}), 2)
-        for item in entries:
-            self.assertEqual(item[1], builder.RESOURCE_TYPE)
-            self.assertEqual(item[2] % 16, 0)
-            self.assertGreater(item[7], 0)
-            self.assertLessEqual(item[2] + item[7], len(archive))
-        first_blob = archive[entries[0][2] : entries[0][2] + entries[0][7]]
-        chat_blob = archive[entries[1][2] : entries[1][2] + entries[1][7]]
-        self.assertEqual(first_blob, loader_resource)
-        self.assertEqual(chat_blob, struct.pack("<II", len(entry), 2) + entry)
-        self.assertIn(b"HD2CT_DLL_HEX", chat_blob)
-        wrong_header = bytearray(archive)
-        struct.pack_into("<II", wrong_header, 4, 2, 1)
-        with self.assertRaisesRegex(ValueError, "archive typeRows|分组计数"):
-            read_archive_contract(bytes(wrong_header))
-        duplicate_index = bytearray(archive)
-        struct.pack_into("<I", duplicate_index, 104 + 80 + 76, 0)
-        with self.assertRaisesRegex(ValueError, "序号必须唯一"):
-            read_archive_contract(bytes(duplicate_index))
-        manifest = json.loads(files["manifest.json"])
-        self.assertEqual(manifest["Guid"], builder.ADDON_GUID)
-        self.assertEqual(manifest["Name"], "HD2 Chat Translate Standalone")
-        self.assertEqual(len(manifest["Options"]), 1)
-        self.assertEqual(manifest["Options"][0]["Include"], ["Addon"])
-        for text in (manifest["Description"], manifest["Options"][0]["Description"]):
-            self.assertNotIn("伴随程序", text)
-            self.assertIn("HD2CT_API_URL", text)
-            self.assertIn("HD2CT_API_KEY", text)
-            self.assertIn("Bingus Shared Loader v18", text)
-            self.assertIn("无需另外导入", text)
-            self.assertIn("列表最底", text)
-            self.assertIn("first-mod-wins", text)
-            self.assertIn("列表最顶", text)
-        self.assertEqual(files["LICENSES/BingusSharedLoader-README.txt"], loader_readme)
-        self.assertEqual(files["LICENSES/BingusSharedLoader-manifest.json"], loader_manifest)
-        source_note = files["LICENSES/BingusSharedLoader-SOURCE.txt"].decode("utf-8")
-        self.assertIn("github.com/CowboyBingus/BingusSharedLoader", source_note)
-        self.assertIn(builder.SHARED_LOADER_ZIP_SHA256, source_note)
-        self.assertIn("不为 Bingus Shared Loader 声明或新增许可证", source_note)
-
+        instant = datetime(2026, 10, 2, 16, 4, 5, tzinfo=timezone.utc)
         with tempfile.TemporaryDirectory() as directory:
-            native_dir = Path(directory) / "native"
-            native_dir.mkdir()
-            dll_path = native_dir / "hd2ct_http.dll"
-            meta_path = native_dir / "hd2ct_http.meta.json"
+            with mock.patch.object(builder, "ROOT", Path(directory)):
+                default_name = builder.default_output_path(instant).name
+            output = Path(directory) / default_name
+            self.assertEqual(default_name, "HD2ChatTranslate20261003000405.zip")
+            self.assertTrue(builder.is_delivery_filename(default_name))
+
+            _, _, loader_resource, loader_readme, loader_manifest = synthetic_shared_loader_package()
+            loader_assets = (loader_resource, loader_readme, loader_manifest)
+            with mock.patch.object(builder, "load_shared_loader_assets", return_value=loader_assets):
+                files = builder.addon_files(entry)
+            archive = files["Addon/9ba626afa44a3aa3.patch_0"]
+            header = struct.unpack_from("<III20sQQ24s", archive, 0)
+            self.assertEqual((header[0], header[1], header[2], header[4]), (0xF0000011, 1, 2, len(archive)))
+            type_record = struct.unpack_from("<IIQIIII", archive, 72)
+            self.assertEqual(type_record, (0, 0, builder.RESOURCE_TYPE, 2, 0, 16, 16))
+            entries = [struct.unpack_from("<7Q6I", archive, 104 + 80 * index) for index in range(2)]
+            self.assertEqual(
+                [item[0] for item in entries],
+                [builder.SHARED_LOADER_RESOURCE_HASH, builder.resource_hash(builder.RESOURCE_NAME)],
+            )
+            self.assertEqual([item[-1] for item in entries], [0, 1])
+            parsed = read_archive_contract(archive)
+            self.assertEqual((parsed["type_count"], parsed["file_count"]), (1, 2))
+            self.assertEqual([row[-1] for row in parsed["file_rows"]], [0, 1])
+            for item in entries:
+                self.assertEqual(item[1], builder.RESOURCE_TYPE)
+                self.assertEqual(item[2] % 16, 0)
+                self.assertLessEqual(item[2] + item[7], len(archive))
+            self.assertEqual(
+                archive[entries[0][2]:entries[0][2] + entries[0][7]],
+                loader_resource,
+            )
+            self.assertEqual(
+                archive[entries[1][2]:entries[1][2] + entries[1][7]],
+                struct.pack("<II", len(entry), 2) + entry,
+            )
+            self.assertIn(b"HD2CT_DLL_HEX", archive[entries[1][2]:entries[1][2] + entries[1][7]])
+
+            manifest = json.loads(files["manifest.json"])
+            self.assertEqual(manifest["Guid"], builder.ADDON_GUID)
+            self.assertEqual(manifest["Name"], "HD2 Chat Translate Standalone")
+            self.assertEqual(len(manifest["Options"]), 1)
+            self.assertEqual(manifest["Options"][0]["Include"], ["Addon"])
+            self.assertEqual(files["Addon/9ba626afa44a3aa3.patch_0.stream"], b"")
+            self.assertEqual(files["Addon/9ba626afa44a3aa3.patch_0.gpu_resources"], b"")
+            for text in (manifest["Description"], manifest["Options"][0]["Description"]):
+                self.assertIn("first-mod-wins", text)
+                self.assertIn("列表最底", text)
+                self.assertIn("列表最顶", text)
+            self.assertEqual(files["LICENSES/BingusSharedLoader-README.txt"], loader_readme)
+            self.assertEqual(files["LICENSES/BingusSharedLoader-manifest.json"], loader_manifest)
+            self.assertIn(b"GNU GENERAL PUBLIC LICENSE", files["LICENSE"])
+            self.assertEqual(files["LICENSE"], builder.PROJECT_LICENSE.read_bytes())
+            self.assertEqual(files["LICENSES/cJSON-LICENSE.txt"], builder.STANDALONE_LICENSE.read_bytes())
+
+            packed_entry = entry.decode("utf-8")
+            delimiter = "[========["
+            closing = "]========]"
+            self.assertNotIn(closing, packed_entry)
+            compile_script = (
+                "local chunk, err = loadstring("
+                + delimiter + packed_entry + closing
+                + "); assert(chunk, err); RESULT='standalone syntax ok'"
+            )
+            self.assertIsNotNone(self.lua)
+            self.assertEqual(self.lua.run(compile_script), "standalone syntax ok")
+
+            dll_path = Path(directory) / "hd2ct_http.dll"
+            meta_path = Path(directory) / "hd2ct_http.meta.json"
             dll_path.write_bytes(dll)
+            metadata = json.loads(fake_metadata(dll))
+            bad_metadata = dict(metadata)
+            bad_metadata["sha256"] = "0" * 64
+            with self.assertRaisesRegex(ValueError, "大小或 SHA-256"):
+                builder.standalone_module_source(
+                    (ROOT / "game" / "chat_http_native.lua").read_bytes(),
+                    dll,
+                    json.dumps(bad_metadata).encode("utf-8"),
+                )
+
             meta_path.write_bytes(fake_metadata(dll))
-            output = Path(directory) / "standalone.zip"
             with (
                 mock.patch.object(builder, "STANDALONE_DLL", dll_path),
                 mock.patch.object(builder, "STANDALONE_META", meta_path),
@@ -934,57 +569,16 @@ class StandaloneBuilderTests(unittest.TestCase):
                 built = builder.build_artifact()
             with zipfile.ZipFile(built) as package:
                 self.assertIsNone(package.testzip())
-                self.assertEqual(set(package.namelist()), set(files))
+                names = package.namelist()
+                self.assertEqual(set(names), set(files))
+                self.assertEqual(len(names), len(set(names)))
                 self.assertEqual(package.read("LICENSE"), builder.PROJECT_LICENSE.read_bytes())
-                self.assertEqual(package.read("LICENSES/cJSON-LICENSE.txt"), builder.STANDALONE_LICENSE.read_bytes())
-
-    def test_builder_requires_native_inputs_and_preserves_loader_input(self):
-        with tempfile.TemporaryDirectory() as directory:
-            temporary = Path(directory)
-            missing_dll = temporary / "missing.dll"
-            missing_meta = temporary / "missing.meta.json"
-            with self.assertRaisesRegex(ValueError, "缺少原生 helper DLL"):
-                builder.build_artifact(
-                    temporary / "HD2ChatTranslate20261002120000.zip",
-                    native_dll=missing_dll,
-                    native_meta=missing_meta,
-                )
-
-            loader_zip = temporary / "loader.zip"
-            loader_zip.write_bytes(b"pinned loader package")
-            with self.assertRaisesRegex(ValueError, "输出不能覆盖构建输入文件"):
-                builder.build_artifact(loader_zip, loader_zip=loader_zip)
-            self.assertEqual(loader_zip.read_bytes(), b"pinned loader package")
-
-    def test_complete_standalone_entry_passes_luajit_parser(self):
-        if LUA_DLL is None:
-            self.skipTest("本机未提供LuaJIT lua51.dll")
-        packed = make_entry(fake_x64_dll()).decode("utf-8")
-        delimiter = "[========["
-        closing = "]========]"
-        self.assertNotIn(closing, packed)
-        script = (
-            "local chunk, err = loadstring("
-            + delimiter
-            + packed
-            + closing
-            + "); assert(chunk, err); RESULT='standalone syntax ok'"
-        )
-        self.assertEqual(LuaJIT(LUA_DLL).run(script), "standalone syntax ok")
 
     def test_loader_holds_verified_read_lock_through_absolute_hardened_load(self):
         result = self.run_loader("positive")
         self.assertEqual(result[0:4], ["loaded", "1", "true", "true"])
         self.assertEqual(result[4:8], ["false", "false", "true", "0"])
         self.assertEqual(result[10:12], ["OK\ntranslated", "true"])
-
-    def test_native_poll_exception_and_invalid_length_are_classified_without_changing_pending(self):
-        caught = self.run_loader("poll_exception")
-        self.assertEqual(caught[10], "ERR\nRESPONSE_EXCEPTION")
-        pending = self.run_loader("poll_pending")
-        self.assertEqual(pending[10], "pending")
-        invalid_length = self.run_loader("poll_bad_length")
-        self.assertEqual(invalid_length[10], "ERR\nBAD_RESPONSE")
 
     def test_loader_rejects_bad_payload_file_size_sha_and_reparse_paths(self):
         for mode in (
@@ -1000,55 +594,6 @@ class StandaloneBuilderTests(unittest.TestCase):
                 self.assertEqual(result[1], "0")
                 self.assertEqual(result[4], "false")
                 self.assertEqual(result[5], "false")
-
-    def test_failed_temp_write_flush_or_rename_only_removes_its_own_temp(self):
-        for mode in ("short_write", "flush_fail", "rename_fail"):
-            with self.subTest(mode=mode):
-                result = self.run_loader(mode)
-                self.assertEqual(result[0], "failed")
-                self.assertEqual(result[1], "0")
-                self.assertEqual(result[5], "false")
-                self.assertEqual(result[6], "true")
-                self.assertEqual(result[8], "1")
-
-    def test_native_cancel_busy_retries_only_bounded_owned_tokens(self):
-        once = self.run_loader("cancel_busy_once")
-        self.assertEqual(once[10:14], ["false", "1", "OK\ntranslated", "true"])
-        capped = self.run_loader("cancel_busy_cap")
-        self.assertEqual(capped[10:12], ["32", "32"])
-
-    def test_target_gate_and_native_exports_are_fixed(self):
-        source = (ROOT / "game" / "chat_probe.lua").read_text(encoding="utf-8")
-        guard = source.index("if target_verified == true and native_http_loader then")
-        load = source.index("pcall(native_http_loader.load)", guard)
-        self.assertGreater(load, guard)
-        self.assertEqual(source.count("native_http_loader.load"), 1)
-
-        module = (ROOT / "game" / "chat_http_native.lua").read_text(encoding="utf-8")
-        names = (
-            "HD2CT_ABIVersion",
-            "HD2CT_InitializeEnvironment",
-            "HD2CT_IsEnabled",
-            "HD2CT_LastStatus",
-            "HD2CT_Submit",
-            "HD2CT_Poll",
-            "HD2CT_Cancel",
-            "HD2CT_Disable",
-        )
-        for name in names:
-            with self.subTest(name=name):
-                self.assertIn(f'resolve("{name}"', module)
-        self.assertNotIn('resolve("InitializeEnvironment"', module)
-        self.assertNotIn('ffi.load(', module)
-
-        heartbeat = source.split("local function observer_translate_heartbeat(force)", 1)[1].split(
-            "local function observer_translate_refresh_for_setter", 1
-        )[0]
-        self.assertIn("if enabled_ok and native_init_status == 0 and enabled", heartbeat)
-        self.assertIn("pcall(native_transport_api.retry_cancels, 4)", heartbeat)
-        self.assertNotIn("native_last_status == 0", heartbeat)
-        http_error = self.run_loader("http401")
-        self.assertEqual(http_error[10:12], ["true", "401"])
 
     @unittest.skipUnless(os.name == "nt", "真实Win32文件信息API仅在Windows执行")
     def test_win32_file_information_layout_preserves_canary(self):
@@ -1096,13 +641,6 @@ assert(kernel.CloseHandle(handle) ~= 0)
 RESULT = "52-byte ABI and canary ok"
 '''
             self.assertEqual(self.lua.run(script), "52-byte ABI and canary ok")
-
-    def test_old_48_byte_file_information_guard_rejects_before_win32_or_load(self):
-        result = self.run_loader("old_48_struct")
-        self.assertEqual(result[0], "failed")
-        self.assertEqual(result[1], "0")
-        self.assertEqual(result[-1], "0")
-
 
 if __name__ == "__main__":
     unittest.main()

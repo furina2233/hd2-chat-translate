@@ -51,7 +51,7 @@ python tools/build_package.py
 | `game/` | Lua 入口、游戏构建门禁、聊天控件适配器、翻译状态机及原生模块加载 |
 | `native/` | WinHTTP 后台请求实现及固定版本的 cJSON 源码、许可 |
 | `tools/` | 原生 DLL 构建和 Arsenal 安装包构建 |
-| `tests/` | 假内存/控件、LuaJIT、原生 ABI、回环 HTTP 和安装包回归 |
+| `tests/` | 20 项核心测试：翻译、回写与布局、限频、回环 HTTP 和安装包 |
 | `docs/` | 使用、构建、接入依据及崩溃修复记录 |
 | `artifacts/` | 被 Git 忽略的依赖、当前产物与必要核验记录 |
 
