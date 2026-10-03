@@ -902,7 +902,7 @@ class StandaloneBuilderTests(unittest.TestCase):
         self.assertEqual(len(manifest["Options"]), 1)
         self.assertEqual(manifest["Options"][0]["Include"], ["Addon"])
         for text in (manifest["Description"], manifest["Options"][0]["Description"]):
-            self.assertIn("无需运行伴随程序", text)
+            self.assertNotIn("伴随程序", text)
             self.assertIn("HD2CT_API_URL", text)
             self.assertIn("HD2CT_API_KEY", text)
             self.assertIn("Bingus Shared Loader v18", text)

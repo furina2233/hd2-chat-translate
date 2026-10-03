@@ -328,7 +328,7 @@ def entry_source(
     standalone: bool = False,
 ) -> bytes:
     if sum((bool(display_test), bool(translate), bool(standalone))) > 1:
-        raise ValueError("固定显示测试、伴随翻译和独立翻译模式互斥")
+        raise ValueError("固定显示测试和翻译模式互斥")
     sources = [source, core_source]
     if observer_source is not None:
         sources.append(observer_source)
@@ -381,7 +381,7 @@ def entry_source(
     if standalone_source is not None and not standalone:
         raise ValueError("未启用独立模式时不能注入原生网络模块")
     if translate and standalone:
-        raise ValueError("伴随翻译和独立翻译模式互斥")
+        raise ValueError("两种翻译模式互斥")
     translate_marker_count = source.count(TRANSLATE_MARKER)
     translate_flag_count = source.count(TRANSLATE_FLAG)
     if translate_marker_count > 1 or translate_flag_count > 1:
@@ -445,7 +445,7 @@ def addon_files(
         "非中文消息显示为原文、换行和“译文：”加译文；中文保持原样，请求失败显示简短提示，不广播译文。"
         "读取 HD2CT_API_URL、HD2CT_MODEL、HD2CT_API_KEY、"
         "HD2CT_TIMEOUT_SECONDS（默认20）和 HD2CT_ENABLED（默认1）环境变量。"
-        "内置 Bingus Shared Loader v18，无需另外导入，无需运行伴随程序。Arsenal 默认优先级请放在列表最底；"
+        "内置 Bingus Shared Loader v18，无需另外导入。Arsenal 默认优先级请放在列表最底；"
         "启用 first-mod-wins 时请放在列表最顶。"
     )
     manifest = {
