@@ -29,7 +29,7 @@ call the extraction
 | `HD2CT_TIMEOUT_SECONDS` | 可选，1–120 秒，默认 `20` |
 | `HD2CT_ENABLED` | 可选，`0` 停用，默认 `1` |
 
-根地址补全 `/chat/completions`，`/v1` 补全 `/v1/chat/completions`；完整接口及其他路径原样使用。服务商需支持 Chat Completions 和 JSON mode。配置在启动时读取，修改后重启游戏。启用后聊天正文会发给配置的服务商。
+根地址补全 `/chat/completions`，`/v1` 补全 `/v1/chat/completions`；完整接口及其他路径原样使用。服务商需支持 Chat Completions 和 JSON mode。配置在启动时读取用户变量和系统变量，不使用进程继承的旧值；修改或删除后重启游戏。必填项在两处均缺失或为空时停用翻译。启用后聊天正文会发给配置的服务商。
 
 详细配置、状态码和卸载见 [使用说明](docs/chat-standalone.md)。
 

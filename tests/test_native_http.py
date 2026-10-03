@@ -125,6 +125,190 @@ result["elapsed_before_print_ms"] = (time.perf_counter() - test_started) * 1000.
 print(json.dumps(result, ensure_ascii=True), flush=True)
 """
 
+ENVIRONMENT_CHILD = r"""
+import ctypes
+import json
+import os
+import sys
+
+dll_path, registry_json = sys.argv[1], sys.argv[2]
+expected_config = json.loads(sys.argv[3]) if len(sys.argv) == 4 else None
+for name in tuple(os.environ):
+    if name.upper().startswith("HD2CT_"):
+        del os.environ[name]
+os.environ.update({
+    "HD2CT_API_URL": "http://127.0.0.1:1/process-fallback",
+    "HD2CT_MODEL": "fake-process-model",
+    "HD2CT_API_KEY": "fake-process-key",
+    "HD2CT_ENABLED": "1",
+    "HD2CT_TIMEOUT_SECONDS": "77",
+})
+
+lib = ctypes.CDLL(dll_path)
+lib.fixture_ClearRegistry.argtypes = []
+lib.fixture_ClearRegistry.restype = None
+lib.fixture_SetRegistryValue.argtypes = [ctypes.c_uint32, ctypes.c_wchar_p, ctypes.c_wchar_p]
+lib.fixture_SetRegistryValue.restype = ctypes.c_int
+lib.fixture_ConfigMatches.argtypes = [ctypes.c_char_p, ctypes.c_char_p, ctypes.c_char_p]
+lib.fixture_ConfigMatches.restype = ctypes.c_int
+lib.fixture_TimeoutSeconds.argtypes = []
+lib.fixture_TimeoutSeconds.restype = ctypes.c_uint32
+lib.HD2CT_InitializeEnvironment.argtypes = []
+lib.HD2CT_InitializeEnvironment.restype = ctypes.c_uint32
+lib.HD2CT_IsEnabled.argtypes = []
+lib.HD2CT_IsEnabled.restype = ctypes.c_uint32
+lib.HD2CT_Submit.argtypes = [ctypes.c_char_p, ctypes.c_char_p, ctypes.c_uint32]
+lib.HD2CT_Submit.restype = ctypes.c_uint32
+
+lib.fixture_ClearRegistry()
+for hive_name, hive in (("user", 0), ("machine", 1)):
+    for name, value in json.loads(registry_json).get(hive_name, {}).items():
+        if not lib.fixture_SetRegistryValue(hive, name, value):
+            raise RuntimeError("fixture registry value was rejected")
+
+status = lib.HD2CT_InitializeEnvironment()
+enabled = lib.HD2CT_IsEnabled()
+submit_result = None
+if not enabled:
+    submit_result = lib.HD2CT_Submit(b"missing-config", b"safe", 4)
+result = {
+    "status": status,
+    "enabled": enabled,
+    "submit": submit_result,
+    "timeout": lib.fixture_TimeoutSeconds(),
+}
+if expected_config is not None:
+    result["selected_config_matches"] = lib.fixture_ConfigMatches(
+        expected_config["HD2CT_API_URL"].encode("utf-8"),
+        expected_config["HD2CT_MODEL"].encode("utf-8"),
+        expected_config["HD2CT_API_KEY"].encode("utf-8"),
+    )
+print(json.dumps(result), flush=True)
+"""
+
+ENVIRONMENT_SHIM_C = r"""
+#define WIN32_LEAN_AND_MEAN
+#define _WIN32_WINNT 0x0601
+#define WINVER 0x0601
+#include <windows.h>
+#include <winreg.h>
+#include <stdint.h>
+#include <string.h>
+#include <wchar.h>
+
+#define FIXTURE_VALUE_COUNT 16u
+#define FIXTURE_NAME_CAPACITY 64u
+#define FIXTURE_VALUE_CAPACITY 4097u
+typedef struct FixtureRegistryValue {
+    DWORD hive;
+    int used;
+    wchar_t name[FIXTURE_NAME_CAPACITY];
+    wchar_t value[FIXTURE_VALUE_CAPACITY];
+} FixtureRegistryValue;
+
+static FixtureRegistryValue fixture_values[FIXTURE_VALUE_COUNT];
+
+static LSTATUS WINAPI fixture_RegGetValueW(
+    HKEY root, LPCWSTR subkey, LPCWSTR name, DWORD flags, LPDWORD type,
+    PVOID data, LPDWORD bytes)
+{
+    DWORD hive;
+    DWORD index;
+    DWORD required;
+    (void)flags;
+    if (root == HKEY_CURRENT_USER && subkey != NULL &&
+        wcscmp(subkey, L"Environment") == 0) {
+        hive = 0u;
+    } else if (root == HKEY_LOCAL_MACHINE && subkey != NULL &&
+               wcscmp(subkey,
+                   L"SYSTEM\\CurrentControlSet\\Control\\Session Manager\\Environment") == 0) {
+        hive = 1u;
+    } else {
+        return ERROR_FILE_NOT_FOUND;
+    }
+    if (name == NULL || bytes == NULL) {
+        return ERROR_INVALID_PARAMETER;
+    }
+    for (index = 0u; index < FIXTURE_VALUE_COUNT; ++index) {
+        FixtureRegistryValue *entry = &fixture_values[index];
+        if (entry->used && entry->hive == hive && _wcsicmp(entry->name, name) == 0) {
+            required = (DWORD)((wcslen(entry->value) + 1u) * sizeof(wchar_t));
+            if (type != NULL) {
+                *type = REG_SZ;
+            }
+            if (data == NULL || *bytes < required) {
+                *bytes = required;
+                return ERROR_MORE_DATA;
+            }
+            memcpy(data, entry->value, required);
+            *bytes = required;
+            return ERROR_SUCCESS;
+        }
+    }
+    return ERROR_FILE_NOT_FOUND;
+}
+
+#define RegGetValueW fixture_RegGetValueW
+#include "hd2ct_http.c"
+#undef RegGetValueW
+
+__declspec(dllexport) void __cdecl fixture_ClearRegistry(void)
+{
+    SecureZeroMemory(fixture_values, sizeof(fixture_values));
+}
+
+__declspec(dllexport) int __cdecl fixture_SetRegistryValue(
+    DWORD hive, LPCWSTR name, LPCWSTR value)
+{
+    DWORD index;
+    DWORD free_index = FIXTURE_VALUE_COUNT;
+    size_t name_length;
+    size_t value_length;
+    if (hive > 1u || name == NULL || value == NULL) {
+        return 0;
+    }
+    name_length = wcslen(name);
+    value_length = wcslen(value);
+    if (name_length >= FIXTURE_NAME_CAPACITY ||
+        value_length >= FIXTURE_VALUE_CAPACITY) {
+        return 0;
+    }
+    for (index = 0u; index < FIXTURE_VALUE_COUNT; ++index) {
+        if (fixture_values[index].used && fixture_values[index].hive == hive &&
+            _wcsicmp(fixture_values[index].name, name) == 0) {
+            free_index = index;
+            break;
+        }
+        if (!fixture_values[index].used && free_index == FIXTURE_VALUE_COUNT) {
+            free_index = index;
+        }
+    }
+    if (free_index == FIXTURE_VALUE_COUNT) {
+        return 0;
+    }
+    fixture_values[free_index].hive = hive;
+    fixture_values[free_index].used = 1;
+    memcpy(fixture_values[free_index].name, name,
+           (name_length + 1u) * sizeof(wchar_t));
+    memcpy(fixture_values[free_index].value, value,
+           (value_length + 1u) * sizeof(wchar_t));
+    return 1;
+}
+
+__declspec(dllexport) int __cdecl fixture_ConfigMatches(
+    const char *url, const char *model, const char *api_key)
+{
+    return url != NULL && model != NULL && api_key != NULL &&
+        strcmp(g_url, url) == 0 && strcmp(g_model, model) == 0 &&
+        strcmp(g_api_key, api_key) == 0;
+}
+
+__declspec(dllexport) uint32_t __cdecl fixture_TimeoutSeconds(void)
+{
+    return g_timeout_seconds;
+}
+"""
+
 
 def provider_response(content: str, finish_reason: str = "stop") -> bytes:
     return json.dumps(
@@ -283,6 +467,155 @@ class NativeHttpWorkerTests(unittest.TestCase):
         self.assertEqual(len(lines), 1, completed.stdout)
         return json.loads(lines[0])
 
+    @classmethod
+    def environment_test_dll(cls) -> Path:
+        dll = cls.temp_path / "hd2ct_http_environment_test.dll"
+        if dll.is_file():
+            return dll
+        wrapper = cls.temp_path / "hd2ct_http_environment_test.c"
+        wrapper.write_text(ENVIRONMENT_SHIM_C, encoding="utf-8", newline="\n")
+        native_root = ROOT / "native"
+        cjson_source = native_root / "vendor" / "cjson" / "cJSON.c"
+        command = [
+            cls.meta_json["compiler"],
+            "-std=c11",
+            "-O2",
+            "-shared",
+            "-s",
+            "-static-libgcc",
+            "-finput-charset=UTF-8",
+            "-fexec-charset=UTF-8",
+            "-D_WIN32_WINNT=0x0601",
+            "-DWINVER=0x0601",
+            "-DCJSON_NESTING_LIMIT=32",
+            "-DCJSON_HIDE_SYMBOLS",
+            "-Wl,--exclude-all-symbols",
+            "-I",
+            str(native_root),
+            str(wrapper),
+            str(cjson_source),
+            "-o",
+            str(dll),
+            "-lwinhttp",
+            "-ladvapi32",
+        ]
+        completed = subprocess.run(
+            command,
+            cwd=ROOT,
+            check=False,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=30,
+        )
+        if completed.returncode:
+            raise RuntimeError(completed.stdout + completed.stderr)
+        return dll
+
+    def run_environment_child(
+        self,
+        registry: dict[str, dict[str, str]],
+        expected_config: dict[str, str] | None = None,
+    ) -> dict:
+        command = [
+            sys.executable,
+            "-c",
+            ENVIRONMENT_CHILD,
+            str(self.environment_test_dll()),
+            json.dumps(registry),
+        ]
+        if expected_config is not None:
+            command.append(json.dumps(expected_config))
+        child_environment = {
+            name: os.environ[name]
+            for name in os.environ
+            if not name.upper().startswith("HD2CT_")
+        }
+        child_environment.update(
+            {
+                "HD2CT_API_URL": "http://127.0.0.1:1/process-fallback",
+                "HD2CT_MODEL": "fake-process-model",
+                "HD2CT_API_KEY": "fake-process-key",
+                "HD2CT_ENABLED": "1",
+                "HD2CT_TIMEOUT_SECONDS": "77",
+            }
+        )
+        completed = subprocess.run(
+            command,
+            cwd=ROOT,
+            env=child_environment,
+            check=False,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=15,
+        )
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        lines = [line for line in completed.stdout.splitlines() if line.strip()]
+        self.assertEqual(len(lines), 1, completed.stdout)
+        return json.loads(lines[0])
+
+    def assert_environment_initialization_uses_registry(self) -> None:
+        user_config = {
+            "HD2CT_API_URL": "http://127.0.0.1:1/user",
+            "HD2CT_MODEL": "fake-user-model",
+            "HD2CT_API_KEY": "fake-user-key",
+        }
+        machine_config = {
+            "HD2CT_API_URL": "http://127.0.0.1:1/machine",
+            "HD2CT_MODEL": "fake-machine-model",
+            "HD2CT_API_KEY": "fake-machine-key",
+        }
+
+        result = self.run_environment_child({})
+        self.assertEqual(result, {"status": 1, "enabled": 0, "submit": 0, "timeout": 20})
+
+        for missing_name in user_config:
+            user = dict(user_config)
+            machine = dict(machine_config)
+            del user[missing_name]
+            del machine[missing_name]
+            with self.subTest(missing_registry_value=missing_name):
+                result = self.run_environment_child({"user": user, "machine": machine})
+                self.assertEqual(result["status"], 1)
+                self.assertEqual(result["enabled"], 0)
+                self.assertEqual(result["submit"], 0)
+
+        result = self.run_environment_child(
+            {"user": user_config, "machine": machine_config}, user_config
+        )
+        self.assertEqual(result["status"], 0)
+        self.assertEqual(result["enabled"], 1)
+        self.assertEqual(result["timeout"], 20)
+        self.assertEqual(result["selected_config_matches"], 1)
+
+        result = self.run_environment_child(
+            {"machine": machine_config}, machine_config
+        )
+        self.assertEqual(result["status"], 0)
+        self.assertEqual(result["enabled"], 1)
+        self.assertEqual(result["selected_config_matches"], 1)
+
+        empty_user = dict(user_config)
+        empty_user["HD2CT_MODEL"] = ""
+        result = self.run_environment_child(
+            {"user": empty_user, "machine": machine_config}
+        )
+        self.assertEqual(result["status"], 1)
+        self.assertEqual(result["enabled"], 0)
+        self.assertEqual(result["submit"], 0)
+
+        invalid_user = dict(user_config)
+        invalid_user["HD2CT_API_URL"] = "ftp://127.0.0.1:1/user"
+        result = self.run_environment_child(
+            {"user": invalid_user, "machine": machine_config}
+        )
+        self.assertEqual(result["status"], 2)
+        self.assertEqual(result["enabled"], 0)
+        self.assertEqual(result["submit"], 0)
+
     def test_endpoint_completion_covers_root_v1_and_custom_paths(self) -> None:
         cases = (
             ("", "/chat/completions"),
@@ -307,8 +640,9 @@ class NativeHttpWorkerTests(unittest.TestCase):
                 self.assertEqual(result["actions"][0]["accepted"], 1)
                 self.assertEqual(result["actions"][1]["result"], "OK\n你好，绝地潜兵。")
                 self.assertEqual(self.state.paths, [expected])
+        self.assert_environment_initialization_uses_registry()
 
-    def test_english_translation_preserves_chinese_and_gg_source(self) -> None:
+    def test_english_translation_preserves_chinese_and_model_translation(self) -> None:
         self.state.response = provider_response(result_content("前往撤离点", is_chinese=False))
         english = "Move to extraction"
         translated = self.run_child(
@@ -325,10 +659,10 @@ class NativeHttpWorkerTests(unittest.TestCase):
         self.assertEqual(payload["temperature"], 0)
         prompt = payload["messages"][0]["content"]
         for rule in (
-            "整条消息去掉首尾空白后仅为 gg 或 ggs",
+            "中文原样返回",
             "is_chinese",
             "translation",
-            "Charger -> 牛（默认，口语可用牛牛）",
+            "Charger=牛",
         ):
             with self.subTest(prompt_rule=rule):
                 self.assertIn(rule, prompt)
@@ -346,14 +680,15 @@ class NativeHttpWorkerTests(unittest.TestCase):
         self.assertEqual(self.state.payloads[0]["messages"][1]["content"], chinese)
 
         self.state.clear()
+        self.state.response = provider_response(result_content("打得不错", is_chinese=False))
         raw_gg = "\tGgS \r\n"
-        unchanged_gg = self.run_child(
+        translated_gg = self.run_child(
             actions=[
                 {"op": "submit", "token": "gg", "body_hex": raw_gg.encode("utf-8").hex()},
                 {"op": "wait", "token": "gg"},
             ],
         )
-        self.assertEqual(unchanged_gg["actions"][1]["result"], "OK\n" + raw_gg)
+        self.assertEqual(translated_gg["actions"][1]["result"], "OK\n打得不错")
         self.assertEqual(self.state.payloads[0]["messages"][1]["content"], raw_gg)
 
     def test_http401_is_redacted_and_invalid_model_result_is_classified(self) -> None:
