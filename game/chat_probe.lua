@@ -2318,7 +2318,7 @@ local function initialize_probe()
             end
             return observer_now
         end)
-        -- 心跳按传输模式读取，不把伴随模式的文件规则带入独立模式。
+        -- 心跳依据当前传输方式读取对应的文件规则。
         adapter.heartbeat = protect(function() return observer_translate_heartbeat(true) end)
         adapter.read_slot = protect(observer_translate_read_slot)
         adapter.submit = protect(observer_translate_publish_request)
