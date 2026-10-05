@@ -17,29 +17,17 @@
 
 在 Windows 环境变量设置中填写以下配置：
 
-| 变量 | 内容 | 默认值 |
-| --- | --- | --- |
+| 变量 | 内容                                   | 默认值 |
+| --- |--------------------------------------| --- |
 | HD2CT_API_URL | 服务商根地址、/v1 地址或完整 Chat Completions 接口 | 必填 |
-| HD2CT_MODEL | 账户可用的模型名 | 必填 |
-| HD2CT_API_KEY | API Key | 必填 |
-| HD2CT_TIMEOUT_SECONDS | 请求超时，整数 1–120 秒 | 20 |
-| HD2CT_ENABLED | 1 启用；0 停用 | 1 |
+| HD2CT_MODEL | 账户可用的模型名                             | 必填 |
+| HD2CT_API_KEY | API Key                              | 必填 |
+| HD2CT_TIMEOUT_SECONDS | 可选，请求超时，整数 1–120 秒                   | 20 |
+| HD2CT_ENABLED | 可选，1 启用；0 停用                         | 1 |
 
 配置优先读取 Windows 用户变量，再读取系统变量。只从 Windows 持久保存的配置读取，不使用 Steam、终端或游戏进程继承的旧值。用户变量已存在但为空或无效时，不回退到系统变量；删除用户变量后才会读取同名系统变量。三项必填配置均须非空。
 
 插件在游戏启动时读取一次配置。修改、添加或删除变量后，重启游戏才会生效。环境变量以明文保存；请只在本机填写密钥。启用翻译后，聊天正文会发送给所配置的服务商。
-
-## 服务地址
-
-根地址会补全为 /chat/completions；以 /v1 结尾的地址会补全为 /v1/chat/completions；完整接口及其他自定义路径原样使用。插件不会修正拼写。服务商须支持 Chat Completions 和 JSON mode。
-
-仅接受 HTTPS，或发往 localhost、127.0.0.0/8、::1 的本机回环 HTTP。地址不能包含用户名、密码、查询参数或片段；重定向会被拒绝。
-
-| 配置值 | 请求地址 |
-| --- | --- |
-| https://api.example.com 或末尾带斜杠 | https://api.example.com/chat/completions |
-| https://api.example.com/v1 或末尾为 /v1/ | https://api.example.com/v1/chat/completions |
-| 完整接口或其他路径 | 原样使用 |
 
 ## 可见提示与基础排查
 
