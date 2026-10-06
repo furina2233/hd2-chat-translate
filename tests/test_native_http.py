@@ -640,6 +640,7 @@ class NativeHttpWorkerTests(unittest.TestCase):
                 self.assertEqual(result["actions"][0]["accepted"], 1)
                 self.assertEqual(result["actions"][1]["result"], "OK\n你好，绝地潜兵。")
                 self.assertEqual(self.state.paths, [expected])
+                self.assertEqual(self.state.payloads[0]["reasoning_effort"], "none")
         self.assert_environment_initialization_uses_registry()
 
     def test_english_translation_preserves_chinese_and_model_translation(self) -> None:
@@ -657,6 +658,7 @@ class NativeHttpWorkerTests(unittest.TestCase):
         self.assertEqual(payload["messages"][1]["content"], english)
         self.assertEqual(payload["response_format"], {"type": "json_object"})
         self.assertEqual(payload["temperature"], 0)
+        self.assertEqual(payload["reasoning_effort"], "none")
         prompt = payload["messages"][0]["content"]
         for rule in (
             "中文原样返回",

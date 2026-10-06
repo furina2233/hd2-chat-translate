@@ -887,6 +887,7 @@ static int hd2ct_make_request_json(const HD2CT_WorkerJob *job, char **json_out,
     }
     if (cJSON_AddStringToObject(root, "model", job->model) == NULL ||
         cJSON_AddNumberToObject(root, "temperature", 0) == NULL ||
+        cJSON_AddStringToObject(root, "reasoning_effort", "none") == NULL ||
         cJSON_AddStringToObject(response_format, "type", "json_object") == NULL ||
         cJSON_AddItemToObject(root, "response_format", response_format) == 0) {
         goto cleanup;

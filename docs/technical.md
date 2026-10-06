@@ -31,7 +31,7 @@ HD2CT_API_URL、HD2CT_MODEL、HD2CT_API_KEY 为必填；HD2CT_TIMEOUT_SECONDS �
 
 只把地址根路径补全为 /chat/completions，或把精确的 /v1、/v1/ 补全为 /v1/chat/completions；其他路径保持原样。要求 HTTPS，只有 localhost、127.0.0.0/8 和 ::1 可使用 HTTP。拒绝凭据、查询、片段、反斜杠、空白和控制字符；禁用重定向、cookies 和自动认证。
 
-请求 JSON 含 model、temperature=0、response_format.type=json_object 及 system/user 两条 messages。聊天正文单独放在 user message；提示词常量 HD2CT_SYSTEM_PROMPT 位于 [native/hd2ct_http.c](../native/hd2ct_http.c)。它要求中文原样保留、其他语言翻为简短自然的简体中文，并要求 JSON 仅含 is_chinese 和 translation。当前规则包含常见缩写、游戏术语和敌名映射，例如 Charger=牛、Spore Charger=孢子牛；不对 gg 或 ggs 加特例。
+请求 JSON 含 model、temperature=0、reasoning_effort="none"、response_format.type=json_object 及 system/user 两条 messages。每次请求都显式指定思考强度为 none。聊天正文单独放在 user message；提示词常量 HD2CT_SYSTEM_PROMPT 位于 [native/hd2ct_http.c](../native/hd2ct_http.c)。它要求中文原样保留、其他语言翻为简短自然的简体中文，并要求 JSON 仅含 is_chinese 和 translation。当前规则包含常见缩写、游戏术语和敌名映射，例如 Charger=牛、Spore Charger=孢子牛；不对 gg 或 ggs 加特例。
 
 响应读取 Chat Completions 的 choices[0].message.content，并要求其为只含 is_chinese(bool) 与 translation(string) 的 JSON 对象。若 is_chinese 为 true，原文直接作为结果；否则 translation 必须是合法 UTF-8、非空且不超过 16,384 字节。
 
