@@ -32,6 +32,8 @@ local translate_layout = (function()
     local ROW_HEIGHT_OFFSET = 0x10
     local ROW_SCALE_OFFSET = 0x20
     local ROW_POSITION_OFFSET = 0x3CC
+    -- 位置缓存的8字节完全包含在整行中；整行核验同时覆盖其权限和allocation。
+    assert(ROW_POSITION_OFFSET + 8 <= ROW_SIZE)
     local MAX_SAFE_ADDRESS = 0x7fffffffffff
     local MAX_COUNT = 9007199254740991
 
@@ -263,10 +265,7 @@ local translate_layout = (function()
                 local slot = (history.head - index - 1) % HISTORY_SLOT_COUNT
                 local address = manager + HISTORY_SLOTS_OFFSET + slot * HISTORY_SLOT_SIZE
                 local row_writable, allocation_base = writable_range(address, ROW_SIZE)
-                local position_writable, position_allocation = writable_range(
-                    address + ROW_POSITION_OFFSET, 8, allocation_base)
-                if not safe_address(address) or not row_writable or not position_writable
-                    or position_allocation ~= allocation_base then
+                if not safe_address(address) or not row_writable then
                     return fail("read_failed", 4)
                 end
                 local row = {slot = slot, address = address, allocation_base = allocation_base}
@@ -282,10 +281,7 @@ local translate_layout = (function()
             if status then return fail(status, status_code) end
             for _, row in ipairs(rows) do
                 local row_writable = writable_range(row.address, ROW_SIZE, row.allocation_base)
-                local position_writable, position_allocation = writable_range(
-                    row.address + ROW_POSITION_OFFSET, 8, row.allocation_base)
-                if not row_writable or not position_writable
-                    or position_allocation ~= row.allocation_base then
+                if not row_writable then
                     return fail("read_failed", 4)
                 end
                 local geometry, geometry_error, geometry_code = capture_geometry(row)
@@ -312,10 +308,7 @@ local translate_layout = (function()
             if status then return fail(status, status_code) end
             for _, row in ipairs(snapshot.rows) do
                 local row_writable = writable_range(row.address, ROW_SIZE, row.allocation_base)
-                local position_writable, position_allocation = writable_range(
-                    row.address + ROW_POSITION_OFFSET, 8, row.allocation_base)
-                if not row_writable or not position_writable
-                    or position_allocation ~= row.allocation_base then
+                if not row_writable then
                     return fail("read_failed", 4)
                 end
                 local geometry, geometry_error, geometry_code = capture_geometry(row)
@@ -340,10 +333,7 @@ local translate_layout = (function()
             if status then disabled = true; return fail("called_unconfirmed", status_code or 11) end
             for _, row in ipairs(snapshot.rows) do
                 local row_writable = writable_range(row.address, ROW_SIZE, row.allocation_base)
-                local position_writable, position_allocation = writable_range(
-                    row.address + ROW_POSITION_OFFSET, 8, row.allocation_base)
-                if not row_writable or not position_writable
-                    or position_allocation ~= row.allocation_base then
+                if not row_writable then
                     disabled = true
                     return fail("called_unconfirmed", 11)
                 end
@@ -358,8 +348,7 @@ local translate_layout = (function()
             if not measure_ok then disabled = true; return fail("called_unconfirmed", 11) end
 
             for _, row in ipairs(snapshot.rows) do
-                if not writable_range(row.address, ROW_SIZE)
-                    or not writable_range(row.address + ROW_POSITION_OFFSET, 8) then
+                if not writable_range(row.address, ROW_SIZE, row.allocation_base) then
                     disabled = true
                     return fail("called_unconfirmed", 11)
                 end
@@ -404,10 +393,7 @@ local translate_layout = (function()
             if status then disabled = true; return fail("called_unconfirmed", status_code or 11) end
             for _, row in ipairs(snapshot.rows) do
                 local row_writable = writable_range(row.address, ROW_SIZE, row.allocation_base)
-                local position_writable, position_allocation = writable_range(
-                    row.address + ROW_POSITION_OFFSET, 8, row.allocation_base)
-                if not row_writable or not position_writable
-                    or position_allocation ~= row.allocation_base then
+                if not row_writable then
                     disabled = true
                     return fail("called_unconfirmed", 11)
                 end
@@ -415,10 +401,7 @@ local translate_layout = (function()
 
             for _, row in ipairs(snapshot.rows) do
                 local row_writable = writable_range(row.address, ROW_SIZE, row.allocation_base)
-                local position_writable, position_allocation = writable_range(
-                    row.address + ROW_POSITION_OFFSET, 8, row.allocation_base)
-                if not row_writable or not position_writable
-                    or position_allocation ~= row.allocation_base then
+                if not row_writable then
                     disabled = true
                     return fail("called_unconfirmed", 11)
                 end

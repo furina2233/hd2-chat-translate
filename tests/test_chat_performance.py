@@ -29,6 +29,7 @@ local function new_env(options)
         clock_throw = false,
         heartbeat_dead = false,
         messages = {},
+        slot_status = {},
         responses = {},
         read_count = 0,
         submit_calls = {},
@@ -38,6 +39,8 @@ local function new_env(options)
         cancel_calls = {},
         output_times = {},
         outputs = {},
+        apply_status = "called_confirmed",
+        apply_throw = false,
     }
     local adapter = {
         now_ms = function()
@@ -50,6 +53,7 @@ local function new_env(options)
         end,
         read_slot = function(slot)
             env.read_count = env.read_count + 1
+            if env.slot_status[slot] then return env.slot_status[slot] end
             local message = env.messages[slot]
             if message then return "ok", message end
             return "empty"
@@ -70,7 +74,8 @@ local function new_env(options)
                 slot = message.widget_slot,
                 text = text,
             }
-            return "called_confirmed"
+            if env.apply_throw then error("PRIVATE_APPLY_FAILURE") end
+            return env.apply_status
         end,
         cancel = function(token)
             env.cancel_calls[#env.cancel_calls + 1] = token
@@ -221,7 +226,47 @@ step_at(report, 5001)
 
 local invalid_options = new_env({scan_interval_ms = -1, response_poll_ms = 1.5})
 
+-- 任意失败结果只消费一次写回；持续扫描同一消息不能重新提交，槽位换新消息仍可翻译。
+local failed_writes = {}
+for _, fps in ipairs({60, 144, 240}) do
+    for _, status in ipairs({"deferred", "stale", "read_failed", "capacity",
+        "called_unconfirmed", "disabled", "unexpected", "exception"}) do
+        local env = new_env()
+        for now = 0, 3000, 200 do step_at(env, now) end
+        seed_pending(env, 1)
+        env.responses["performance_session_1"] = "OK\ntranslated"
+        env.apply_status = status
+        env.apply_throw = status == "exception"
+        for frame = 1, fps do step_at(env, 3000 + math.floor(frame * 1000 / fps)) end
+        -- 全环扫描期间槽位读取失败，再恢复原消息，不能触发间接重试。
+        env.slot_status[0] = "read_failed"
+        for now = 4200, 7400, 200 do step_at(env, now) end
+        env.slot_status[0] = nil
+        for now = 7600, 11000, 200 do step_at(env, now) end
+        local attempts = #env.apply_calls
+        local cancelled = #env.cancel_calls
+        local remaining = #env.state.pending
+        local resubmitted = #env.submit_calls
+        env.apply_throw = false
+        env.apply_status = "called_confirmed"
+        env.messages[0] = make_message(0, "new message after failed write")
+        env.state.next_slot = 0
+        -- seed_pending直接占用_1；真实新提交须使用下一个token。
+        env.state.token_counter = 1
+        step_at(env, 11200)
+        local token = env.submit_calls[1] and env.submit_calls[1].token
+        if token then env.responses[token] = "OK\nnew translation" end
+        step_at(env, 11201)
+        failed_writes[#failed_writes + 1] = {
+            fps = fps, status = status, attempts = attempts, cancelled = cancelled,
+            remaining = remaining, resubmitted = resubmitted,
+            new_submits = #env.submit_calls, final_applies = #env.apply_calls,
+        }
+    end
+end
+
 RESULT = json_core.encode_json({
+    failed_writes = failed_writes,
     defaults = {
         scan_interval_ms = core.SCAN_INTERVAL_MS,
         response_poll_ms = core.RESPONSE_POLL_MS,
@@ -362,6 +407,16 @@ class ChatTranslatePerformanceTests(unittest.TestCase):
         self.assertEqual(final["code"], "clock_error")
         self.assertEqual(final["counters"]["steps"], result["final_steps"])
         self.assertFalse(result["private_body_leaked"])
+
+    def test_failed_writes_are_terminal_at_all_frame_rates(self) -> None:
+        for sample in self.scenarios()["failed_writes"]:
+            with self.subTest(fps=sample["fps"], status=sample["status"]):
+                self.assertEqual(sample["attempts"], 1)
+                self.assertEqual(sample["cancelled"], 1)
+                self.assertEqual(sample["remaining"], 0)
+                self.assertEqual(sample["resubmitted"], 0)
+                self.assertEqual(sample["new_submits"], 1)
+                self.assertEqual(sample["final_applies"], 2)
 
 
 if __name__ == "__main__":

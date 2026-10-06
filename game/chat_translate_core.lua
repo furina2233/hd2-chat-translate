@@ -626,6 +626,12 @@ local function process_one_pending(state)
 
     set_status(state, "applying", nil)
     bump(state, "apply_attempts")
+    -- 最多保留每个槽位的最近一次写回身份；扫描暂时失败或重连也不能重写同一消息。
+    state.attempted_writes[item.message.widget_slot] = {
+        owner_id = item.message.owner_id,
+        event_slot = item.message.event_slot,
+        body = item.message.body,
+    }
     local ok, result = pcall(state.adapter.apply, item.message, item.display_text)
     if not ok then
         bump(state, "adapter_errors")
@@ -641,10 +647,11 @@ local function process_one_pending(state)
         finish_item(state, item)
     elseif result == "stale" then
         bump(state, "apply_stale")
-        state.seen[item.message.widget_slot] = nil
         finish_item(state, item)
     elseif result == "deferred" then
         bump(state, "apply_deferred")
+        -- 本条消息只尝试一次写回；预算不足也终止，不随游戏帧重试。
+        finish_item(state, item)
     elseif result == "capacity" then
         bump(state, "apply_capacity")
         finish_item(state, item)
@@ -715,6 +722,9 @@ local function scan_slots(state)
             cancel_slot(state, slot)
             state.seen[slot] = nil
         else
+            if not same_identity(state.attempted_writes[slot], message) then
+                state.attempted_writes[slot] = nil
+            end
             local pending = state.pending_by_slot[slot]
             local identity = {
                 owner_id = message.owner_id,
@@ -728,7 +738,8 @@ local function scan_slots(state)
                     finish_item(state, pending)
                     state.seen[slot] = nil
                 end
-                if same_identity(state.seen[slot], message) then
+                if same_identity(state.seen[slot], message)
+                    or same_identity(state.attempted_writes[slot], message) then
                     bump(state, "duplicates")
                 elseif #state.pending >= M.MAX_PENDING then
                     bump(state, "queue_full")
@@ -824,6 +835,7 @@ function M.new(adapter, options)
         pending_by_slot = {},
         pending_cursor = 1,
         seen = {},
+        attempted_writes = {},
         next_slot = 0,
     }
 

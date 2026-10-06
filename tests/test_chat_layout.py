@@ -26,11 +26,13 @@ ffi.cdef[[typedef unsigned char HD2Probe_U8;]]
 
 local memory = {}
 local read_counts = {}
+local query_calls = 0
 local region = {
     base = 0x100000, finish = 0x400000, allocation_base = 0x100000,
     state = 0x1000, protect = 0x04, type = 0x20000,
 }
 local read_failure, read_failure_address, read_mutation, pre_setter_mutation, split_address, split_allocation
+local split_protect, mutate_after_measure
 local context_stable = true
 local verify_apply = true
 local measured_height
@@ -91,12 +93,13 @@ local function read_bytes(address, length)
 end
 
 local function query(address)
+    query_calls = query_calls + 1
     if address < region.base or address >= region.finish then return nil end
     if split_address and address >= split_address then
         return {
             base = split_address, finish = region.finish,
             allocation_base = split_allocation or region.allocation_base,
-            state = region.state, protect = region.protect, type = region.type,
+            state = region.state, protect = split_protect or region.protect, type = region.type,
         }
     end
     return {
@@ -117,12 +120,15 @@ local position_calls, measure_calls, setter_calls, setter_text, positioned = 0, 
 local function reset_case(config)
     config = config or {}
     memory, read_counts, positioned = {}, {}, {}
+    query_calls = 0
     region.protect = config.protect or 0x04
     region.state = 0x1000
     region.type = config.region_type or 0x20000
     region.allocation_base = 0x100000
     read_failure, read_failure_address, read_mutation = nil, nil, nil
     pre_setter_mutation, split_address, split_allocation = nil, nil, nil
+    split_protect = nil
+    mutate_after_measure = config.mutate_after_measure
     context_stable = config.context_stable ~= false
     verify_apply = config.verify_apply ~= false
     measured_height = config.measured_height
@@ -228,6 +234,7 @@ local function reset_case(config)
             measure_calls = measure_calls + 1
             if throw_measure then error("private measure spy failure") end
             if measured_height ~= nil then write_bytes(row + 0x10, float_bytes(measured_height)) end
+            if mutate_after_measure then mutate_after_measure() end
         end,
         position = function(row, packed, flag)
             assert(flag == 0, "layout must use the verified flag=0 wrapper path")
@@ -384,6 +391,15 @@ expect_preflight_failure({heights = {math.huge, 1, 1}}, "read_failed")
 expect_preflight_failure({count = 65}, "read_failed")
 expect_preflight_failure({region_type = 0x40000}, "read_failed")
 expect_preflight_failure({split_allocation = true}, "read_failed")
+-- 位置字段所在的尾部区域只读或归属不同allocation，整行校验必须完整拒绝。
+expect_preflight_failure({}, "read_failed", function()
+    split_address = target_row + 0x3CC
+    split_protect = 0x02
+end)
+expect_preflight_failure({}, "read_failed", function()
+    split_address = target_row + 0x3CC
+    split_allocation = 0x200000
+end)
 expect_preflight_failure({}, "deferred", function()
     read_failure = "budget_exhausted"
     read_failure_address = manager + 0x13990
@@ -463,6 +479,7 @@ result = apply_text()
 local full_history_budget = observer_read_budget
 assert(result == "called_confirmed" and setter_calls == 1 and measure_calls == 1)
 assert(position_calls == 64 and full_history_budget == 15129)
+assert(query_calls <= 1024, "64-row layout exceeded the range-query budget")
 assert(full_history_budget <= MAX_OBSERVER_READ and MAX_OBSERVER_READ - full_history_budget == 1255)
 assert(read_bytes(manager + 0x13990, 4) == pack32(original_head))
 assert(read_bytes(manager + 0x139C0, 4) == pack32(original_count))
@@ -532,6 +549,10 @@ assert(apply_text() == "called_unconfirmed")
 assert(setter_calls == 1 and measure_calls == 0 and position_calls == 0)
 observer_read_budget = 0
 assert(apply_text() == "disabled" and setter_calls == 1)
+-- measure也是原生调用；返回后的整行校验仍必须拒绝allocation变化。
+reset_case({mutate_after_measure = function() region.allocation_base = 0x200000 end})
+assert(apply_text() == "called_unconfirmed")
+assert(setter_calls == 1 and measure_calls == 1 and position_calls == 0)
 reset_case({mutate_after_position = function() region.protect = 0x02 end})
 assert(apply_text() == "called_unconfirmed")
 assert(setter_calls == 1 and measure_calls == 1 and position_calls == 1)
