@@ -17,7 +17,7 @@ import uuid
 import zipfile
 
 ROOT = Path(__file__).resolve().parents[1]
-RESOURCE_NAME = "mods/hd2chat/chat_probe"
+RESOURCE_NAME = "mods/hd2chat/HD2ChatTranslate"
 ARCHIVE_NAME = "9ba626afa44a3aa3.patch_0"
 RESOURCE_TYPE = 0xA14E8DFA2CD117E2
 ADDON_GUID = "a741d044-972b-4dc5-b08e-1a68441e1d7f"

@@ -69,7 +69,7 @@ Lua FFI 的 BY_HANDLE_FILE_INFORMATION 定义为 52 字节，并核对 dwVolumeS
 
 生成的 addon patch 使用一个 Lua type（type_count=1）和两个资源文件（file_count=2），类型值为 0xA14E8DFA2CD117E2。资源按名称 hash 排序，编号为 0、1；资源数据按 16 字节边界对齐。Bingus Shared Loader v18 的 Lua resource 从固定输入中校验后原字节嵌入；stream 与 gpu_resources sidecar 均为空。
 
-Arsenal manifest Guid 固定为 a741d044-972b-4dc5-b08e-1a68441e1d7f，Lua resource 名为 mods/hd2chat/chat_probe，patch 文件名为 9ba626afa44a3aa3.patch_0。构建时保留这些身份值，以便导入新 ZIP 时更新同名模组。
+Arsenal manifest Guid 固定为 a741d044-972b-4dc5-b08e-1a68441e1d7f，patch 文件名为 9ba626afa44a3aa3.patch_0。构建时保留这两个身份值，以便导入新 ZIP 时更新同名模组。Lua resource 名为 mods/hd2chat/HD2ChatTranslate，加载器依据此标识发现 addon。
 
 ## 状态报告字段
 

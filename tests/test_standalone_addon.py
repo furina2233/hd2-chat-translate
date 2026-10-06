@@ -489,6 +489,7 @@ class StandaloneBuilderTests(unittest.TestCase):
             loader_assets = (loader_resource, loader_readme, loader_manifest)
             with mock.patch.object(builder, "load_shared_loader_assets", return_value=loader_assets):
                 files = builder.addon_files(entry)
+            self.assertTrue(entry.startswith(b"-- HD2-Addon: mods/hd2chat/HD2ChatTranslate\n"))
             archive = files["Addon/9ba626afa44a3aa3.patch_0"]
             header = struct.unpack_from("<III20sQQ24s", archive, 0)
             self.assertEqual((header[0], header[1], header[2], header[4]), (0xF0000011, 1, 2, len(archive)))
