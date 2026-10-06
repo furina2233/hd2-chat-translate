@@ -174,6 +174,244 @@ assert(message.widget_slot == 0 and message.event_slot == 4 and message.owner_id
 assert(type(message.proof) == "table" and type(message.proof.context) == "table")
 assert(read_counts[widget_body] == 2, "ordinary body was not double-read")
 
+-- 事件槽直接换算覆盖环首尾；不对指针槽位逐项扫描。
+prepare_widget_case({event_slot = 0, next_index = 1, active_count = 1})
+status, message = translate_adapter.read_slot(0)
+assert(status == "ok" and message.event_slot == 0, "event slot zero was not mapped")
+prepare_widget_case({event_slot = 63, next_index = 0, active_count = 64})
+status, message = translate_adapter.read_slot(0)
+assert(status == "ok" and message.event_slot == 63, "event slot 63 was not mapped")
+
+prepare_widget_case({pointer = widget_record_address(4) + 0xB5})
+assert(observer_widget_read_widget_slot(0, true) == "pointer_outside",
+    "misaligned event body pointer was accepted")
+prepare_widget_case({pointer = 0})
+assert(observer_widget_read_widget_slot(0, true) == "pointer_outside",
+    "null event body pointer was accepted")
+prepare_widget_case({pointer = widget_ring + 64 * 0x4B4 + 0xB4})
+assert(observer_widget_read_widget_slot(0, true) == "pointer_outside",
+    "one-past-ring event body pointer was accepted")
+
+translate_adapter.test_scan_hint = {history = widget_manager + 0x13990}
+translate_adapter.test_scan_hint.write_history = function(head, count, fill)
+    write_bytes(translate_adapter.test_scan_hint.history, pack32(head) .. string.rep(fill or "\0", 44) .. pack32(count))
+end
+
+-- 增量提示先做一次全槽重同步，之后保持latest优先并用4槽后台轮转覆盖全环。
+prepare_widget_case()
+translate_adapter.test_scan_hint.write_history(1, 1)
+translate_adapter.test_scan_hint.initial_plan = translate_adapter.scan_plan()
+assert(type(translate_adapter.test_scan_hint.initial_plan) == "table" and translate_adapter.test_scan_hint.initial_plan.owner_id > 0
+    and #translate_adapter.test_scan_hint.initial_plan.slots == 64 and translate_adapter.test_scan_hint.initial_plan.slots[1] == 0,
+    "initial history hint did not request a bounded full resync")
+translate_adapter.test_scan_hint.owner_before = translate_adapter.test_scan_hint.initial_plan.owner_id
+translate_adapter.test_scan_hint.covered_slots = {}
+translate_adapter.test_scan_hint.plan = translate_adapter.scan_plan()
+assert(type(translate_adapter.test_scan_hint.plan) == "table" and #translate_adapter.test_scan_hint.plan.slots == 5
+    and translate_adapter.test_scan_hint.plan.slots[1] == 0 and translate_adapter.test_scan_hint.plan.slots[2] == 4
+    and translate_adapter.test_scan_hint.plan.slots[3] == 5 and translate_adapter.test_scan_hint.plan.slots[4] == 6 and translate_adapter.test_scan_hint.plan.slots[5] == 7,
+    "steady hint did not prioritize latest plus four background slots")
+translate_adapter.test_scan_hint.background_body_slot = translate_adapter.test_scan_hint.plan.slots[2]
+write_bytes(widget_map_address(translate_adapter.test_scan_hint.background_body_slot) + 0x158, string.char(1))
+write_bytes(widget_map_address(translate_adapter.test_scan_hint.background_body_slot) + 8,
+    pack32(WIDGET_KEY) .. pack32(1) .. pack64(widget_record_address(4) + 0xB4) .. pack64(0))
+status, message = observer_widget_read_widget_slot(
+    translate_adapter.test_scan_hint.background_body_slot, true)
+assert(status == "ok" and message.body == WIDGET_ASCII, "background slot setup was not readable")
+write_widget_record(4, WIDGET_EVENT, widget_body_bytes("Older body changed"))
+translate_adapter.test_scan_hint.index = 1
+while translate_adapter.test_scan_hint.index <= #translate_adapter.test_scan_hint.plan.slots do
+    translate_adapter.test_scan_hint.covered_slots[translate_adapter.test_scan_hint.plan.slots[translate_adapter.test_scan_hint.index]] = true
+    translate_adapter.test_scan_hint.index = translate_adapter.test_scan_hint.index + 1
+end
+translate_adapter.test_scan_hint.cycle = 1
+while translate_adapter.test_scan_hint.cycle <= 15 do
+    translate_adapter.test_scan_hint.plan = translate_adapter.scan_plan()
+    assert(type(translate_adapter.test_scan_hint.plan) == "table"
+        and #translate_adapter.test_scan_hint.plan.slots >= 4
+        and #translate_adapter.test_scan_hint.plan.slots <= 5
+        and translate_adapter.test_scan_hint.plan.slots[1] == 0,
+        "background scan exceeded its bounded candidate count")
+    translate_adapter.test_scan_hint.index = 1
+    while translate_adapter.test_scan_hint.index <= #translate_adapter.test_scan_hint.plan.slots do
+        translate_adapter.test_scan_hint.covered_slots[translate_adapter.test_scan_hint.plan.slots[translate_adapter.test_scan_hint.index]] = true
+        translate_adapter.test_scan_hint.index = translate_adapter.test_scan_hint.index + 1
+    end
+    translate_adapter.test_scan_hint.cycle = translate_adapter.test_scan_hint.cycle + 1
+end
+translate_adapter.test_scan_hint.index = 0
+while translate_adapter.test_scan_hint.index <= 63 do
+    assert(translate_adapter.test_scan_hint.covered_slots[translate_adapter.test_scan_hint.index], "background rotation missed slot " .. tostring(translate_adapter.test_scan_hint.index))
+    translate_adapter.test_scan_hint.index = translate_adapter.test_scan_hint.index + 1
+end
+translate_adapter.test_scan_hint.plan = translate_adapter.scan_plan()
+assert(translate_adapter.test_scan_hint.plan.slots[2]
+    == translate_adapter.test_scan_hint.background_body_slot,
+    "unchanged history did not revisit the older background slot")
+status, message = observer_widget_read_widget_slot(
+    translate_adapter.test_scan_hint.background_body_slot, true)
+assert(status == "ok" and message.body == "Older body changed",
+    "background re-read did not observe an in-place body change")
+
+-- 52字节快照只比较head/count；未证明稳定的中间44字节变化不得阻止hint。
+prepare_widget_case()
+translate_adapter.test_scan_hint.write_history(1, 1)
+read_mutation = function(address, count)
+    if address == translate_adapter.test_scan_hint.history and count == 2 then
+        write_bytes(translate_adapter.test_scan_hint.history + 4, string.rep("Y", 44))
+    end
+end
+translate_adapter.test_scan_hint.plan = translate_adapter.scan_plan()
+read_mutation = nil
+assert(type(translate_adapter.test_scan_hint.plan) == "table" and #translate_adapter.test_scan_hint.plan.slots == 5,
+    "unrelated UI history gap bytes invalidated a stable hint")
+
+prepare_widget_case()
+translate_adapter.test_scan_hint.write_history(1, 1)
+read_mutation = function(address, count)
+    if address == translate_adapter.test_scan_hint.history and count == 2 then
+        write_bytes(translate_adapter.test_scan_hint.history, pack32(2) .. string.rep("\0", 44) .. pack32(1))
+    end
+end
+translate_adapter.test_scan_hint.plan = translate_adapter.scan_plan()
+read_mutation = nil
+assert(translate_adapter.test_scan_hint.plan == nil, "changed UI history head was accepted")
+
+prepare_widget_case()
+translate_adapter.test_scan_hint.write_history(1, 1)
+read_mutation = function(address, count)
+    if address == widget_metadata and count == 2 then
+        write_bytes(widget_metadata, pack32(6) .. pack32(1))
+    end
+end
+translate_adapter.test_scan_hint.plan = translate_adapter.scan_plan()
+read_mutation = nil
+assert(translate_adapter.test_scan_hint.plan == nil, "changed event metadata was accepted by scan hint")
+
+prepare_widget_case()
+translate_adapter.test_scan_hint.write_history(1, 1)
+read_mutation = function(address, count)
+    if address == translate_adapter.test_scan_hint.history and count == 2 then
+        write_bytes(widget_root_global, pack64(widget_root_alternate))
+    end
+end
+translate_adapter.test_scan_hint.plan = translate_adapter.scan_plan()
+read_mutation = nil
+assert(translate_adapter.test_scan_hint.plan == nil, "changed widget root was accepted by scan hint")
+
+-- 空历史环在核验root和metadata后直接返回，不访问残留的UI属性和正文。
+prepare_widget_case({active_count = 0, map_count = 14})
+translate_adapter.test_scan_hint.write_history(1, 1)
+translate_adapter.test_scan_hint.plan = translate_adapter.scan_plan()
+assert(type(translate_adapter.test_scan_hint.plan) == "table" and #translate_adapter.test_scan_hint.plan.slots == 0,
+    "empty event ring should return an empty hint plan")
+assert(read_counts[translate_adapter.test_scan_hint.history] == nil, "empty event ring read UI history")
+
+-- 历史head跨63到0时，新到的多个槽按FIFO顺序优先进入候选。
+prepare_widget_case()
+translate_adapter.test_scan_hint.write_history(62, 60)
+translate_adapter.test_scan_hint.plan = translate_adapter.scan_plan()
+assert(type(translate_adapter.test_scan_hint.plan) == "table"
+    and #translate_adapter.test_scan_hint.plan.slots == 64,
+    "history reactivation did not request a bounded resync")
+prepare_widget_case()
+translate_adapter.test_scan_hint.write_history(2, 64)
+translate_adapter.test_scan_hint.plan = translate_adapter.scan_plan()
+assert(type(translate_adapter.test_scan_hint.plan) == "table"
+    and translate_adapter.test_scan_hint.plan.slots[1] == 62
+    and translate_adapter.test_scan_hint.plan.slots[2] == 63
+    and translate_adapter.test_scan_hint.plan.slots[3] == 0
+    and translate_adapter.test_scan_hint.plan.slots[4] == 1,
+    "history wrap did not preserve FIFO order for new rows")
+prepare_widget_case({active_count = 0, map_count = 14})
+local empty_ring_status = observer_widget_read_widget_slot(0, true)
+assert(empty_ring_status == "empty", tostring(empty_ring_status))
+assert(read_counts[widget_map_count] == nil and read_counts[widget_entries] == nil
+    and read_counts[widget_event_record] == nil and read_counts[widget_body] == nil,
+    "empty event ring touched stale UI data")
+
+prepare_widget_case({active_count = 0, map_count = 14})
+read_mutation = function(address, count)
+    if address == widget_metadata and count == 1 then
+        write_bytes(widget_root_global, pack64(widget_root_alternate))
+    end
+end
+local empty_root_drift = observer_widget_read_widget_slot(0, true)
+read_mutation = nil
+assert(empty_root_drift == "unstable" and read_counts[widget_map_count] == nil,
+    "empty ring ignored root mutation")
+
+prepare_widget_case({active_count = 0, map_count = 14})
+read_mutation = function(address, count)
+    if address == widget_metadata and count == 2 then
+        write_bytes(widget_metadata, pack32(6) .. pack32(1))
+    end
+end
+local empty_metadata_drift = observer_widget_read_widget_slot(0, true)
+read_mutation = nil
+assert(empty_metadata_drift == "unstable" and read_counts[widget_map_count] == nil,
+    "empty ring ignored metadata mutation")
+
+-- 一次scratch分配支撑多次读取；已返回字符串快照互不覆盖。
+prepare_widget_case()
+local saved_ffi_new = ffi.new
+local ffi_new_calls = 0
+ffi.new = function(...)
+    ffi_new_calls = ffi_new_calls + 1
+    return saved_ffi_new(...)
+end
+local first_snapshot = observer_read(widget_body, 16)
+write_bytes(widget_body, "Z" .. first_snapshot:sub(2))
+local second_snapshot = observer_read(widget_body, 16)
+local scratch_ffi_new_calls = ffi_new_calls
+ffi.new = saved_ffi_new
+assert(scratch_ffi_new_calls == 0, "observer reads allocated temporary FFI buffers")
+assert(first_snapshot:byte(1) == WIDGET_ASCII:byte(1)
+    and second_snapshot:byte(1) == string.byte("Z")
+    and first_snapshot ~= second_snapshot, "read snapshots shared reusable storage")
+
+-- 重入读取使用独立scratch，异常退出后主scratch仍可继续读取。
+prepare_widget_case()
+local nested_snapshot
+local entered_nested_read = false
+read_mutation = function(address, _)
+    if address == widget_body and not entered_nested_read then
+        entered_nested_read = true
+        nested_snapshot = observer_read(widget_event_record, 4)
+    end
+end
+local outer_snapshot = observer_read(widget_body, 16)
+read_mutation = nil
+assert(outer_snapshot and nested_snapshot == pack32(WIDGET_EVENT), "reentrant read corrupted a snapshot")
+
+prepare_widget_case()
+local raise_once = true
+read_mutation = function(address, _)
+    if address == widget_body and raise_once then
+        raise_once = false
+        error("PRIVATE_READ_FAILURE")
+    end
+end
+local read_raised = not pcall(observer_read, widget_body, 16)
+read_mutation = nil
+local recovered_snapshot = observer_read(widget_body, 16)
+assert(read_raised and recovered_snapshot, "scratch pool did not recover after a read error")
+
+-- 第二次query使用新的标量快照，即使底层MBI复用同一块scratch。
+local first_region_snapshot = assert(observer_query_address(widget_root))
+widget_root_region.protect = 0x08
+local second_region_snapshot = assert(observer_query_address(widget_root))
+widget_root_region.protect = 0x04
+assert(first_region_snapshot ~= second_region_snapshot and first_region_snapshot.protect == 0x04
+    and second_region_snapshot.protect == 0x08, "VirtualQuery snapshots aliased reusable memory")
+
+prepare_widget_case()
+rpm_short_on_call = read_calls + 1
+local short_read_value, short_read_reason = observer_read(widget_body, 8)
+rpm_short_on_call = nil
+assert(short_read_value == nil and short_read_reason == "short_read", "short RPM read was accepted")
+assert(observer_read(widget_body, 8), "scratch pool failed after a short read")
+
 -- 稳定的不匹配event code只产生过滤状态；正文不读。漂移与稳定读失败仍映射到stale/failed。
 prepare_widget_case({event_code = 0x12345678})
 local filtered_event_status = translate_adapter.read_slot(0)
@@ -476,6 +714,14 @@ local changed_root, root_calls = apply_after_mutation(function()
     write_bytes(widget_root_global, pack64(widget_root_alternate))
 end)
 assert(changed_root == "stale" and root_calls == 0)
+observer_read_budget = 0
+translate_adapter.test_scan_hint.plan = translate_adapter.scan_plan()
+assert(type(translate_adapter.test_scan_hint.plan) == "table"
+    and translate_adapter.test_scan_hint.plan.owner_id ~= translate_adapter.test_scan_hint.owner_before
+    and translate_adapter.test_scan_hint.plan.reset_owner == true
+    and #translate_adapter.test_scan_hint.plan.slots == 0,
+    "root change did not produce an empty owner-change hint")
+write_bytes(widget_root_global, pack64(widget_root))
 
 local changed_ring, ring_calls = apply_after_mutation(function()
     write_bytes(widget_metadata, pack32(5) .. pack32(0))
@@ -592,7 +838,7 @@ class ChatTranslateAdapterTests(unittest.TestCase):
 
         wide_start = source.index("    local function append_wide_ascii(")
         wide_end = source.index("    local function prepare_observer_paths(", wide_start)
-        adapter_start = source.index("    local function observer_query_address(address)")
+        adapter_start = source.index("    local function new_observer_scratch()")
         adapter_end = source.index("    local adapter = {\n        hash_file", adapter_start)
         adapter = source[adapter_start:adapter_end]
         setter_start = adapter.index("    local function observer_translate_setter(")

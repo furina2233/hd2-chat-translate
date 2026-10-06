@@ -73,7 +73,7 @@ python tools/build_package.py --loader-zip 'C:\dependencies\Bingus-Shared-Loader
 | --- | ---: |
 | 翻译、中文保持、正文校验、错误提示与通知过滤 | 5 |
 | 控件回写与多行布局 | 3 |
-| 200ms 限频、响应队列与状态报告 | 3 |
+| 1 秒扫描计划、200ms 响应轮询与状态报告 | 3 |
 | 持久配置与 URL、模型响应、后台 HTTP 请求 | 4 |
 | Arsenal 包、原生模块加载与文件信息结构 | 4 |
 | 启动签名扫描与内存读取门禁 | 1 |

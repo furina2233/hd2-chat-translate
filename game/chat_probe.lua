@@ -830,12 +830,43 @@ local function initialize_probe()
         observer_session_nonce = math.floor((uptime * 48271 + (observer_session_time % 2147483647)) % 2147483647)
     end
 
-    local function observer_query_address(address)
+    local function new_observer_scratch()
+        return {
+            output = ffi.new("HD2Probe_U8[4096]"),
+            bytes_read = ffi.new("HD2Probe_SIZE_T[1]"),
+            information = ffi.new("HD2Probe_MEMORY_BASIC_INFORMATION[1]"),
+            decode = ffi.new("HD2Probe_SIZE_T[1]"),
+        }
+    end
+
+    local observer_scratch_pool
+
+    local function acquire_observer_scratch()
+        if observer_scratch_pool == nil then
+            observer_scratch_pool = new_observer_scratch()
+        end
+        if not observer_scratch_pool.busy then
+            observer_scratch_pool.busy = true
+            return observer_scratch_pool, true
+        end
+        -- 同步回调重入时使用独立临时区，不能覆盖外层正在读取的数据。
+        return new_observer_scratch(), false
+    end
+
+    local function with_observer_scratch(callback, ...)
+        local scratch, pooled = acquire_observer_scratch()
+        local ok, first, second = pcall(callback, scratch, ...)
+        if pooled then scratch.busy = false end
+        if not ok then error(first, 0) end
+        return first, second
+    end
+
+    local function observer_query_address_with_scratch(scratch, address)
         if type(address) ~= "number" or address ~= address or address == math.huge or address == -math.huge
             or address < 0x10000 or address > MAX_OBSERVER_ADDRESS or address ~= math.floor(address) then
             return nil, "invalid_address"
         end
-        local information = ffi.new("HD2Probe_MEMORY_BASIC_INFORMATION[1]")
+        local information = scratch.information
         local pointer = ffi.cast("const void *", ffi.cast("size_t", address))
         local received = kernel.VirtualQuery(pointer, information, ffi.sizeof(information[0]))
         if received ~= ffi.sizeof(information[0]) then return nil, "virtual_query_failed" end
@@ -854,6 +885,10 @@ local function initialize_probe()
             protect = tonumber(item.Protect),
             type = tonumber(item.Type),
         }, nil
+    end
+
+    local function observer_query_address(address)
+        return with_observer_scratch(observer_query_address_with_scratch, address)
     end
 
     local function same_observer_region(left, right)
@@ -875,7 +910,7 @@ local function initialize_probe()
         return false, "allocation_denied"
     end
 
-    local function observer_read(address, length)
+    local function observer_read_with_scratch(scratch, address, length)
         if type(length) ~= "number" or length ~= length or length ~= math.floor(length)
             or length < 1 or length > 4096 then
             return nil, "invalid_length"
@@ -892,9 +927,9 @@ local function initialize_probe()
         local finish = address + length
         local cursor = address
         local first_allocation = nil
-        local output = ffi.new("HD2Probe_U8[?]", length)
+        local output = scratch.output
         while cursor < finish do
-            local region, query_reason = observer_query_address(cursor)
+            local region, query_reason = observer_query_address_with_scratch(scratch, cursor)
             if not region then return nil, query_reason end
             local allowed, allowed_reason = observer_region_allowed(region)
             if not allowed then return nil, allowed_reason end
@@ -905,7 +940,7 @@ local function initialize_probe()
             local page_finish = (math.floor(cursor / 4096) + 1) * 4096
             local chunk_finish = math.min(finish, region.finish, page_finish)
             if chunk_finish <= cursor then return nil, "region_bounds" end
-            local verified, verified_reason = observer_query_address(cursor)
+            local verified, verified_reason = observer_query_address_with_scratch(scratch, cursor)
             if not verified then return nil, verified_reason end
             local verified_allowed, verified_allowed_reason = observer_region_allowed(verified)
             if not verified_allowed then return nil, verified_allowed_reason end
@@ -913,28 +948,35 @@ local function initialize_probe()
             if verified.allocation_base ~= first_allocation then return nil, "allocation_changed" end
 
             local chunk_length = chunk_finish - cursor
-            local bytes_read = ffi.new("HD2Probe_SIZE_T[1]")
+            scratch.bytes_read[0] = 0
             local destination = output + (cursor - address)
             local source = ffi.cast("const void *", ffi.cast("size_t", cursor))
-            if kernel.ReadProcessMemory(process, source, destination, chunk_length, bytes_read) == 0 then
+            if kernel.ReadProcessMemory(process, source, destination, chunk_length, scratch.bytes_read) == 0 then
                 return nil, "read_failed"
             end
-            if tonumber(bytes_read[0]) ~= chunk_length then return nil, "short_read" end
+            if tonumber(scratch.bytes_read[0]) ~= chunk_length then return nil, "short_read" end
             cursor = chunk_finish
         end
         return ffi.string(output, length), nil
     end
 
-    local function observer_read_pointer(address)
-        local bytes, reason = observer_read(address, 8)
+    local function observer_read(address, length)
+        return with_observer_scratch(observer_read_with_scratch, address, length)
+    end
+
+    local function observer_read_pointer_with_scratch(scratch, address)
+        local bytes, reason = observer_read_with_scratch(scratch, address, 8)
         if not bytes then return nil, reason end
-        local value = ffi.new("HD2Probe_SIZE_T[1]")
-        ffi.copy(value, bytes, 8)
-        local number = tonumber(value[0])
+        ffi.copy(scratch.decode, bytes, 8)
+        local number = tonumber(scratch.decode[0])
         if not number or number ~= math.floor(number) then return nil, "malformed_bytes" end
         if number == 0 then return nil, "null_pointer" end
         if number < 0x10000 or number > MAX_OBSERVER_ADDRESS then return nil, "pointer_range" end
         return number, nil
+    end
+
+    local function observer_read_pointer(address)
+        return with_observer_scratch(observer_read_pointer_with_scratch, address)
     end
 
     local function observer_u32(bytes, offset)
@@ -943,13 +985,16 @@ local function initialize_probe()
         return a + b * 256 + c * 65536 + d * 16777216
     end
 
-    local function observer_u64(bytes, offset)
+    local function observer_u64_with_scratch(scratch, bytes, offset)
         if not bytes or offset < 0 or offset + 8 > #bytes then return nil end
-        local value = ffi.new("HD2Probe_SIZE_T[1]")
-        ffi.copy(value, bytes:sub(offset + 1, offset + 8), 8)
-        local number = tonumber(value[0])
+        ffi.copy(scratch.decode, bytes:sub(offset + 1, offset + 8), 8)
+        local number = tonumber(scratch.decode[0])
         if not number or number < 0 or number > MAX_OBSERVER_ADDRESS or number ~= math.floor(number) then return nil end
         return number
+    end
+
+    local function observer_u64(bytes, offset)
+        return with_observer_scratch(observer_u64_with_scratch, bytes, offset)
     end
 
     local function observer_add(address, offset)
@@ -1034,6 +1079,7 @@ local function initialize_probe()
     local OBSERVER_WIDGET_EVENT = 0x1C12037F
     local OBSERVER_WIDGET_ASCII = "HD2CT_PROBE_ASCII_01"
     local OBSERVER_WIDGET_CJK = "HD2CT_PROBE_中文_02"
+    local translate_scan_state = {background_next_slot = 0}
 
     local function observer_widget_context()
         local root_global = observer_add(module_base_number, 0x346D538)
@@ -1117,6 +1163,11 @@ local function initialize_probe()
             if not stable then return reason end
             return "count_out_of_range"
         end
+        if context.active_count == 0 then
+            local stable, reason = observer_widget_verify_context(context)
+            if not stable then return reason end
+            return "empty"
+        end
 
         local manager = observer_add(context.root, 0x14498)
         local widget_offset = 0x4390 + slot * 0x3D8
@@ -1177,13 +1228,16 @@ local function initialize_probe()
         elseif matching_count == 0 then
             result_status = "key_missing"
         else
-            for index = 0, 63 do
-                local record = observer_add(context.ring, index * 0x4B4)
-                local expected_pointer = record and observer_add(record, 0xB4)
-                if not record or not expected_pointer then return "read_failed" end
-                if expected_pointer == value_pointer then
-                    event_slot = index
-                    break
+            if type(value_pointer) == "number" and value_pointer == math.floor(value_pointer) then
+                local stride = 0x4B4
+                local delta = value_pointer - context.ring - 0xB4
+                if delta == math.floor(delta) and delta >= 0 and delta <= 63 * stride
+                    and delta % stride == 0 then
+                    local candidate = delta / stride
+                    local record = observer_add(context.ring, candidate * stride)
+                    local expected_pointer = record and observer_add(record, 0xB4)
+                    if not record or not expected_pointer then return "read_failed" end
+                    if expected_pointer == value_pointer then event_slot = candidate end
                 end
             end
             if event_slot == nil then
@@ -1731,6 +1785,104 @@ local function initialize_probe()
             return "empty"
         end
         return "ok", message
+    end
+
+    local function observer_translate_scan_plan()
+        if not TRANSLATE_ENABLED then return nil end
+        local context = observer_widget_context()
+        if not context or context.next_index >= 64 or context.active_count > 64 then return nil end
+        local owner_id = observer_anon_id(context.root)
+        local owner_changed = translate_scan_state.owner_id ~= nil
+            and translate_scan_state.owner_id ~= owner_id
+
+        if context.active_count == 0 then
+            local stable = observer_widget_verify_context(context)
+            if not stable then return nil end
+            translate_scan_state.owner_id = owner_id
+            translate_scan_state.head = nil
+            translate_scan_state.count = nil
+            translate_scan_state.ring_next = context.next_index
+            translate_scan_state.ring_count = context.active_count
+            if owner_changed then translate_scan_state.background_next_slot = 0 end
+            return {owner_id = owner_id, reset_owner = owner_changed, slots = {}}
+        end
+
+        local manager = observer_add(context.root, 0x14498)
+        local history_address = manager
+            and observer_add(manager, 0x13990)
+        if not history_address then return nil end
+        local first_history = observer_read(history_address, 0x34)
+        if not first_history then return nil end
+        local first_head = observer_u32(first_history, 0)
+        local first_count = observer_u32(first_history, 0x30)
+        local second_history = observer_read(history_address, 0x34)
+        if not second_history then return nil end
+        local head = observer_u32(second_history, 0)
+        local count = observer_u32(second_history, 0x30)
+        if first_head ~= head or first_count ~= count or head == nil or head >= 64
+            or count == nil or count > 64 then
+            return nil
+        end
+        local stable = observer_widget_verify_context(context)
+        if not stable then return nil end
+
+        local previous_head = translate_scan_state.head
+        local previous_count = translate_scan_state.count
+        local previous_ring_next = translate_scan_state.ring_next
+        local previous_ring_count = translate_scan_state.ring_count
+        translate_scan_state.owner_id = owner_id
+        translate_scan_state.head = head
+        translate_scan_state.count = count
+        translate_scan_state.ring_next = context.next_index
+        translate_scan_state.ring_count = context.active_count
+        if owner_changed then translate_scan_state.background_next_slot = 0 end
+
+        local slots = {}
+        local included = {}
+        local function add_slot(slot)
+            if #slots >= 64 or included[slot] then return end
+            included[slot] = true
+            slots[#slots + 1] = slot
+        end
+        local function add_all_slots()
+            add_slot((head + 63) % 64)
+            for slot = 0, 63 do add_slot(slot) end
+        end
+
+        if owner_changed then
+            return {owner_id = owner_id, reset_owner = true, slots = slots}
+        end
+
+        local resync = previous_head == nil or previous_count == nil
+            or previous_ring_next == nil or previous_ring_count == nil or count == 0
+        local delta = 0
+        if not resync then
+            delta = (head - previous_head) % 64
+            local expected_count = math.min(64, previous_count + delta)
+            if count < previous_count or count ~= expected_count then
+                resync = true
+            elseif delta == 0 and count == 64 and previous_count == 64
+                and (context.next_index ~= previous_ring_next
+                    or context.active_count ~= previous_ring_count) then
+                resync = true
+            end
+        end
+
+        if resync then
+            add_all_slots()
+        else
+            for offset = 0, delta - 1 do add_slot((previous_head + offset) % 64) end
+            add_slot((head + 63) % 64)
+            for offset = 0, 3 do
+                add_slot((translate_scan_state.background_next_slot + offset) % 64)
+            end
+            translate_scan_state.background_next_slot = (translate_scan_state.background_next_slot + 4) % 64
+        end
+
+        if resync then
+            translate_scan_state.background_next_slot = (translate_scan_state.background_next_slot + 4) % 64
+        end
+        return {owner_id = owner_id, slots = slots}
     end
 
     local function observer_translate_apply(message, text)
@@ -2303,6 +2455,12 @@ local function initialize_probe()
         -- 心跳依据当前传输方式读取对应的文件规则。
         adapter.heartbeat = protect(function() return observer_translate_heartbeat(true) end)
         adapter.read_slot = protect(observer_translate_read_slot)
+        adapter.scan_plan = function(...)
+            if observer_faulted then return nil end
+            local ok, plan = pcall(observer_translate_scan_plan, ...)
+            if not ok then return nil end
+            return plan
+        end
         adapter.submit = protect(observer_translate_publish_request)
         adapter.response = protect(observer_translate_read_response)
         adapter.apply = protect(observer_translate_apply)
@@ -2323,6 +2481,7 @@ local function initialize_probe()
     local code_scan_done = false
     local observer_state = nil
     local translate_state = nil
+    local translate_last_dispatch_ms = nil
 
     local function observer_log_stopped()
         pcall(print, "[HD2 Chat Probe] observer stopped after a sanitized failure")
@@ -2406,6 +2565,7 @@ local function initialize_probe()
             return false
         end
         translate_state = created_state
+        translate_last_dispatch_ms = nil
         return true
     end
 
@@ -2415,14 +2575,18 @@ local function initialize_probe()
         if native_transport_api then pcall(native_transport_api.disable) end
     end
 
-    local function observer_finish_translation_with_error(_reason)
+    local function observer_finish_translation_with_error(reason)
         observer_translate_disable_native()
         if translate_state and translate_core and type(translate_core.manifest) == "function" then
             local manifest_ok, manifest = pcall(translate_core.manifest, translate_state)
             if manifest_ok and type(manifest) == "table" then
                 manifest.status = "stopped"
                 manifest.done = true
-                manifest.code = nil
+                if reason == "clock_error" or reason == "invalid_clock" or reason == "clock_reversed" then
+                    manifest.code = reason
+                else
+                    manifest.code = nil
+                end
                 local output_ok = pcall(observer_translate_write_report, manifest)
                 if not output_ok then observer_log_stopped() end
             else
@@ -2479,6 +2643,21 @@ local function initialize_probe()
         end
 
         if translate_state then
+            if type(translate_core.should_step) == "function" then
+                local clock_ok, clock_value = pcall(kernel.GetTickCount64)
+                if not clock_ok then return observer_finish_translation_with_error("clock_error") end
+                local now_ms = tonumber(clock_value)
+                local check_ok, should_run, clock_error = pcall(
+                    translate_core.should_step,
+                    translate_state,
+                    now_ms,
+                    translate_last_dispatch_ms
+                )
+                if not check_ok then return observer_finish_translation_with_error("internal_error") end
+                if clock_error ~= nil then return observer_finish_translation_with_error(clock_error) end
+                translate_last_dispatch_ms = now_ms
+                if should_run ~= true then return false end
+            end
             observer_read_budget = 0
             local step_ok, done = pcall(translate_core.step, translate_state)
             if not step_ok then return observer_finish_translation_with_error("internal_error") end
@@ -2499,7 +2678,26 @@ end
 local original_update = _G.update
 local setup_ok, probe_step = pcall(initialize_probe)
 if setup_ok then
-    if DISPLAY_TEST_ENABLED or TRANSLATE_ENABLED then
+    if TRANSLATE_ENABLED then
+        if type(translate_core) == "table" and type(translate_core.wrap_update_after) == "function" then
+            _G.update = translate_core.wrap_update_after(original_update, probe_step)
+        else
+            local finished = false
+            local function after_original(...)
+                if not finished then
+                    local ok, done = pcall(probe_step)
+                    if not ok or done == true then finished = true end
+                end
+                return ...
+            end
+            _G.update = function(...)
+                if type(original_update) == "function" then
+                    return after_original(original_update(...))
+                end
+                return after_original()
+            end
+        end
+    elseif DISPLAY_TEST_ENABLED then
         local function pack_results(...)
             return {n = select("#", ...), ...}
         end

@@ -11,13 +11,14 @@ M.MAX_SUBMITS_PER_STEP = 1
 M.PENDING_TTL_MS = 60000
 M.HEARTBEAT_FRESH_MS = 3000
 M.HEARTBEAT_POLL_MS = 200
-M.SCAN_INTERVAL_MS = 200
+M.SCAN_INTERVAL_MS = 1000
 M.RESPONSE_POLL_MS = 200
 M.REPORT_INTERVAL_MS = 5000
 
 local MAX_SAFE_INTEGER = 9007199254740991
 local SLOT_COUNT = 64
 local MAX_RESPONSE_BYTES = 16387
+local BASELINE_SCAN_INTERVAL_MS = 200
 
 local STATUSES = {
     target_unverified = true,
@@ -315,6 +316,29 @@ local function clear_all_pending(state)
     end
 end
 
+local function clear_scan_plan(state)
+    state.scan_plan_active = false
+    state.scan_plan_slots = nil
+    state.scan_plan_index = 1
+end
+
+local function baseline_scan_interval(state)
+    return math.min(state.scan_interval_ms, BASELINE_SCAN_INTERVAL_MS)
+end
+
+local function reset_scan_owner(state, owner_id)
+    clear_all_pending(state)
+    state.seen = {}
+    state.scan_owner_id = owner_id
+    state.baseline_active = true
+    state.baseline_remaining = SLOT_COUNT
+    state.baseline_next_slot = 0
+    state.next_slot = 0
+    clear_scan_plan(state)
+    state.next_scan_ms = add_saturated(state.last_now_ms or 0, baseline_scan_interval(state))
+    set_status(state, "baseline", nil)
+end
+
 local function set_inactive(state, code)
     state.heartbeat_active = false
     state.heartbeat_uptime_ms = nil
@@ -325,6 +349,8 @@ local function set_inactive(state, code)
     clear_all_pending(state)
     state.seen = {}
     state.next_slot = 0
+    state.scan_owner_id = nil
+    clear_scan_plan(state)
     if not state.done then set_status(state, "inactive", code or "heartbeat_inactive") end
 end
 
@@ -695,20 +721,98 @@ local function handle_non_ok_slot(state, slot, status)
     end
 end
 
+local function normalize_scan_plan(plan)
+    if type(plan) ~= "table" or not is_safe_integer(plan.owner_id) or plan.owner_id == 0
+        or type(plan.slots) ~= "table"
+        or (plan.reset_owner ~= nil and type(plan.reset_owner) ~= "boolean") then
+        return nil
+    end
+
+    local count = 0
+    for key in pairs(plan.slots) do
+        if not is_small_integer(key, 1, SLOT_COUNT) then return nil end
+        count = count + 1
+    end
+    if count > SLOT_COUNT then return nil end
+
+    local slots = {}
+    local seen = {}
+    for index = 1, count do
+        local slot = plan.slots[index]
+        if not is_small_integer(slot, 0, SLOT_COUNT - 1) then return nil end
+        if not seen[slot] then
+            seen[slot] = true
+            slots[#slots + 1] = slot
+        end
+    end
+    return plan.owner_id, slots, plan.reset_owner == true
+end
+
+local function load_scan_plan(state)
+    clear_scan_plan(state)
+    if type(state.adapter.scan_plan) ~= "function" then return false end
+
+    local ok, plan = pcall(state.adapter.scan_plan)
+    if not ok then
+        bump(state, "adapter_errors")
+        return false
+    end
+    local owner_id, slots, reset_owner = normalize_scan_plan(plan)
+    if not owner_id then
+        bump(state, "invalid_messages")
+        return false
+    end
+
+    if reset_owner or (state.scan_owner_id ~= nil and state.scan_owner_id ~= owner_id) then
+        reset_scan_owner(state, owner_id)
+        return false
+    end
+    state.scan_owner_id = owner_id
+    state.scan_plan_slots = slots
+    state.scan_plan_index = 1
+    state.scan_plan_active = true
+    return true
+end
+
+local function observe_scan_owner(state, owner_id)
+    if state.scan_owner_id == nil then
+        state.scan_owner_id = owner_id
+        return true
+    end
+    if state.scan_owner_id == owner_id then return true end
+    reset_scan_owner(state, owner_id)
+    return false
+end
+
 local function scan_slots(state)
     local submitted_this_step = 0
     local slots_read = 0
     while slots_read < M.MAX_SLOTS_PER_STEP and not state.done do
+        local planned = state.scan_plan_active
+        if planned and (#state.pending >= M.MAX_PENDING
+            or submitted_this_step >= M.MAX_SUBMITS_PER_STEP) then
+            break
+        end
+        local slot
+        if planned then
+            if state.scan_plan_index > #state.scan_plan_slots then break end
+            slot = state.scan_plan_slots[state.scan_plan_index]
+        else
+            slot = state.next_slot
+        end
         local active, now_ms = ensure_active(state, false)
         if not active then return end
-        local slot = state.next_slot
         local status, message = read_one_slot(state, slot)
         if status == "deferred" then
             bump(state, "slot_deferred")
             return
         end
 
-        state.next_slot = (slot + 1) % SLOT_COUNT
+        if planned then
+            state.scan_plan_index = state.scan_plan_index + 1
+        else
+            state.next_slot = (slot + 1) % SLOT_COUNT
+        end
         slots_read = slots_read + 1
         if status ~= "ok" then
             if status ~= "empty" and status ~= "stale" and status ~= "read_failed"
@@ -722,6 +826,7 @@ local function scan_slots(state)
             cancel_slot(state, slot)
             state.seen[slot] = nil
         else
+            if not observe_scan_owner(state, message.owner_id) then return end
             if not same_identity(state.attempted_writes[slot], message) then
                 state.attempted_writes[slot] = nil
             end
@@ -755,6 +860,13 @@ local function scan_slots(state)
         end
         if now_ms == nil then return end
     end
+    if state.scan_plan_active and state.scan_plan_index > #state.scan_plan_slots then
+        clear_scan_plan(state)
+        local completed_ms = state.last_now_ms or 0
+        if not is_safe_integer(state.next_scan_ms) or completed_ms >= state.next_scan_ms then
+            state.next_scan_ms = add_saturated(completed_ms, state.scan_interval_ms)
+        end
+    end
 end
 
 local function scan_baseline(state)
@@ -773,6 +885,7 @@ local function scan_baseline(state)
         state.baseline_remaining = math.max(0, state.baseline_remaining - 1)
         slots_read = slots_read + 1
         if status == "ok" and valid_message(message, slot) then
+            if not observe_scan_owner(state, message.owner_id) then return end
             state.seen[slot] = {
                 owner_id = message.owner_id,
                 event_slot = message.event_slot,
@@ -837,6 +950,10 @@ function M.new(adapter, options)
         seen = {},
         attempted_writes = {},
         next_slot = 0,
+        scan_owner_id = nil,
+        scan_plan_slots = nil,
+        scan_plan_index = 1,
+        scan_plan_active = false,
     }
 
     if options.target_verified ~= true then
@@ -852,6 +969,42 @@ function M.new(adapter, options)
         state.session_id = options.session_id
     end
     return state
+end
+
+function M.should_step(state, now_ms, previous_dispatch_ms)
+    if not is_safe_integer(now_ms) then return false, "invalid_clock" end
+    if previous_dispatch_ms ~= nil then
+        if not is_safe_integer(previous_dispatch_ms) then return false, "invalid_clock" end
+        if now_ms < previous_dispatch_ms then return false, "clock_reversed" end
+    end
+    if type(state) ~= "table" then return true end
+    if state.last_now_ms ~= nil then
+        if not is_safe_integer(state.last_now_ms) then return false, "invalid_clock" end
+        if now_ms < state.last_now_ms then return false, "clock_reversed" end
+    end
+    if state.done or type(state.pending) ~= "table" or #state.pending > 0 then return true end
+    if not is_safe_integer(state.last_report_ms) then return true end
+
+    if state.scan_plan_active and type(state.scan_plan_slots) == "table"
+        and is_small_integer(state.scan_plan_index, 1, SLOT_COUNT + 1)
+        and state.scan_plan_index <= #state.scan_plan_slots then
+        return true
+    end
+
+    local deadline = add_saturated(state.last_report_ms, M.REPORT_INTERVAL_MS)
+    if not is_safe_integer(state.last_heartbeat_poll_ms) then return true end
+    local heartbeat_deadline = add_saturated(state.last_heartbeat_poll_ms, M.HEARTBEAT_POLL_MS)
+    if heartbeat_deadline < deadline then deadline = heartbeat_deadline end
+
+    if state.heartbeat_active then
+        if not is_safe_integer(state.next_scan_ms) then return true end
+        if state.next_scan_ms < deadline then deadline = state.next_scan_ms end
+        if not is_safe_integer(state.heartbeat_uptime_ms) then return true end
+        local freshness_deadline = add_saturated(state.heartbeat_uptime_ms, M.HEARTBEAT_FRESH_MS)
+        if freshness_deadline < deadline then deadline = freshness_deadline end
+    end
+
+    return now_ms >= deadline
 end
 
 function M.step(state)
@@ -884,14 +1037,17 @@ function M.step(state)
     end
 
     local now_ms = state.last_now_ms or 0
-    if state.next_scan_ms ~= nil and now_ms < state.next_scan_ms then
+    local plan_pending = state.scan_plan_active and type(state.scan_plan_slots) == "table"
+        and is_small_integer(state.scan_plan_index, 1, SLOT_COUNT + 1)
+        and state.scan_plan_index <= #state.scan_plan_slots
+    if not plan_pending and state.next_scan_ms ~= nil and now_ms < state.next_scan_ms then
         refresh_active_status(state)
         maybe_report(state, now_ms, false)
         return false
     end
-    state.next_scan_ms = add_saturated(now_ms, state.scan_interval_ms)
 
     if state.baseline_active then
+        state.next_scan_ms = add_saturated(now_ms, baseline_scan_interval(state))
         scan_baseline(state)
         if state.done then
             maybe_report(state, state.last_now_ms or 0, true)
@@ -899,6 +1055,21 @@ function M.step(state)
         end
         maybe_report(state, state.last_now_ms or 0, false)
         return false
+    end
+
+    if not plan_pending then
+        state.next_scan_ms = add_saturated(now_ms, state.scan_interval_ms)
+        load_scan_plan(state)
+        if state.baseline_active then
+            state.next_scan_ms = add_saturated(state.last_now_ms or now_ms, baseline_scan_interval(state))
+            scan_baseline(state)
+            if state.done then
+                maybe_report(state, state.last_now_ms or 0, true)
+                return true
+            end
+            maybe_report(state, state.last_now_ms or 0, false)
+            return false
+        end
     end
 
     scan_slots(state)
@@ -909,6 +1080,23 @@ function M.step(state)
     refresh_active_status(state)
     maybe_report(state, state.last_now_ms or 0, false)
     return false
+end
+
+function M.wrap_update_after(original_update, probe_step)
+    local finished = false
+    local function after_original(...)
+        if not finished then
+            local ok, done = pcall(probe_step)
+            if not ok or done == true then finished = true end
+        end
+        return ...
+    end
+    return function(...)
+        if type(original_update) == "function" then
+            return after_original(original_update(...))
+        end
+        return after_original()
+    end
 end
 
 return M
