@@ -238,9 +238,9 @@ local translate_layout = (function()
         return a + b * 256 + c * 65536 + d * 16777216
     end
 
-    local function read_float(ffi, bytes, offset)
+    local function read_float(ffi, bytes, offset, scratch)
         if type(bytes) ~= "string" or offset < 0 or offset + 4 > #bytes then return nil end
-        local value = ffi.new("float[1]")
+        local value = scratch or ffi.new("float[1]")
         ffi.copy(value, bytes:sub(offset + 1, offset + 4), 4)
         return tonumber(value[0])
     end
@@ -292,6 +292,7 @@ local translate_layout = (function()
         local gap = options.gap
         local measure = options.measure
         local position = options.position
+        local float_scratch = ffi.new("float[1]")
         local verified = options.verified == true and finite(gap) and gap >= 0 and gap <= 2048
         local disabled = not verified
         local statistics = {
@@ -361,7 +362,7 @@ local translate_layout = (function()
                 or length ~= math.floor(length) or length - 1 > MAX_SAFE_ADDRESS - address
                 or type(query) ~= "function" or type(same_region) ~= "function"
                 or type(region_allowed) ~= "function" then
-                return false, nil
+                return false, nil, "invalid_range"
             end
             local finish = address + length
             local cursor = address
@@ -375,28 +376,79 @@ local translate_layout = (function()
                     or not finite(region.base) or not finite(region.finish)
                     or not finite(region.allocation_base)
                     or region.base > cursor or region.finish <= cursor then
-                    return false, nil
+                    return false, nil, "invalid_region"
                 end
                 if allocation_base == nil then allocation_base = region.allocation_base end
-                if region.allocation_base ~= allocation_base
-                    or (expected_allocation ~= nil and region.allocation_base ~= expected_allocation) then
-                    return false, nil
+                if region.allocation_base ~= allocation_base then
+                    return false, nil, "allocation_boundary"
+                end
+                if expected_allocation ~= nil and region.allocation_base ~= expected_allocation then
+                    return false, nil, "allocation_changed"
                 end
                 local region_finish = math.min(finish, region.finish)
                 local verified_region = query(cursor)
-                if not same_region(region, verified_region) then return false, nil end
-                if region_finish <= cursor then return false, nil end
+                if not same_region(region, verified_region) then return false, nil, "region_changed" end
+                if region_finish <= cursor then return false, nil, "invalid_region" end
                 cursor = region_finish
             end
             return true, allocation_base
+        end
+
+        -- 仅用于三轮不含native调用的预检，按连续物理行分段；跨allocation逐行回退，双查发现区域变化即拒绝。
+        local function writable_rows(rows)
+            local index = 1
+            while index <= #rows do
+                local finish_index = index
+                while finish_index < #rows
+                    and rows[finish_index].address == rows[finish_index + 1].address + ROW_SIZE do
+                    finish_index = finish_index + 1
+                end
+
+                local first = rows[finish_index]
+                local last = rows[index]
+                local length = last.address + ROW_SIZE - first.address
+                local expected_allocation = first.allocation_base
+                local one_expected_allocation = true
+                for row_index = finish_index, index, -1 do
+                    if rows[row_index].allocation_base ~= expected_allocation then
+                        one_expected_allocation = false
+                        break
+                    end
+                end
+
+                local range_writable, allocation_base, range_error = false, nil, nil
+                if one_expected_allocation then
+                    range_writable, allocation_base, range_error = writable_range(first.address, length,
+                        expected_allocation)
+                end
+                if range_writable then
+                    for row_index = finish_index, index, -1 do
+                        if rows[row_index].allocation_base == nil then
+                            rows[row_index].allocation_base = allocation_base
+                        end
+                    end
+                elseif range_error == "region_changed" or range_error == "allocation_changed" then
+                    return false
+                else
+                    for row_index = finish_index, index, -1 do
+                        local row = rows[row_index]
+                        local row_writable, row_allocation = writable_range(
+                            row.address, ROW_SIZE, row.allocation_base)
+                        if not row_writable then return false end
+                        if row.allocation_base == nil then row.allocation_base = row_allocation end
+                    end
+                end
+                index = finish_index + 1
+            end
+            return true
         end
 
         local function capture_geometry(row)
             local bytes, reason = read_exact(row.address + ROW_HEIGHT_OFFSET,
                 ROW_SCALE_OFFSET - ROW_HEIGHT_OFFSET + 4)
             if not bytes then return nil, read_status(reason), 5 end
-            local height = read_float(ffi, bytes, 0)
-            local scale = read_float(ffi, bytes, ROW_SCALE_OFFSET - ROW_HEIGHT_OFFSET)
+            local height = read_float(ffi, bytes, 0, float_scratch)
+            local scale = read_float(ffi, bytes, ROW_SCALE_OFFSET - ROW_HEIGHT_OFFSET, float_scratch)
             if not valid_scale(scale) or not valid_height(height) then
                 local function metric_class(value, is_scale)
                     if not finite(value) then return 1 end
@@ -449,26 +501,25 @@ local translate_layout = (function()
             for index = 0, history.count - 1 do
                 local slot = (history.head - index - 1) % HISTORY_SLOT_COUNT
                 local address = manager + HISTORY_SLOTS_OFFSET + slot * HISTORY_SLOT_SIZE
-                local row_writable, allocation_base = writable_range(address, ROW_SIZE)
-                if not safe_address(address) or not row_writable then
+                if not safe_address(address) then
                     return fail("read_failed", 4)
                 end
-                local row = {slot = slot, address = address, allocation_base = allocation_base}
+                local row = {slot = slot, address = address}
+                rows[#rows + 1] = row
+                if address == target_row then target_found = true end
+            end
+            if not writable_rows(rows) then return fail("read_failed", 4) end
+            for _, row in ipairs(rows) do
                 local geometry, geometry_error, geometry_code = capture_geometry(row)
                 if not geometry then return fail(geometry_error, geometry_code) end
                 row.geometry = geometry
-                rows[#rows + 1] = row
-                if address == target_row then target_found = true end
             end
             if not target_found then return fail("stale", 8) end
 
             local status, status_code = check_context_and_history(context, manager, history)
             if status then return fail(status, status_code) end
+            if not writable_rows(rows) then return fail("read_failed", 4) end
             for _, row in ipairs(rows) do
-                local row_writable = writable_range(row.address, ROW_SIZE, row.allocation_base)
-                if not row_writable then
-                    return fail("read_failed", 4)
-                end
                 local geometry, geometry_error, geometry_code = capture_geometry(row)
                 if not geometry then return fail(geometry_error, geometry_code) end
                 if geometry.bytes ~= row.geometry.bytes then return fail("stale", 10) end
@@ -491,11 +542,8 @@ local translate_layout = (function()
             end
             local status, status_code = check_context_and_history(snapshot.context, snapshot.manager, snapshot.history)
             if status then return fail(status, status_code) end
+            if not writable_rows(snapshot.rows) then return fail("read_failed", 4) end
             for _, row in ipairs(snapshot.rows) do
-                local row_writable = writable_range(row.address, ROW_SIZE, row.allocation_base)
-                if not row_writable then
-                    return fail("read_failed", 4)
-                end
                 local geometry, geometry_error, geometry_code = capture_geometry(row)
                 if not geometry then return fail(geometry_error, geometry_code) end
                 if geometry.bytes ~= row.geometry.bytes then return fail("stale", 10) end
@@ -1292,7 +1340,7 @@ local function initialize_probe()
     local OBSERVER_WIDGET_EVENT = 0x1C12037F
     local OBSERVER_WIDGET_ASCII = "HD2CT_PROBE_ASCII_01"
     local OBSERVER_WIDGET_CJK = "HD2CT_PROBE_中文_02"
-    local translate_scan_state = {background_next_slot = 0}
+    local translate_scan_state = {background_next_slot = 0, latest_retries = 0}
 
     local function observer_widget_context()
         local root_global = observer_add(module_base_number, 0x346D538)
@@ -2016,6 +2064,7 @@ local function initialize_probe()
             translate_scan_state.count = nil
             translate_scan_state.ring_next = context.next_index
             translate_scan_state.ring_count = context.active_count
+            translate_scan_state.latest_retries = 0
             if owner_changed then translate_scan_state.background_next_slot = 0 end
             return {owner_id = owner_id, reset_owner = owner_changed, slots = {}}
         end
@@ -2043,13 +2092,6 @@ local function initialize_probe()
         local previous_count = translate_scan_state.count
         local previous_ring_next = translate_scan_state.ring_next
         local previous_ring_count = translate_scan_state.ring_count
-        translate_scan_state.owner_id = owner_id
-        translate_scan_state.head = head
-        translate_scan_state.count = count
-        translate_scan_state.ring_next = context.next_index
-        translate_scan_state.ring_count = context.active_count
-        if owner_changed then translate_scan_state.background_next_slot = 0 end
-
         local slots = {}
         local included = {}
         local function add_slot(slot)
@@ -2063,16 +2105,24 @@ local function initialize_probe()
         end
 
         if owner_changed then
+            translate_scan_state.owner_id = owner_id
+            translate_scan_state.head = head
+            translate_scan_state.count = count
+            translate_scan_state.ring_next = context.next_index
+            translate_scan_state.ring_count = context.active_count
+            translate_scan_state.latest_retries = 0
+            translate_scan_state.background_next_slot = 0
             return {owner_id = owner_id, reset_owner = true, slots = slots}
         end
 
         local resync = previous_head == nil or previous_count == nil
-            or previous_ring_next == nil or previous_ring_count == nil or count == 0
+            or previous_ring_next == nil or previous_ring_count == nil
         local delta = 0
         if not resync then
             delta = (head - previous_head) % 64
             local expected_count = math.min(64, previous_count + delta)
-            if count < previous_count or count ~= expected_count then
+            if (count == 0) ~= (previous_count == 0)
+                or count < previous_count or count ~= expected_count then
                 resync = true
             elseif delta == 0 and count == 64 and previous_count == 64
                 and (context.next_index ~= previous_ring_next
@@ -2081,20 +2131,48 @@ local function initialize_probe()
             end
         end
 
+        local history_changed = previous_head == nil or previous_count == nil
+            or head ~= previous_head or count ~= previous_count
+        local event_changed = previous_ring_next == nil or previous_ring_count == nil
+            or context.next_index ~= previous_ring_next
+            or context.active_count ~= previous_ring_count
+        local latest_retries = translate_scan_state.latest_retries or 0
+        local metadata_changed = history_changed or event_changed
+
         if resync then
             add_all_slots()
         else
             for offset = 0, delta - 1 do add_slot((previous_head + offset) % 64) end
-            add_slot((head + 63) % 64)
-            for offset = 0, 3 do
-                add_slot((translate_scan_state.background_next_slot + offset) % 64)
-            end
-            translate_scan_state.background_next_slot = (translate_scan_state.background_next_slot + 4) % 64
+            if metadata_changed or latest_retries > 0 then add_slot((head + 63) % 64) end
         end
 
-        if resync then
-            translate_scan_state.background_next_slot = (translate_scan_state.background_next_slot + 4) % 64
+        local background_next_slot = translate_scan_state.background_next_slot
+        local function history_slot_active(slot)
+            return count > 0 and (head - 1 - slot) % 64 < count
         end
+        if not resync then
+            for offset = 0, 1 do
+                local slot = (background_next_slot + offset) % 64
+                if count == 0 or history_slot_active(slot) then add_slot(slot) end
+            end
+        end
+
+        local next_latest_retries
+        if metadata_changed then
+            next_latest_retries = 2
+        elseif latest_retries > 0 then
+            next_latest_retries = latest_retries - 1
+        else
+            next_latest_retries = 0
+        end
+
+        translate_scan_state.owner_id = owner_id
+        translate_scan_state.head = head
+        translate_scan_state.count = count
+        translate_scan_state.ring_next = context.next_index
+        translate_scan_state.ring_count = context.active_count
+        translate_scan_state.latest_retries = next_latest_retries
+        translate_scan_state.background_next_slot = (background_next_slot + 2) % 64
         return {owner_id = owner_id, slots = slots}
     end
 

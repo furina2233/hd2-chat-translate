@@ -197,9 +197,9 @@ translate_adapter.test_scan_hint.write_history = function(head, count, fill)
     write_bytes(translate_adapter.test_scan_hint.history, pack32(head) .. string.rep(fill or "\0", 44) .. pack32(count))
 end
 
--- 增量提示先做一次全槽重同步，之后保持latest优先并用4槽后台轮转覆盖全环。
+-- 初次重同步覆盖全槽；稳态只重试latest两次，其余计划每次轮转两个槽。
 prepare_widget_case()
-translate_adapter.test_scan_hint.write_history(1, 1)
+translate_adapter.test_scan_hint.write_history(1, 64)
 translate_adapter.test_scan_hint.initial_plan = translate_adapter.scan_plan()
 assert(type(translate_adapter.test_scan_hint.initial_plan) == "table" and translate_adapter.test_scan_hint.initial_plan.owner_id > 0
     and #translate_adapter.test_scan_hint.initial_plan.slots == 64 and translate_adapter.test_scan_hint.initial_plan.slots[1] == 0,
@@ -207,53 +207,86 @@ assert(type(translate_adapter.test_scan_hint.initial_plan) == "table" and transl
 translate_adapter.test_scan_hint.owner_before = translate_adapter.test_scan_hint.initial_plan.owner_id
 translate_adapter.test_scan_hint.covered_slots = {}
 translate_adapter.test_scan_hint.plan = translate_adapter.scan_plan()
-assert(type(translate_adapter.test_scan_hint.plan) == "table" and #translate_adapter.test_scan_hint.plan.slots == 5
-    and translate_adapter.test_scan_hint.plan.slots[1] == 0 and translate_adapter.test_scan_hint.plan.slots[2] == 4
-    and translate_adapter.test_scan_hint.plan.slots[3] == 5 and translate_adapter.test_scan_hint.plan.slots[4] == 6 and translate_adapter.test_scan_hint.plan.slots[5] == 7,
-    "steady hint did not prioritize latest plus four background slots")
-translate_adapter.test_scan_hint.background_body_slot = translate_adapter.test_scan_hint.plan.slots[2]
+assert(type(translate_adapter.test_scan_hint.plan) == "table" and #translate_adapter.test_scan_hint.plan.slots == 3
+    and translate_adapter.test_scan_hint.plan.slots[1] == 0
+    and translate_adapter.test_scan_hint.plan.slots[2] == 2
+    and translate_adapter.test_scan_hint.plan.slots[3] == 3,
+    "first stable retry did not include latest and two background slots")
+translate_adapter.test_scan_hint.plan = translate_adapter.scan_plan()
+assert(#translate_adapter.test_scan_hint.plan.slots == 3
+    and translate_adapter.test_scan_hint.plan.slots[1] == 0,
+    "second stable retry did not include latest")
+translate_adapter.test_scan_hint.plan = translate_adapter.scan_plan()
+assert(#translate_adapter.test_scan_hint.plan.slots == 2
+    and translate_adapter.test_scan_hint.plan.slots[1] == 6
+    and translate_adapter.test_scan_hint.plan.slots[2] == 7,
+    "steady scan continued deep-reading latest or exceeded two background slots")
+translate_adapter.test_scan_hint.background_body_slot = translate_adapter.test_scan_hint.plan.slots[1]
 write_bytes(widget_map_address(translate_adapter.test_scan_hint.background_body_slot) + 0x158, string.char(1))
 write_bytes(widget_map_address(translate_adapter.test_scan_hint.background_body_slot) + 8,
     pack32(WIDGET_KEY) .. pack32(1) .. pack64(widget_record_address(4) + 0xB4) .. pack64(0))
 status, message = observer_widget_read_widget_slot(
     translate_adapter.test_scan_hint.background_body_slot, true)
 assert(status == "ok" and message.body == WIDGET_ASCII, "background slot setup was not readable")
-write_widget_record(4, WIDGET_EVENT, widget_body_bytes("Older body changed"))
 translate_adapter.test_scan_hint.index = 1
 while translate_adapter.test_scan_hint.index <= #translate_adapter.test_scan_hint.plan.slots do
-    translate_adapter.test_scan_hint.covered_slots[translate_adapter.test_scan_hint.plan.slots[translate_adapter.test_scan_hint.index]] = true
+    local slot = translate_adapter.test_scan_hint.plan.slots[translate_adapter.test_scan_hint.index]
+    translate_adapter.test_scan_hint.covered_slots[slot] = true
+    if slot == translate_adapter.test_scan_hint.background_body_slot then
+        status, message = observer_widget_read_widget_slot(slot, true)
+        assert(status == "ok" and message.body == WIDGET_ASCII,
+            "scheduled background read did not observe the original body")
+    end
     translate_adapter.test_scan_hint.index = translate_adapter.test_scan_hint.index + 1
 end
+write_widget_record(4, WIDGET_EVENT, widget_body_bytes("Older body changed"))
 translate_adapter.test_scan_hint.cycle = 1
-while translate_adapter.test_scan_hint.cycle <= 15 do
+translate_adapter.test_scan_hint.body_rechecked = false
+while translate_adapter.test_scan_hint.cycle <= 32 do
     translate_adapter.test_scan_hint.plan = translate_adapter.scan_plan()
     assert(type(translate_adapter.test_scan_hint.plan) == "table"
-        and #translate_adapter.test_scan_hint.plan.slots >= 4
-        and #translate_adapter.test_scan_hint.plan.slots <= 5
-        and translate_adapter.test_scan_hint.plan.slots[1] == 0,
-        "background scan exceeded its bounded candidate count")
+        and #translate_adapter.test_scan_hint.plan.slots == 2,
+        "steady background scan did not rotate exactly two slots")
     translate_adapter.test_scan_hint.index = 1
     while translate_adapter.test_scan_hint.index <= #translate_adapter.test_scan_hint.plan.slots do
-        translate_adapter.test_scan_hint.covered_slots[translate_adapter.test_scan_hint.plan.slots[translate_adapter.test_scan_hint.index]] = true
+        local slot = translate_adapter.test_scan_hint.plan.slots[translate_adapter.test_scan_hint.index]
+        translate_adapter.test_scan_hint.covered_slots[slot] = true
+        if slot == translate_adapter.test_scan_hint.background_body_slot then
+            status, message = observer_widget_read_widget_slot(slot, true)
+            assert(status == "ok" and message.body == "Older body changed",
+                "background audit did not observe the in-place body change")
+            translate_adapter.test_scan_hint.body_rechecked = true
+            translate_adapter.test_scan_hint.body_recheck_plan = translate_adapter.test_scan_hint.cycle
+        end
         translate_adapter.test_scan_hint.index = translate_adapter.test_scan_hint.index + 1
     end
     translate_adapter.test_scan_hint.cycle = translate_adapter.test_scan_hint.cycle + 1
 end
+assert(translate_adapter.test_scan_hint.body_rechecked
+    and translate_adapter.test_scan_hint.body_recheck_plan <= 32,
+    "in-place body change was not revisited within one 64-slot audit cycle")
 translate_adapter.test_scan_hint.index = 0
 while translate_adapter.test_scan_hint.index <= 63 do
     assert(translate_adapter.test_scan_hint.covered_slots[translate_adapter.test_scan_hint.index], "background rotation missed slot " .. tostring(translate_adapter.test_scan_hint.index))
     translate_adapter.test_scan_hint.index = translate_adapter.test_scan_hint.index + 1
 end
+
+-- 有历史时后台物理槽只允许落在当前活跃history集合内。
+prepare_widget_case()
+translate_adapter.test_scan_hint.write_history(1, 3)
+translate_adapter.scan_plan()
 translate_adapter.test_scan_hint.plan = translate_adapter.scan_plan()
-assert(translate_adapter.test_scan_hint.plan.slots[2]
-    == translate_adapter.test_scan_hint.background_body_slot,
-    "unchanged history did not revisit the older background slot")
-status, message = observer_widget_read_widget_slot(
-    translate_adapter.test_scan_hint.background_body_slot, true)
-assert(status == "ok" and message.body == "Older body changed",
-    "background re-read did not observe an in-place body change")
+assert(#translate_adapter.test_scan_hint.plan.slots <= 3,
+    "background hint included slots outside a short active history")
+for _, slot in ipairs(translate_adapter.test_scan_hint.plan.slots) do
+    assert((1 - 1 - slot) % 64 < 3,
+        "background hint included an inactive history slot")
+end
 
 -- 52字节快照只比较head/count；未证明稳定的中间44字节变化不得阻止hint。
+prepare_widget_case()
+translate_adapter.test_scan_hint.write_history(1, 1)
+translate_adapter.scan_plan()
 prepare_widget_case()
 translate_adapter.test_scan_hint.write_history(1, 1)
 read_mutation = function(address, count)
@@ -263,7 +296,9 @@ read_mutation = function(address, count)
 end
 translate_adapter.test_scan_hint.plan = translate_adapter.scan_plan()
 read_mutation = nil
-assert(type(translate_adapter.test_scan_hint.plan) == "table" and #translate_adapter.test_scan_hint.plan.slots == 5,
+assert(type(translate_adapter.test_scan_hint.plan) == "table"
+    and #translate_adapter.test_scan_hint.plan.slots >= 1
+    and #translate_adapter.test_scan_hint.plan.slots <= 3,
     "unrelated UI history gap bytes invalidated a stable hint")
 
 prepare_widget_case()
@@ -306,6 +341,25 @@ translate_adapter.test_scan_hint.plan = translate_adapter.scan_plan()
 assert(type(translate_adapter.test_scan_hint.plan) == "table" and #translate_adapter.test_scan_hint.plan.slots == 0,
     "empty event ring should return an empty hint plan")
 assert(read_counts[translate_adapter.test_scan_hint.history] == nil, "empty event ring read UI history")
+
+-- count为零但event环仍活跃时只做一次baseline，之后走两个槽的稀疏回退。
+prepare_widget_case()
+translate_adapter.test_scan_hint.write_history(10, 0)
+translate_adapter.test_scan_hint.plan = translate_adapter.scan_plan()
+assert(#translate_adapter.test_scan_hint.plan.slots == 64,
+    "history empty transition did not request one baseline")
+translate_adapter.test_scan_hint.plan = translate_adapter.scan_plan()
+assert(#translate_adapter.test_scan_hint.plan.slots == 3,
+    "first empty-history retry did not stay bounded")
+translate_adapter.test_scan_hint.plan = translate_adapter.scan_plan()
+assert(#translate_adapter.test_scan_hint.plan.slots == 3,
+    "second empty-history retry did not stay bounded")
+translate_adapter.test_scan_hint.plan = translate_adapter.scan_plan()
+assert(#translate_adapter.test_scan_hint.plan.slots == 2,
+    "stable empty history did not use two-slot sparse fallback")
+translate_adapter.test_scan_hint.plan = translate_adapter.scan_plan()
+assert(#translate_adapter.test_scan_hint.plan.slots == 2,
+    "stable empty history triggered another full resync")
 
 -- 历史head跨63到0时，新到的多个槽按FIFO顺序优先进入候选。
 prepare_widget_case()

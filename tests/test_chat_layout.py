@@ -31,7 +31,7 @@ local region = {
     base = 0x100000, finish = 0x400000, allocation_base = 0x100000,
     state = 0x1000, protect = 0x04, type = 0x20000,
 }
-local read_failure, read_failure_address, read_mutation, pre_setter_mutation, split_address, split_allocation
+local read_failure, read_failure_address, read_mutation, query_mutation, pre_setter_mutation, split_address, split_allocation
 local split_protect, mutate_after_measure
 local context_stable = true
 local verify_apply = true
@@ -94,19 +94,26 @@ end
 
 local function query(address)
     query_calls = query_calls + 1
-    if address < region.base or address >= region.finish then return nil end
+    if address < region.base or address >= region.finish then
+        if query_mutation then query_mutation(address, query_calls) end
+        return nil
+    end
+    local result
     if split_address and address >= split_address then
-        return {
+        result = {
             base = split_address, finish = region.finish,
             allocation_base = split_allocation or region.allocation_base,
             state = region.state, protect = split_protect or region.protect, type = region.type,
         }
+    else
+        result = {
+            base = region.base, finish = split_address or region.finish,
+            allocation_base = region.allocation_base, state = region.state,
+            protect = region.protect, type = region.type,
+        }
     end
-    return {
-        base = region.base, finish = split_address or region.finish,
-        allocation_base = region.allocation_base, state = region.state,
-        protect = region.protect, type = region.type,
-    }
+    if query_mutation then query_mutation(address, query_calls) end
+    return result
 end
 
 local function same_region(left, right)
@@ -125,7 +132,7 @@ local function reset_case(config)
     region.state = 0x1000
     region.type = config.region_type or 0x20000
     region.allocation_base = 0x100000
-    read_failure, read_failure_address, read_mutation = nil, nil, nil
+    read_failure, read_failure_address, read_mutation, query_mutation = nil, nil, nil, nil
     pre_setter_mutation, split_address, split_allocation = nil, nil, nil
     split_protect = nil
     mutate_after_measure = config.mutate_after_measure
@@ -370,6 +377,65 @@ local function expect_failure_diagnostic(config, expected_status, expected_code,
         "expected layout failure code " .. expected_code .. ", got " .. tostring(stats.last_failure_code))
     return stats
 end
+
+-- 三个纯读取批次各自重新合并查询；跨allocation时回退到原逐行验证。
+reset_case({head = 0, count = 3})
+local query_start = query_calls
+local batched_status, batched_snapshot = translate_layout.instance.prepare(context, target_row)
+assert(batched_status == "ready" and query_calls - query_start == 4,
+    "prepare did not use fresh merged queries for both read batches")
+query_start = query_calls
+assert(translate_layout.instance.verify_prepared(batched_snapshot) == "ready"
+    and query_calls - query_start == 2,
+    "verify_prepared did not issue its own fresh merged query")
+
+reset_case({head = 0, count = 3})
+split_address = target_row - 0x3D8
+split_allocation = 0x200000
+local split_status, split_snapshot = translate_layout.instance.prepare(context, target_row)
+assert(split_status == "ready" and split_snapshot.rows[1].allocation_base == 0x200000
+    and split_snapshot.rows[3].allocation_base == 0x100000,
+    "cross-allocation merged range did not fall back to per-row validation")
+
+-- 双查之间的区域变化必须拒绝，不能由后续逐行回退掩盖。
+reset_case({head = 0, count = 3})
+query_mutation = function(_, count)
+    if count == 1 then
+        region.protect = 0x02
+        query_mutation = nil
+    end
+end
+local changed_during_first_batch = translate_layout.instance.prepare(context, target_row)
+assert(changed_during_first_batch == "read_failed" and query_calls == 2,
+    "first read batch accepted a region change between its two queries")
+
+reset_case({head = 0, count = 3})
+read_mutation = function(address, count)
+    if address == target_row + 0x10 and count == 1 then region.protect = 0x02 end
+end
+local changed_between_batches = translate_layout.instance.prepare(context, target_row)
+assert(changed_between_batches == "read_failed"
+    and translate_layout.instance.stats().last_failure_code == 4,
+    "second read batch accepted a permission change")
+
+reset_case({head = 0, count = 3})
+read_mutation = function(address, count)
+    if address == target_row + 0x10 and count == 1 then region.allocation_base = 0x200000 end
+end
+local allocation_changed_between_batches = translate_layout.instance.prepare(context, target_row)
+assert(allocation_changed_between_batches == "read_failed"
+    and translate_layout.instance.stats().last_failure_code == 4,
+    "second read batch accepted an allocation change")
+
+reset_case({head = 0, count = 3})
+local verify_status, verify_snapshot = translate_layout.instance.prepare(context, target_row)
+assert(verify_status == "ready")
+read_mutation = function(address, count)
+    if address == manager + 0x13990 and count == 4 then region.allocation_base = 0x200000 end
+end
+assert(translate_layout.instance.verify_prepared(verify_snapshot) == "read_failed"
+    and translate_layout.instance.stats().last_failure_code == 4,
+    "verify_prepared accepted an allocation change before its fresh range check")
 
 expect_preflight_failure({context_stable = false}, "stale")
 local history_drift = expect_failure_diagnostic({head = 0}, "stale", 9, function()
