@@ -820,6 +820,300 @@ end
 '''
 
 
+STARTUP_RETENTION_CHECKS = r'''
+local ffi = require("ffi")
+ffi.cdef[[__FFI_DECL__]]
+__RETENTION_HELPER__
+
+assert(ffi.sizeof("HD2Probe_WIN32_FIND_DATAW") == 592)
+assert(ffi.offsetof("HD2Probe_WIN32_FIND_DATAW", "cFileName") == 44)
+assert(ffi.offsetof("HD2Probe_WIN32_FIND_DATAW", "cAlternateFileName") == 564)
+
+local local_app_units = {67, 58, 92, 29992, 25143, 92, 76, 111, 99, 97, 108}
+local local_app = ffi.new("HD2Probe_U16[?]", #local_app_units + 1, local_app_units)
+local local_app_text = "C:\\用户\\Local"
+local app_root = local_app_text .. "\\HD2ChatTranslate"
+local directories = {
+    [app_root] = 0x10,
+    [app_root .. "\\probe"] = 0x10,
+    [app_root .. "\\observe"] = 0x10,
+    [app_root .. "\\mailbox"] = 0x10,
+    [app_root .. "\\native"] = 0x10,
+}
+local files, find_handles, delete_log = {}, {}, {}
+local next_find_handle, closed_handles, last_error = 4096, 0, 0
+local behavior = {enum_error_directory = nil, find_error_directory = nil, delete_error_path = nil}
+local kernel = {}
+
+local function wide_text(pointer)
+    local bytes = {}
+    for index = 0, 32767 do
+        local code = tonumber(pointer[index])
+        if code == 0 then return table.concat(bytes) end
+        if code < 0x80 then
+            bytes[#bytes + 1] = string.char(code)
+        elseif code < 0x800 then
+            bytes[#bytes + 1] = string.char(0xc0 + math.floor(code / 64), 0x80 + code % 64)
+        else
+            bytes[#bytes + 1] = string.char(0xe0 + math.floor(code / 4096),
+                0x80 + math.floor(code / 64) % 64, 0x80 + code % 64)
+        end
+    end
+    return nil
+end
+
+kernel.GetEnvironmentVariableW = function(_, buffer, _)
+    for index, code in ipairs(local_app_units) do buffer[index - 1] = code end
+    buffer[#local_app_units] = 0
+    return #local_app_units
+end
+kernel.GetLastError = function() return last_error end
+kernel.GetFileAttributesW = function(path)
+    local name = wide_text(path)
+    assert(name:find("用户", 1, true), "Unicode parent path was lost")
+    if directories[name] then return directories[name] end
+    if files[name] then return files[name].attributes end
+    last_error = 2
+    return 0xffffffff
+end
+
+local function copy_find_data(destination, item)
+    destination[0].dwFileAttributes = item.attributes
+    destination[0].ftLastWriteTime.dwHighDateTime = item.high or 0
+    destination[0].ftLastWriteTime.dwLowDateTime = item.low or 0
+    for index = 0, 259 do destination[0].cFileName[index] = 0 end
+    for index = 1, #item.name do destination[0].cFileName[index - 1] = item.name:byte(index) end
+end
+
+local function enumerate_directory(directory)
+    local found, prefix = {}, directory .. "\\"
+    for path, item in pairs(files) do
+        if path:sub(1, #prefix) == prefix then
+            local name = path:sub(#prefix + 1)
+            if not name:find("\\", 1, true) then found[#found + 1] = {
+                name = name, attributes = item.attributes, high = item.high, low = item.low,
+            } end
+        end
+    end
+    for path, attributes in pairs(directories) do
+        if path:sub(1, #prefix) == prefix then
+            local name = path:sub(#prefix + 1)
+            if not name:find("\\", 1, true) then found[#found + 1] = {
+                name = name, attributes = attributes, high = 0, low = 0,
+            } end
+        end
+    end
+    table.sort(found, function(left, right) return left.name < right.name end)
+    return found
+end
+
+kernel.FindFirstFileW = function(pattern, find_data)
+    local search = wide_text(pattern)
+    local directory = search:sub(1, -3)
+    if behavior.find_error_directory == directory then last_error = 5; return ffi.cast("HD2Probe_HANDLE", -1) end
+    local entries = enumerate_directory(directory)
+    if #entries == 0 then last_error = 2; return ffi.cast("HD2Probe_HANDLE", -1) end
+    next_find_handle = next_find_handle + 1
+    local handle = ffi.cast("HD2Probe_HANDLE", next_find_handle)
+    find_handles[next_find_handle] = {directory = directory, entries = entries, index = 1}
+    copy_find_data(find_data, entries[1])
+    return handle
+end
+
+local function find_record(handle)
+    return find_handles[tonumber(ffi.cast("size_t", handle))]
+end
+
+kernel.FindNextFileW = function(handle, find_data)
+    local record = find_record(handle)
+    assert(record)
+    if behavior.enum_error_directory == record.directory then last_error = 5; return 0 end
+    if record.index >= #record.entries then last_error = 18; return 0 end
+    record.index = record.index + 1
+    copy_find_data(find_data, record.entries[record.index])
+    return 1
+end
+kernel.FindClose = function(handle)
+    local record = find_record(handle)
+    if not record then return 0 end
+    record.closed = true
+    closed_handles = closed_handles + 1
+    return 1
+end
+kernel.DeleteFileW = function(path)
+    local name = wide_text(path)
+    delete_log[#delete_log + 1] = name
+    if behavior.delete_error_path == name or files[name] == nil then return 0 end
+    files[name] = nil
+    return 1
+end
+
+local function clear_files()
+    for path in pairs(files) do files[path] = nil end
+    delete_log = {}
+    behavior.enum_error_directory = nil
+    behavior.find_error_directory = nil
+    behavior.delete_error_path = nil
+end
+
+local function put_file(directory, name, high, low, attributes)
+    local path = directory .. "\\" .. name
+    files[path] = {attributes = attributes or 0x80, high = high or 0, low = low or 0}
+    return path
+end
+
+local function probe_name(epoch)
+    return string.format("chat-probe-%d-%08x-%08x-%02d.json", epoch, epoch, epoch, epoch)
+end
+local function observe_name(epoch)
+    return string.format("chat-observe-%d-%08x.json", epoch, epoch)
+end
+local function mailbox_name(epoch)
+    return string.format("chat-translate-hd2ct_%d_%08x.json", epoch, epoch)
+end
+local function count_matching(directory, pattern)
+    local total = 0
+    for path, item in pairs(files) do
+        if path:sub(1, #directory + 1) == directory .. "\\"
+            and path:sub(#directory + 2):match(pattern)
+            and math.floor(item.attributes / 0x10) % 2 == 0
+            and math.floor(item.attributes / 0x40) % 2 == 0
+            and math.floor(item.attributes / 0x400) % 2 == 0 then total = total + 1 end
+    end
+    return total
+end
+local function was_deleted(path)
+    for _, deleted in ipairs(delete_log) do if deleted == path then return true end end
+    return false
+end
+
+local probe_dir, observe_dir, mailbox_dir = app_root .. "\\probe", app_root .. "\\observe", app_root .. "\\mailbox"
+local foreign_probe = put_file(probe_dir, "foreign.json", 9, 9)
+local partial_probe = put_file(probe_dir, "chat-probe-99-00000001-00000002-01.json.partial", 9, 9)
+local temp_probe = put_file(probe_dir, "chat-probe-99-00000001-00000002-01.json.tmp", 9, 9)
+local directory_probe = probe_dir .. "\\chat-probe-98-00000001-00000002-01.json"
+directories[directory_probe] = 0x10
+local reparse_probe = put_file(probe_dir, "chat-probe-97-00000001-00000002-01.json", 9, 9, 0x400)
+local probe_oldest, probe_second
+for index = 1, 11 do
+    local epoch = 100 - index
+    local high = index == 1 and 1 or 2
+    local low = index == 1 and 0xffffffff or index - 2
+    local path = put_file(probe_dir, probe_name(epoch), high, low)
+    if index == 1 then probe_oldest = path elseif index == 2 then probe_second = path end
+end
+for index = 1, 10 do put_file(observe_dir, observe_name(index), 3, index) end
+local mailbox_ties = {}
+for index = 1, 11 do mailbox_ties[index] = put_file(mailbox_dir, mailbox_name(index), 4, 7) end
+table.sort(mailbox_ties)
+local config_file = put_file(app_root, "config.json", 8, 8)
+local bridge_file = put_file(mailbox_dir, "bridge.flag", 8, 8)
+local request_file = put_file(mailbox_dir, "request.txt", 8, 8)
+local response_file = put_file(mailbox_dir, "response.txt", 8, 8)
+local native_file = put_file(app_root .. "\\native", "transport.dll", 8, 8)
+
+local first = startup_report_retention.run(ffi, kernel, false, false)
+assert(first.groups_checked == 3 and first.groups_skipped == 0)
+assert(first.files_removed == 3 and first.delete_failures == 0)
+assert(was_deleted(probe_oldest) and was_deleted(probe_second), "FILETIME high/low order was ignored")
+assert(was_deleted(mailbox_ties[1]), "equal FILETIME did not use descending filename as a stable tie-break")
+assert(not was_deleted(foreign_probe) and not was_deleted(partial_probe) and not was_deleted(temp_probe))
+assert(not was_deleted(directory_probe) and not was_deleted(reparse_probe))
+assert(not was_deleted(config_file) and not was_deleted(bridge_file) and not was_deleted(request_file)
+    and not was_deleted(response_file) and not was_deleted(native_file))
+assert(count_matching(probe_dir, "^chat%-probe%-.+%.json$") == 9)
+assert(count_matching(observe_dir, "^chat%-observe%-.+%.json$") == 10)
+assert(count_matching(mailbox_dir, "^chat%-translate%-hd2ct_.+%.json$") == 10)
+assert(closed_handles == 3, "FindClose was not called for each complete enumeration")
+
+clear_files()
+directories[directory_probe] = nil
+local empty_directories = startup_report_retention.run(ffi, kernel, false, false)
+assert(empty_directories.groups_checked == 3 and empty_directories.files_removed == 0)
+directories[observe_dir] = nil
+local missing_directory = startup_report_retention.run(ffi, kernel, false, false)
+assert(missing_directory.groups_checked == 2 and missing_directory.groups_skipped == 0)
+directories[observe_dir] = 0x10
+
+for index = 1, 10 do
+    put_file(probe_dir, probe_name(index), 5, index)
+    put_file(observe_dir, observe_name(index), 5, index)
+    put_file(mailbox_dir, mailbox_name(index), 5, index)
+end
+local observe_reserved = startup_report_retention.run(ffi, kernel, true, false)
+assert(observe_reserved.files_removed == 2)
+assert(count_matching(probe_dir, "^chat%-probe%-.+%.json$") == 9)
+assert(count_matching(observe_dir, "^chat%-observe%-.+%.json$") == 9)
+assert(count_matching(mailbox_dir, "^chat%-translate%-hd2ct_.+%.json$") == 10)
+put_file(probe_dir, probe_name(50), 6, 0)
+put_file(observe_dir, observe_name(50), 6, 0)
+local translate_reserved = startup_report_retention.run(ffi, kernel, true, true)
+assert(translate_reserved.files_removed == 2)
+assert(count_matching(probe_dir, "^chat%-probe%-.+%.json$") == 9)
+assert(count_matching(observe_dir, "^chat%-observe%-.+%.json$") == 10)
+assert(count_matching(mailbox_dir, "^chat%-translate%-hd2ct_.+%.json$") == 9)
+put_file(probe_dir, probe_name(51), 7, 0)
+put_file(mailbox_dir, mailbox_name(51), 7, 0)
+assert(count_matching(probe_dir, "^chat%-probe%-.+%.json$") == 10)
+assert(count_matching(observe_dir, "^chat%-observe%-.+%.json$") == 10)
+assert(count_matching(mailbox_dir, "^chat%-translate%-hd2ct_.+%.json$") == 10)
+
+clear_files()
+local incomplete_old
+for index = 1, 12 do
+    put_file(probe_dir, probe_name(index), 8, index)
+    local path = put_file(observe_dir, observe_name(index), 8, index)
+    if index == 1 then incomplete_old = path end
+end
+behavior.enum_error_directory = observe_dir
+local incomplete = startup_report_retention.run(ffi, kernel, false, false)
+assert(incomplete.groups_skipped == 1 and not was_deleted(incomplete_old),
+    "partial enumeration deleted entries from its group")
+local closed_after_incomplete = closed_handles
+assert(closed_after_incomplete >= 6, "FindClose did not run after an enumeration error")
+
+clear_files()
+for index = 1, 12 do put_file(observe_dir, observe_name(index), 8, index) end
+behavior.find_error_directory = observe_dir
+local denied = startup_report_retention.run(ffi, kernel, false, false)
+assert(denied.groups_skipped == 1 and #delete_log == 0,
+    "permission failure was not skipped for its group")
+
+clear_files()
+local failed_delete
+for index = 1, 11 do
+    local path = put_file(mailbox_dir, mailbox_name(index), 9, index)
+    if index == 1 then failed_delete = path end
+end
+behavior.delete_error_path = failed_delete
+local delete_failed = startup_report_retention.run(ffi, kernel, false, false)
+assert(delete_failed.delete_failures == 1 and was_deleted(failed_delete) and files[failed_delete] ~= nil)
+assert(find_handles[next_find_handle].closed and closed_handles >= closed_after_incomplete + 1,
+    "enumeration handle stayed open after delete failure")
+
+clear_files()
+for index = 1, 12 do put_file(observe_dir, observe_name(index), 10, index) end
+directories[observe_dir] = 0x410
+local reparse_directory = startup_report_retention.run(ffi, kernel, false, false)
+assert(reparse_directory.groups_skipped == 1 and #delete_log == 0,
+    "reparse-point report directory was enumerated")
+directories[observe_dir] = 0x10
+directories[app_root] = 0x410
+local reparse_root = startup_report_retention.run(ffi, kernel, false, false)
+assert(reparse_root.groups_skipped == 3 and #delete_log == 0,
+    "reparse-point application root was enumerated")
+directories[app_root] = 0x10
+
+local throwing_kernel = setmetatable({
+    GetFileAttributesW = function() error("mock permission failure") end,
+}, {__index = kernel})
+local startup_survived = pcall(startup_report_retention.run, ffi, throwing_kernel, false, false)
+assert(not startup_survived, "throwing Win32 mock did not reach the initializer pcall boundary")
+
+RESULT = "startup retention mock checks ok"
+'''
+
+
 class ChatTranslateAdapterTests(unittest.TestCase):
     """用LuaJIT内存页和纯内存Win32文件mock测试受限adapter。"""
 
@@ -836,7 +1130,8 @@ class ChatTranslateAdapterTests(unittest.TestCase):
         self.assertIsNotNone(declaration)
         self.assertIsNotNone(budget)
 
-        wide_start = source.index("    local function append_wide_ascii(")
+        initialize_start = source.index("local function initialize_probe()")
+        wide_start = source.index("    local function append_wide_ascii(", initialize_start)
         wide_end = source.index("    local function prepare_observer_paths(", wide_start)
         adapter_start = source.index("    local function new_observer_scratch()")
         adapter_end = source.index("    local adapter = {\n        hash_file", adapter_start)
@@ -952,6 +1247,29 @@ end
         self.assertEqual(result["failed_race_status"], "disabled")
         self.assertEqual(result["stale_results"], ["stale", "stale", "stale", "stale", "stale"])
         self.assertLessEqual(result["report_bytes"], 64 * 1024)
+
+        self.assertEqual(source.count("startup_report_retention.run"), 1)
+        retention_start = source.index("--[[HD2_STARTUP_REPORT_RETENTION_BEGIN]]")
+        retention_end = source.index("--[[HD2_STARTUP_REPORT_RETENTION_END]]", retention_start)
+        retention_helper = source[retention_start:retention_end]
+        retention_script = STARTUP_RETENTION_CHECKS.replace(
+            "__FFI_DECL__", declaration.group(1)
+        ).replace(
+            "__RETENTION_HELPER__", retention_helper
+        )
+        try:
+            retention_result = self.lua.run(retention_script)
+        except RuntimeError as exc:
+            line_match = re.search(r"\]:([0-9]+):", str(exc))
+            if line_match:
+                line_number = int(line_match.group(1))
+                excerpt = "\n".join(
+                    f"{index}: {retention_script.splitlines()[index - 1]}"
+                    for index in range(max(1, line_number - 3), min(len(retention_script.splitlines()), line_number + 2) + 1)
+                )
+                raise RuntimeError(f"{exc}\nRetention Lua near failure:\n{excerpt}") from exc
+            raise
+        self.assertEqual(retention_result, "startup retention mock checks ok")
 
 
 

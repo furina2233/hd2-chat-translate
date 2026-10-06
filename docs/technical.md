@@ -71,6 +71,12 @@ Lua FFI 的 BY_HANDLE_FILE_INFORMATION 定义为 52 字节，并核对 dwVolumeS
 
 Arsenal manifest Guid 固定为 a741d044-972b-4dc5-b08e-1a68441e1d7f，patch 文件名为 9ba626afa44a3aa3.patch_0。构建时保留这两个身份值，以便导入新 ZIP 时更新同名模组。Lua resource 名为 mods/hd2chat/HD2ChatTranslate，加载器依据此标识发现 addon。
 
+## 启动日志保留
+
+初始化时仅清理 `%LOCALAPPDATA%\HD2ChatTranslate` 下三种已发布的 JSON 报告：`probe/chat-probe-*.json`、`observe/chat-observe-*.json` 和 `mailbox/chat-translate-hd2ct_*.json`。各类独立按最后写入时间降序保留 10 个，同时间以文件名确定顺序；即将生成本次会话报告的类别先保留 9 个。会话内同类报告使用固定文件名更新，不增加文件数量。
+
+枚举和删除使用 UTF-16 Win32 API；`WIN32_FIND_DATAW` 大小为 592 字节，文件名偏移为 44。只处理名称完整匹配的普通文件，拒绝目录和 reparse point，不递归，不删除 `.partial`、`.tmp`、配置、通信文件或原生 DLL。枚举不完整时不删除该类文件；删除失败或清理异常会被捕获，不中断插件。清理不进入逐帧或状态报告更新路径。
+
 ## 状态报告字段
 
 独立包报告 schema_version 为 1，mode 为 standalone，transport 为 in_process_winhttp。status 可为 target_unverified、inactive、baseline、ready、pending、applying 或 stopped；code 仅包含固定状态原因。counters 是白名单计数，不含聊天正文、URL 或密钥。常见字段包括 submitted、translations_ready、error_displays_ready、apply_confirmed、slot_event_filtered；pending_count 上限为 32，baseline_remaining 上限为 64。

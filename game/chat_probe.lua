@@ -3,6 +3,191 @@ local core = (function()
 --[[HD2_CHAT_PROBE_CORE]]
 end)()
 
+--[[HD2_STARTUP_REPORT_RETENTION_BEGIN]]
+local startup_report_retention = (function()
+    local FILE_ATTRIBUTE_DIRECTORY = 0x10
+    local FILE_ATTRIBUTE_DEVICE = 0x40
+    local FILE_ATTRIBUTE_REPARSE_POINT = 0x400
+    local INVALID_FILE_ATTRIBUTES = 0xffffffff
+    local ERROR_FILE_NOT_FOUND = 2
+    local ERROR_PATH_NOT_FOUND = 3
+    local ERROR_NO_MORE_FILES = 18
+    local groups = {
+        {directory = "probe", pattern = "^chat%-probe%-%d+%-%x+%-%x+%-%d+%.json$", reserve = "always"},
+        {directory = "observe", pattern = "^chat%-observe%-%d+%-%x+%.json$", reserve = "observe"},
+        {directory = "mailbox", pattern = "^chat%-translate%-hd2ct_%d+_%x+%.json$", reserve = "translate"},
+    }
+
+    local function append_wide_ascii(ffi, base, base_length, suffix)
+        if type(base_length) ~= "number" or base_length < 1 or base_length ~= math.floor(base_length)
+            or type(suffix) ~= "string" or suffix:find("[^%w_%.%-%*\\]")
+            or base_length + #suffix + 1 > 32768 then return nil end
+        local output = ffi.new("HD2Probe_U16[?]", base_length + #suffix + 1)
+        ffi.copy(output, base, base_length * 2)
+        for index = 1, #suffix do output[base_length + index - 1] = suffix:byte(index) end
+        output[base_length + #suffix] = 0
+        return output
+    end
+
+    local function wide_ascii_name(pointer)
+        local bytes = {}
+        for index = 0, 259 do
+            local code = tonumber(pointer[index])
+            if code == 0 then return table.concat(bytes) end
+            if not code or code < 0x20 or code > 0x7e then return nil end
+            bytes[#bytes + 1] = string.char(code)
+        end
+        return nil
+    end
+
+    local function matching_name(group, name)
+        if type(name) ~= "string" or name == "" or name:find("/", 1, true)
+            or name:find("\\", 1, true) or name:find("..", 1, true) then return false end
+        return name:match(group.pattern) ~= nil
+    end
+
+    local function file_attributes(ffi, kernel, path)
+        local value = tonumber(kernel.GetFileAttributesW(path))
+        if not value or value == INVALID_FILE_ATTRIBUTES or value == -1 then
+            return nil, tonumber(kernel.GetLastError())
+        end
+        return value
+    end
+
+    local function ordinary_file(attributes)
+        return attributes and attributes ~= INVALID_FILE_ATTRIBUTES
+            and math.floor(attributes / FILE_ATTRIBUTE_DIRECTORY) % 2 == 0
+            and math.floor(attributes / FILE_ATTRIBUTE_REPARSE_POINT) % 2 == 0
+            and math.floor(attributes / FILE_ATTRIBUTE_DEVICE) % 2 == 0
+    end
+
+    local function safe_directory(attributes)
+        return attributes and attributes ~= INVALID_FILE_ATTRIBUTES
+            and math.floor(attributes / FILE_ATTRIBUTE_DIRECTORY) % 2 == 1
+            and math.floor(attributes / FILE_ATTRIBUTE_REPARSE_POINT) % 2 == 0
+    end
+
+    local function missing_path(error_code)
+        return error_code == ERROR_FILE_NOT_FOUND or error_code == ERROR_PATH_NOT_FOUND
+    end
+
+    local function retain_group(ffi, kernel, app_root, root_length, group, keep, summary)
+        local directory = append_wide_ascii(ffi, app_root, root_length, "\\" .. group.directory)
+        if not directory then return "skipped" end
+        local directory_attributes, directory_error = file_attributes(ffi, kernel, directory)
+        if not directory_attributes then return missing_path(directory_error) and "absent" or "skipped" end
+        if not safe_directory(directory_attributes) then return "skipped" end
+
+        local search = append_wide_ascii(ffi, directory, root_length + #group.directory + 1, "\\*")
+        if not search then return "skipped" end
+        local find_data = ffi.new("HD2Probe_WIN32_FIND_DATAW[1]")
+        local find_ok, handle = pcall(kernel.FindFirstFileW, search, find_data)
+        if not find_ok then return "skipped" end
+        local invalid_handle = ffi.cast("HD2Probe_HANDLE", -1)
+        if handle == nil or handle == ffi.NULL or handle == invalid_handle then
+            local error_ok, error_code = pcall(kernel.GetLastError)
+            if error_ok and tonumber(error_code) == ERROR_FILE_NOT_FOUND then return "checked" end
+            return "skipped"
+        end
+
+        local enumeration_ok, complete, entries = pcall(function()
+            local found = {}
+            local function capture_current()
+                local name = wide_ascii_name(find_data[0].cFileName)
+                if not matching_name(group, name) then return true end
+                local enumerated_attributes = tonumber(find_data[0].dwFileAttributes)
+                if not ordinary_file(enumerated_attributes) then return true end
+                local path = append_wide_ascii(ffi, directory, root_length + #group.directory + 1,
+                    "\\" .. name)
+                if not path then return false end
+                local current_attributes = file_attributes(ffi, kernel, path)
+                if not current_attributes then return false end
+                if ordinary_file(current_attributes) then
+                    found[#found + 1] = {
+                        name = name,
+                        high = tonumber(find_data[0].ftLastWriteTime.dwHighDateTime),
+                        low = tonumber(find_data[0].ftLastWriteTime.dwLowDateTime),
+                    }
+                end
+                return true
+            end
+
+            if not capture_current() then return false, nil end
+            while true do
+                local next_result = kernel.FindNextFileW(handle, find_data)
+                if next_result == 0 then
+                    return tonumber(kernel.GetLastError()) == ERROR_NO_MORE_FILES, found
+                end
+                if not capture_current() then return false, nil end
+            end
+        end)
+        local close_ok, close_result = pcall(kernel.FindClose, handle)
+        if not enumeration_ok or complete ~= true or not close_ok or close_result == 0 then
+            return "skipped"
+        end
+
+        table.sort(entries, function(left, right)
+            if left.high ~= right.high then return left.high > right.high end
+            if left.low ~= right.low then return left.low > right.low end
+            return left.name > right.name
+        end)
+        for index = keep + 1, #entries do
+            local path = append_wide_ascii(ffi, directory, root_length + #group.directory + 1,
+                "\\" .. entries[index].name)
+            local current_attributes = path and file_attributes(ffi, kernel, path) or nil
+            if not ordinary_file(current_attributes) or kernel.DeleteFileW(path) == 0 then
+                summary.delete_failures = summary.delete_failures + 1
+            else
+                summary.files_removed = summary.files_removed + 1
+            end
+        end
+        return "checked"
+    end
+
+    local function run(ffi, kernel, observe_enabled, translate_enabled)
+        local summary = {groups_checked = 0, groups_skipped = 0, files_removed = 0, delete_failures = 0}
+        local environment_name = ffi.new("HD2Probe_U16[13]")
+        local environment_value = "LOCALAPPDATA"
+        for index = 1, #environment_value do environment_name[index - 1] = environment_value:byte(index) end
+        local local_app = ffi.new("HD2Probe_U16[32768]")
+        local local_app_length = tonumber(kernel.GetEnvironmentVariableW(environment_name, local_app, 32768))
+        if not local_app_length or local_app_length == 0 or local_app_length >= 32768 then
+            summary.groups_skipped = #groups
+            return summary
+        end
+
+        local app_root = append_wide_ascii(ffi, local_app, local_app_length, "\\HD2ChatTranslate")
+        if not app_root then summary.groups_skipped = #groups; return summary end
+        local app_root_length = local_app_length + #"\\HD2ChatTranslate"
+        local root_attributes, root_error = file_attributes(ffi, kernel, app_root)
+        if not root_attributes then
+            if not missing_path(root_error) then summary.groups_skipped = #groups end
+            return summary
+        end
+        if not safe_directory(root_attributes) then summary.groups_skipped = #groups; return summary end
+
+        for _, group in ipairs(groups) do
+            local keep = 10
+            if group.reserve == "always"
+                or (group.reserve == "observe" and observe_enabled and not translate_enabled)
+                or (group.reserve == "translate" and translate_enabled) then
+                keep = 9
+            end
+            local ok, outcome = pcall(retain_group, ffi, kernel, app_root, app_root_length,
+                group, keep, summary)
+            if not ok or outcome == "skipped" then
+                summary.groups_skipped = summary.groups_skipped + 1
+            elseif outcome == "checked" then
+                summary.groups_checked = summary.groups_checked + 1
+            end
+        end
+        return summary
+    end
+
+    return {run = run}
+end)()
+--[[HD2_STARTUP_REPORT_RETENTION_END]]
+
 local OBSERVE_ENABLED = false --[[HD2_CHAT_OBSERVER_ENABLED]]
 local DISPLAY_TEST_ENABLED = false --[[HD2_CHAT_DISPLAY_TEST_ENABLED]]
 local TRANSLATE_ENABLED = false --[[HD2_CHAT_TRANSLATE_ENABLED]]
@@ -493,6 +678,22 @@ local function initialize_probe()
             HD2Probe_U32 nFileIndexHigh;
             HD2Probe_U32 nFileIndexLow;
         } HD2Probe_BY_HANDLE_FILE_INFORMATION;
+        typedef struct HD2Probe_FILETIME {
+            HD2Probe_U32 dwLowDateTime;
+            HD2Probe_U32 dwHighDateTime;
+        } HD2Probe_FILETIME;
+        typedef struct HD2Probe_WIN32_FIND_DATAW {
+            HD2Probe_U32 dwFileAttributes;
+            HD2Probe_FILETIME ftCreationTime;
+            HD2Probe_FILETIME ftLastAccessTime;
+            HD2Probe_FILETIME ftLastWriteTime;
+            HD2Probe_U32 nFileSizeHigh;
+            HD2Probe_U32 nFileSizeLow;
+            HD2Probe_U32 dwReserved0;
+            HD2Probe_U32 dwReserved1;
+            HD2Probe_U16 cFileName[260];
+            HD2Probe_U16 cAlternateFileName[14];
+        } HD2Probe_WIN32_FIND_DATAW;
 
         HD2Probe_HANDLE GetCurrentProcess(void);
         HD2Probe_HMODULE GetModuleHandleA(const char *module_name);
@@ -505,6 +706,10 @@ local function initialize_probe()
         HD2Probe_SIZE_T VirtualQuery(const void *address, HD2Probe_MEMORY_BASIC_INFORMATION *information, HD2Probe_SIZE_T information_size);
         int ReadProcessMemory(HD2Probe_HANDLE process, const void *address, void *buffer, HD2Probe_SIZE_T length, HD2Probe_SIZE_T *bytes_read);
         HD2Probe_HANDLE CreateFileW(const HD2Probe_U16 *path, HD2Probe_U32 access, HD2Probe_U32 share_mode, void *security, HD2Probe_U32 creation, HD2Probe_U32 attributes, HD2Probe_HANDLE template_file);
+        HD2Probe_HANDLE FindFirstFileW(const HD2Probe_U16 *pattern, HD2Probe_WIN32_FIND_DATAW *find_data);
+        int FindNextFileW(HD2Probe_HANDLE find, HD2Probe_WIN32_FIND_DATAW *find_data);
+        int FindClose(HD2Probe_HANDLE find);
+        HD2Probe_U32 GetFileAttributesW(const HD2Probe_U16 *path);
         int ReadFile(HD2Probe_HANDLE file, void *buffer, HD2Probe_U32 length, HD2Probe_U32 *bytes_read, void *overlapped);
         int CloseHandle(HD2Probe_HANDLE handle);
         int CreateDirectoryA(const char *path, void *security);
@@ -525,6 +730,14 @@ local function initialize_probe()
     ]]
 
     local kernel = ffi.load("kernel32.dll")
+    local retention_ok, retention_summary = pcall(
+        startup_report_retention.run, ffi, kernel, OBSERVE_ENABLED, TRANSLATE_ENABLED)
+    if not retention_ok then
+        pcall(print, "[HD2 Chat Probe] local report retention skipped")
+    elseif retention_summary.groups_skipped > 0 or retention_summary.delete_failures > 0 then
+        pcall(print, "[HD2 Chat Probe] local report retention partial; skipped groups / delete failures / removed files:",
+            retention_summary.groups_skipped, retention_summary.delete_failures, retention_summary.files_removed)
+    end
     local bcrypt = ffi.load("bcrypt.dll")
     local module = kernel.GetModuleHandleA("game.dll")
     if module == nil then error("game.dll is not loaded") end
