@@ -505,8 +505,7 @@ static void hd2ct_process_job(HINTERNET session, const HD2CT_WorkerJob *job)
         hd2ct_error_is(result, result_bytes, "RATE_LIMITED")) {
         hd2ct_set_request_status(hd2ct_status_from_result(result, result_bytes));
     }
-    if (successful && job->adapter_id == HD2CT_ADAPTER_AI &&
-        result_bytes >= 3u && memcmp(result, "OK\n", 3u) == 0 &&
+    if (successful && result_bytes >= 3u && memcmp(result, "OK\n", 3u) == 0 &&
         result_bytes - 3u == job->source_bytes &&
         memcmp(result + 3u, job->source, job->source_bytes) == 0) {
         memcpy(result, "SKIP\n", 5u);

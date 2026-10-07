@@ -979,7 +979,7 @@ class NativeHttpWorkerTests(unittest.TestCase):
                 {"op": "wait", "token": "baidu-chinese-same"},
             ],
         )
-        self.assertEqual(preserved["actions"][1]["result"], "OK\n" + same_chinese)
+        self.assertEqual(preserved["actions"][1]["result"], "SKIP\n")
 
         self.state.clear()
         self.state.response = baidu_response(("ignored",), error_code=54003)
@@ -1065,7 +1065,7 @@ class NativeHttpWorkerTests(unittest.TestCase):
                 {"op": "wait", "token": "youdao-chinese-same"},
             ],
         )
-        self.assertEqual(preserved["actions"][1]["result"], "OK\n" + same_chinese)
+        self.assertEqual(preserved["actions"][1]["result"], "SKIP\n")
 
         self.state.clear()
         self.state.response = youdao_response("ignored", error_code="401")
@@ -1190,10 +1190,11 @@ class NativeHttpWorkerTests(unittest.TestCase):
             ],
             model="",
         )
-        self.assertEqual(same_chinese["actions"][1]["result"], "OK\n" + chinese)
-        self.assertEqual(same_chinese["actions"][3]["result"], "OK\n" + chinese)
+        self.assertEqual(same_chinese["actions"][1]["result"], "SKIP\n")
+        self.assertEqual(same_chinese["actions"][3]["result"], "SKIP\n")
         self.assertEqual(self.state.paths, ["/google/custom"])
         self.assertEqual(len(self.state.payloads), 1)
+        self.assertEqual(same_chinese["cache_count"], 1)
 
         stale_app_id = {
             "HD2CT_API_URL": self.url + "/Google/custom",

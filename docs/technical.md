@@ -57,7 +57,7 @@ AI 适配器把地址根路径补全为 /chat/completions，或把精确的 /v1�
 
 AI Chat Completions 请求 JSON 含 model、temperature=0、reasoning_effort="none"、response_format.type=json_object 及 system/user 两条 messages。每次请求都显式指定思考强度为 none。聊天正文单独放在 user message；提示词常量 HD2CT_SYSTEM_PROMPT 位于 [native/adapter/chat_completions.c](../native/adapter/chat_completions.c)。它要求中文原样保留、其他语言翻为简短自然的简体中文，并要求 JSON 仅含 is_chinese 和 translation。当前规则包含常见缩写、游戏术语和敌名映射，例如 Charger=牛、Spore Charger=孢子牛；不对 gg 或 ggs 加特例。
 
-响应读取 Chat Completions 的 choices[0].message.content，并要求其为只含 is_chinese(bool) 与 translation(string) 的 JSON 对象。若 is_chinese 为 true，C 向 Lua 返回保持原文结果；否则 translation 必须是合法 UTF-8、非空且不超过 16,384 字节。AI 的译文与原文相同时也由 C 决定保持原文。
+响应读取 Chat Completions 的 choices[0].message.content，并要求其为只含 is_chinese(bool) 与 translation(string) 的 JSON 对象。若 is_chinese 为 true，C 向 Lua 返回保持原文结果；否则 translation 必须是合法 UTF-8、非空且不超过 16,384 字节。所有翻译方式的译文与原文完全相同时也由 C 决定保持原文。
 
 ## 原生任务接口
 
@@ -69,7 +69,7 @@ ABI 2 的 DLL 只导出三个函数，签名见 [client.h](../native/client.h)�
 | `HD2CT_Poll(token, out, capacity, written)` | 非阻塞轮询；返回 1 时写入结果，written 不含末尾 NUL。未完成、token 不存在、锁忙或缓冲区不足返回 0。读取结果后由调用方取消该 token 以释放槽位。 |
 | `HD2CT_Cancel(token)` | 取消任务或释放已完成槽位；token 不存在也返回 1，单项取消遇锁忙返回 0，可重试。传入 NULL 取消全部当前任务，锁忙时由 C 记录并延后处理，保留服务配置与工作线程。 |
 
-结果统一为 `OK\n译文`、精确的 `SKIP\n` 或 `ERR\n固定错误码`。Lua 对 OK 组合“原文 + 换行 + 译文： + 译文”，对 SKIP 保留原文并结束任务，对 ERR 显示短提示，不依据翻译方式或文本相等作决定。显式停用返回 SKIP；缺少配置、配置无效和后台初始化失败经 Poll 返回固定错误，已接收任务不因这些失败而丢失。
+结果统一为 `OK\n译文`、精确的 `SKIP\n` 或 `ERR\n固定错误码`。Lua 对 OK 组合“原文 + 换行 + 译文： + 译文”，对 SKIP 保留原文并结束任务，对 ERR 显示短提示，不依据翻译方式或文本相等作决定。C 对服务响应解析后的 UTF-8 译文和原文按字节长度及内容作精确比较，相同则返回 SKIP，不去除空白、转换大小写或做 Unicode 归一化。显式停用返回 SKIP；缺少配置、配置无效和后台初始化失败经 Poll 返回固定错误，已接收任务不因这些失败而丢失。
 
 后台初始化在普通线程中执行，不在 DllMain 中读取注册表或执行网络工作。初始化完成后，有效服务启动两个 WinHTTP worker；停用或无效配置不启动网络服务。Lua 的心跳只表示传输模块已加载且本地时钟有效。异常、结束或复用 Lua 实例时，通过取消接口清理任务；C 服务生命周期和环境变量开关独立管理。
 
@@ -85,7 +85,7 @@ ABI 2 的 DLL 只导出三个函数，签名见 [client.h](../native/client.h)�
 
 有道 input 按 Unicode 码点计数：最多 20 个码点时为完整 q，否则为前 10 个码点、十进制码点总数、后 10 个码点。签名使用尚未 URL 编码的 UTF-8 文本，表单各字段随后编码；curtime 为 UTC Unix 秒。签名及随机 salt 使用 Windows BCrypt。
 
-机器翻译不发送 AI 提示词；Google 省略 source 参数启用自动检测，百度、有道使用 from=auto。有道 strict=true 保证按指定目标处理，避免默认自动中译英。成功结果保留服务实际返回的译文，不按源语言字段替换为原文，即使译文与原文相同也返回 OK。缓存保存完整的 OK 或 SKIP 结果，命中时保持同一显示决定。
+机器翻译不发送 AI 提示词；Google 省略 source 参数启用自动检测，百度、有道使用 from=auto。有道 strict=true 保证按指定目标处理，避免默认自动中译英。成功结果按实际译文与原文比较，不按源语言字段替换为原文；完全相同返回 SKIP，不同返回 OK。缓存保存完整的 OK 或 SKIP 结果，命中时保持同一显示决定。
 
 三家文本接口的公开文档没有给出自动检测同语种时可用于确定源文本为中文的专用错误码。[Google 文档](https://docs.cloud.google.com/translate/docs/languages)的同语言限制位于 AutoML 自定义模型范围，不能用于断言 Basic v2 的自动检测行为；百度 58001、有道 102 都可能表示其他不支持的语言。因此按实际响应判断成功或失败，通用语言错误显示短提示，不据此吞掉消息。同语种服务端响应需用有效凭据另行实测，离线回环只验证适配器解析与显示规则。
 
