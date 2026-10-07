@@ -14,8 +14,24 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_DLL = ROOT / "artifacts" / "native" / "hd2ct_http.dll"
-SOURCE = ROOT / "native" / "hd2ct_http.c"
-CJSON_SOURCE = ROOT / "native" / "vendor" / "cjson" / "cJSON.c"
+NATIVE_DIR = ROOT / "native"
+NATIVE_SOURCES = (
+    NATIVE_DIR / "hd2ct_http.c",
+    NATIVE_DIR / "hd2ct_http_common.c",
+    NATIVE_DIR / "hd2ct_http_config.c",
+    NATIVE_DIR / "hd2ct_http_adapters.c",
+    NATIVE_DIR / "hd2ct_http_ai.c",
+    NATIVE_DIR / "hd2ct_http_google.c",
+    NATIVE_DIR / "hd2ct_http_baidu.c",
+    NATIVE_DIR / "hd2ct_http_youdao.c",
+    NATIVE_DIR / "hd2ct_http_transport.c",
+    NATIVE_DIR / "vendor" / "cjson" / "cJSON.c",
+)
+NATIVE_HEADERS = (
+    NATIVE_DIR / "hd2ct_http.h",
+    NATIVE_DIR / "hd2ct_http_internal.h",
+    NATIVE_DIR / "vendor" / "cjson" / "cJSON.h",
+)
 ALLOWED_IMPORTS = {
     "ADVAPI32.DLL",
     "BCRYPT.DLL",
@@ -114,8 +130,13 @@ def main() -> int:
     metadata = args.meta.resolve() if args.meta else output.with_name("hd2ct_http.meta.json")
     compiler = resolve_tool(args.cc)
     objdump = resolve_objdump(compiler, args.objdump)
-    if not SOURCE.is_file() or not CJSON_SOURCE.is_file():
-        raise RuntimeError("原生源码或已固定版本的 cJSON 源文件缺失")
+    missing_sources = [path for path in NATIVE_SOURCES if not path.is_file()]
+    missing_headers = [path for path in NATIVE_HEADERS if not path.is_file()]
+    if missing_sources or missing_headers:
+        missing = [*missing_sources, *missing_headers]
+        raise RuntimeError(
+            "原生源码或头文件缺失：" + ", ".join(str(path.relative_to(ROOT)) for path in missing)
+        )
     output.parent.mkdir(parents=True, exist_ok=True)
     metadata.parent.mkdir(parents=True, exist_ok=True)
     command = [
@@ -132,8 +153,7 @@ def main() -> int:
         "-DCJSON_NESTING_LIMIT=32",
         "-DCJSON_HIDE_SYMBOLS",
         "-Wl,--exclude-all-symbols",
-        str(SOURCE),
-        str(CJSON_SOURCE),
+        *(str(source) for source in NATIVE_SOURCES),
         "-o",
         str(output),
         "-lwinhttp",
@@ -162,8 +182,14 @@ def main() -> int:
         raise RuntimeError("DLL 缺少预期的 WinHTTP、注册表、BCrypt 或 Windows CRT 系统导入")
     exports = exported_names(output, objdump)
     missing = REQUIRED_EXPORTS - exports
-    if missing:
-        raise RuntimeError(f"DLL 缺少 ABI 导出：{', '.join(sorted(missing))}")
+    unexpected_exports = exports - REQUIRED_EXPORTS
+    if missing or unexpected_exports or len(exports) != len(REQUIRED_EXPORTS):
+        details = []
+        if missing:
+            details.append(f"缺少：{', '.join(sorted(missing))}")
+        if unexpected_exports:
+            details.append(f"多出：{', '.join(sorted(unexpected_exports))}")
+        raise RuntimeError("DLL 导出必须恰好保留 9 个 ABI 名称；" + "；".join(details))
     compiler_version = run([str(compiler), "--version"]).splitlines()[0]
     binary = output.read_bytes()
     manifest = {

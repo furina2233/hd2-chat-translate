@@ -19,6 +19,11 @@ from urllib.parse import parse_qs
 ROOT = Path(__file__).resolve().parents[1]
 BUILD_SCRIPT = ROOT / "tools" / "build_native_http.py"
 WINDOWS = os.name == "nt"
+sys.path.insert(0, str(ROOT / "tools"))
+import build_native_http
+
+NATIVE_SOURCES = build_native_http.NATIVE_SOURCES
+NATIVE_TEST_ROOT = ROOT / "artifacts" / "validation"
 
 CHILD = r"""
 import ctypes
@@ -282,7 +287,7 @@ typedef struct FixtureRegistryValue {
 
 static FixtureRegistryValue fixture_values[FIXTURE_VALUE_COUNT];
 
-static LSTATUS WINAPI fixture_RegGetValueW(
+LSTATUS WINAPI fixture_RegGetValueW(
     HKEY root, LPCWSTR subkey, LPCWSTR name, DWORD flags, LPDWORD type,
     PVOID data, LPDWORD bytes)
 {
@@ -322,9 +327,7 @@ static LSTATUS WINAPI fixture_RegGetValueW(
     return ERROR_FILE_NOT_FOUND;
 }
 
-#define RegGetValueW fixture_RegGetValueW
 #include "hd2ct_http.c"
-#undef RegGetValueW
 
 __declspec(dllexport) void __cdecl fixture_ClearRegistry(void)
 {
@@ -493,7 +496,10 @@ class FakeState:
 class NativeHttpWorkerTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
-        cls.temp = tempfile.TemporaryDirectory(prefix="hd2ct-http-tests-")
+        NATIVE_TEST_ROOT.mkdir(parents=True, exist_ok=True)
+        cls.temp = tempfile.TemporaryDirectory(
+            prefix="hd2ct-http-tests-", dir=str(NATIVE_TEST_ROOT)
+        )
         cls.temp_path = Path(cls.temp.name)
         cls.dll = cls.temp_path / "hd2ct_http.dll"
         cls.meta = cls.temp_path / "hd2ct_http.meta.json"
@@ -620,9 +626,22 @@ class NativeHttpWorkerTests(unittest.TestCase):
         if dll.is_file():
             return dll
         wrapper = cls.temp_path / "hd2ct_http_environment_test.c"
+        registry_shim = cls.temp_path / "hd2ct_http_registry_test_shim.h"
         wrapper.write_text(ENVIRONMENT_SHIM_C, encoding="utf-8", newline="\n")
+        registry_shim.write_text(
+            "#ifndef WIN32_LEAN_AND_MEAN\n"
+            "#define WIN32_LEAN_AND_MEAN\n"
+            "#endif\n"
+            "#include <windows.h>\n"
+            "#include <winreg.h>\n"
+            "LSTATUS WINAPI fixture_RegGetValueW(\n"
+            "    HKEY root, LPCWSTR subkey, LPCWSTR name, DWORD flags, LPDWORD type,\n"
+            "    PVOID data, LPDWORD bytes);\n"
+            "#define RegGetValueW fixture_RegGetValueW\n",
+            encoding="utf-8",
+            newline="\n",
+        )
         native_root = ROOT / "native"
-        cjson_source = native_root / "vendor" / "cjson" / "cJSON.c"
         command = [
             cls.meta_json["compiler"],
             "-std=c11",
@@ -639,8 +658,10 @@ class NativeHttpWorkerTests(unittest.TestCase):
             "-Wl,--exclude-all-symbols",
             "-I",
             str(native_root),
+            "-include",
+            str(registry_shim),
             str(wrapper),
-            str(cjson_source),
+            *(str(source) for source in NATIVE_SOURCES[1:]),
             "-o",
             str(dll),
             "-lwinhttp",
