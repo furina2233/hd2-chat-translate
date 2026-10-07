@@ -1,0 +1,120 @@
+{
+  "schema_version": 1,
+  "option_id": "hd2chattranslate.target_language",
+  "mod_id": "hd2chattranslate",
+  "default_index": 1,
+  "languages": [
+    {
+      "id": "zh_cn",
+      "label": "简体中文",
+      "ai_target": "Simplified Chinese",
+      "google": "zh-CN",
+      "baidu": "zh",
+      "youdao": "zh-CHS"
+    },
+    {
+      "id": "zh_tw",
+      "label": "繁體中文",
+      "ai_target": "Traditional Chinese",
+      "google": "zh-TW",
+      "baidu": "cht",
+      "youdao": "zh-CHT"
+    },
+    {
+      "id": "en",
+      "label": "English",
+      "ai_target": "English",
+      "google": "en",
+      "baidu": "en",
+      "youdao": "en"
+    },
+    {
+      "id": "ja",
+      "label": "日本語",
+      "ai_target": "Japanese",
+      "google": "ja",
+      "baidu": "jp",
+      "youdao": "ja"
+    },
+    {
+      "id": "ko",
+      "label": "한국어",
+      "ai_target": "Korean",
+      "google": "ko",
+      "baidu": "kor",
+      "youdao": "ko"
+    },
+    {
+      "id": "fr",
+      "label": "Français",
+      "ai_target": "French",
+      "google": "fr",
+      "baidu": "fra",
+      "youdao": "fr"
+    },
+    {
+      "id": "de",
+      "label": "Deutsch",
+      "ai_target": "German",
+      "google": "de",
+      "baidu": "de",
+      "youdao": "de"
+    },
+    {
+      "id": "es",
+      "label": "Español",
+      "ai_target": "Spanish",
+      "google": "es",
+      "baidu": "spa",
+      "youdao": "es"
+    },
+    {
+      "id": "pt",
+      "label": "Português",
+      "ai_target": "Portuguese",
+      "google": "pt",
+      "baidu": "pt",
+      "youdao": "pt"
+    },
+    {
+      "id": "it",
+      "label": "Italiano",
+      "ai_target": "Italian",
+      "google": "it",
+      "baidu": "it",
+      "youdao": "it"
+    },
+    {
+      "id": "ru",
+      "label": "Русский",
+      "ai_target": "Russian",
+      "google": "ru",
+      "baidu": "ru",
+      "youdao": "ru"
+    },
+    {
+      "id": "ar",
+      "label": "العربية",
+      "ai_target": "Arabic",
+      "google": "ar",
+      "baidu": "ara",
+      "youdao": "ar"
+    },
+    {
+      "id": "th",
+      "label": "ไทย",
+      "ai_target": "Thai",
+      "google": "th",
+      "baidu": "th",
+      "youdao": "th"
+    },
+    {
+      "id": "vi",
+      "label": "Tiếng Việt",
+      "ai_target": "Vietnamese",
+      "google": "vi",
+      "baidu": "vie",
+      "youdao": "vi"
+    }
+  ]
+}

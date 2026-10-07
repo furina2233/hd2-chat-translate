@@ -21,9 +21,11 @@ BUILD_SCRIPT = ROOT / "tools" / "build_native_http.py"
 WINDOWS = os.name == "nt"
 sys.path.insert(0, str(ROOT / "tools"))
 import build_native_http
+import target_languages
 
 NATIVE_SOURCES = build_native_http.NATIVE_SOURCES
 NATIVE_TEST_ROOT = ROOT / "artifacts" / "validation"
+TARGET_LANGUAGE_CATALOGUE = target_languages.load_catalogue()
 
 ENVIRONMENT_CHILD = r"""
 import ctypes
@@ -32,6 +34,7 @@ import os
 import sys
 import time
 import threading
+from pathlib import Path
 
 dll_path, registry_json = sys.argv[1], sys.argv[2]
 arguments = sys.argv[3:]
@@ -90,6 +93,8 @@ lib.fixture_ForceBootstrapCreateFailure.argtypes = []
 lib.fixture_ForceBootstrapCreateFailure.restype = None
 lib.fixture_ForceWorkerCreateFailure.argtypes = [ctypes.c_uint32]
 lib.fixture_ForceWorkerCreateFailure.restype = None
+lib.fixture_SetTargetValuesPath.argtypes = [ctypes.c_wchar_p]
+lib.fixture_SetTargetValuesPath.restype = ctypes.c_int
 lib.fixture_StartLockHold.argtypes = [ctypes.c_uint32]
 lib.fixture_StartLockHold.restype = ctypes.c_int
 lib.fixture_ReleaseLock.argtypes = []
@@ -107,6 +112,11 @@ lib.HD2CT_Cancel.restype = ctypes.c_uint32
 lib.fixture_ClearRegistry()
 fixture = json.loads(registry_json)
 registry_delay = fixture.pop("__registry_delay_ms", 0)
+target_values_path = fixture.pop("__target_values_path", None)
+has_target_primary = "__target_primary" in fixture
+target_primary = fixture.pop("__target_primary", None)
+has_target_backup = "__target_backup" in fixture
+target_backup = fixture.pop("__target_backup", None)
 if fixture.pop("__worker_failure", False):
     lib.fixture_ForceWorkerFailure()
 if fixture.pop("__bootstrap_create_failure", False):
@@ -114,6 +124,23 @@ if fixture.pop("__bootstrap_create_failure", False):
 worker_create_failure_at = fixture.pop("__worker_create_failure_at", 0)
 if worker_create_failure_at:
     lib.fixture_ForceWorkerCreateFailure(worker_create_failure_at)
+if target_values_path is not None:
+    if not lib.fixture_SetTargetValuesPath(target_values_path):
+        raise RuntimeError("test-only target values path was rejected")
+
+def write_target_values_file(kind, contents):
+    if target_values_path is None or kind not in ("primary", "backup"):
+        raise RuntimeError("target values file override is unavailable")
+    path = Path(target_values_path + (".bak" if kind == "backup" else ""))
+    if contents is None:
+        path.unlink(missing_ok=True)
+    else:
+        path.write_bytes(contents.encode("utf-8"))
+
+if has_target_primary:
+    write_target_values_file("primary", target_primary)
+if has_target_backup:
+    write_target_values_file("backup", target_backup)
 lock_hold_ms = fixture.pop("__lock_hold_ms", 0)
 lib.fixture_SetRegistryDelay(registry_delay)
 for hive_name, hive in (("user", 0), ("machine", 1)):
@@ -211,6 +238,15 @@ for action in actions:
             ctypes.cast(output, ctypes.c_void_p), len(output),
         )
         action_results.append({"accepted": accepted, "url": output.value.decode("utf-8")})
+    elif op == "target_file":
+        write_target_values_file(action["kind"], action.get("contents"))
+        action_results.append({"written": True})
+    elif op == "wait_file":
+        marker_path = Path(action["path"])
+        deadline = time.monotonic() + action.get("timeout", 5.0)
+        while not marker_path.is_file() and time.monotonic() < deadline:
+            time.sleep(0.005)
+        action_results.append({"found": marker_path.is_file()})
     else:
         raise RuntimeError("unknown environment fixture action")
 
@@ -421,6 +457,11 @@ __declspec(dllexport) void __cdecl fixture_ForceWorkerFailure(void)
     InterlockedExchange(&g_test_fail_worker_session, 1);
 }
 
+__declspec(dllexport) int __cdecl fixture_SetTargetValuesPath(const wchar_t *path)
+{
+    return hd2ct_test_set_values_file_path(path);
+}
+
 __declspec(dllexport) void __cdecl fixture_ForceBootstrapCreateFailure(void)
 {
     InterlockedExchange(&g_test_fail_bootstrap_create, 1);
@@ -492,9 +533,10 @@ def provider_response(content: str, finish_reason: str = "stop") -> bytes:
     ).encode("utf-8")
 
 
-def result_content(translation: str = "你好，绝地潜兵。", is_chinese: bool = False) -> str:
+def result_content(translation: str = "你好，绝地潜兵。",
+                  is_target_language: bool = False) -> str:
     return json.dumps(
-        {"is_chinese": is_chinese, "translation": translation},
+        {"is_target_language": is_target_language, "translation": translation},
         ensure_ascii=False,
         separators=(",", ":"),
     )
@@ -546,9 +588,11 @@ class FakeState:
         self.content_types: list[str] = []
         self.status = 200
         self.response = provider_response(result_content())
+        self.response_by_target: dict[str, bytes] = {}
         self.delay = 0.0
         self.headers: list[dict[str, str]] = []
         self.request_finished = threading.Event()
+        self.request_started_marker: Path | None = None
 
     def clear(self) -> None:
         with self.lock:
@@ -558,7 +602,9 @@ class FakeState:
             self.headers.clear()
             self.status = 200
             self.delay = 0.0
+            self.response_by_target.clear()
         self.request_finished.clear()
+        self.request_started_marker = None
 
 
 @unittest.skipUnless(WINDOWS, "原生 DLL 仅在 Windows 上运行")
@@ -620,7 +666,20 @@ class NativeHttpWorkerTests(unittest.TestCase):
                     state.headers.append(dict(self.headers.items()))
                     response_status = state.status
                     response = state.response
+                    response_by_target = dict(state.response_by_target)
                     delay = state.delay
+                    request_started_marker = state.request_started_marker
+                response_key = payload.get("target") or payload.get("to")
+                if response_key is None and isinstance(payload.get("messages"), list):
+                    prompt = payload["messages"][0].get("content", "")
+                    if isinstance(prompt, str):
+                        response_key = next(
+                            (key for key in response_by_target if key in prompt), None
+                        )
+                if response_key in response_by_target:
+                    response = response_by_target[response_key]
+                if request_started_marker is not None:
+                    request_started_marker.write_text("started", encoding="ascii")
                 if delay:
                     time.sleep(delay)
                 try:
@@ -718,6 +777,8 @@ class NativeHttpWorkerTests(unittest.TestCase):
             "-Wl,--exclude-all-symbols",
             "-I",
             str(native_root),
+            "-I",
+            str(cls.temp_path),
             "-include",
             str(registry_shim),
             str(wrapper),
@@ -790,6 +851,237 @@ class NativeHttpWorkerTests(unittest.TestCase):
         lines = [line for line in completed.stdout.splitlines() if line.strip()]
         self.assertEqual(len(lines), 1, completed.stdout)
         return json.loads(lines[0])
+
+    def _exercise_target_language_adapter(self, adapter_name: str) -> None:
+        languages = TARGET_LANGUAGE_CATALOGUE["languages"]
+        source = "The squad is ready."
+        config = {
+            "HD2CT_API_URL": self.url + f"/{adapter_name}/target-languages",
+            "HD2CT_MODEL": "fake-model" if adapter_name == "ai" else "",
+            "HD2CT_API_KEY": "fake-api-key",
+        }
+        code_field = {
+            "google": "google",
+            "baidu": "baidu",
+            "youdao": "youdao",
+        }
+        if adapter_name in ("baidu", "youdao"):
+            config["HD2CT_APP_ID"] = "fake-app-id"
+        response_by_target: dict[str, bytes] = {}
+        if adapter_name == "ai":
+            for row in languages:
+                translation = "AI-" + row["id"]
+                response_by_target[row["ai_target"]] = provider_response(
+                    result_content(translation, is_target_language=False)
+                )
+        elif adapter_name == "google":
+            for row in languages:
+                response_by_target[row["google"]] = google_response(
+                    "Google-" + row["id"], "en"
+                )
+        elif adapter_name == "baidu":
+            for row in languages:
+                response_by_target[row["baidu"]] = baidu_response(
+                    ("Baidu-" + row["id"],)
+                )
+        elif adapter_name == "youdao":
+            for row in languages:
+                response_by_target[row["youdao"]] = youdao_response(
+                    "Youdao-" + row["id"], language="en2en"
+                )
+        else:
+            raise AssertionError(f"unknown adapter fixture: {adapter_name}")
+
+        with tempfile.TemporaryDirectory(
+            prefix="hd2ct-target-values-", dir=str(NATIVE_TEST_ROOT)
+        ) as temporary_directory:
+            values_path = Path(temporary_directory) / "ModOptionsMenu.values"
+            registry = {
+                "user": config,
+                "__target_values_path": str(values_path),
+                "__target_primary": self._target_values_line(1),
+            }
+            actions: list[dict] = []
+            for index, row in enumerate(languages, start=1):
+                token = f"{adapter_name}-language-{index:02d}"
+                actions.extend([
+                    {"op": "target_file", "kind": "primary",
+                     "contents": self._target_values_line(index)},
+                    {"op": "submit", "token": token,
+                     "body_hex": source.encode("utf-8").hex()},
+                    {"op": "wait", "token": token},
+                ])
+            actions.extend([
+                {"op": "target_file", "kind": "primary",
+                 "contents": self._target_values_line(1)},
+                {"op": "submit", "token": f"{adapter_name}-language-cache-return",
+                 "body_hex": source.encode("utf-8").hex()},
+                {"op": "wait", "token": f"{adapter_name}-language-cache-return"},
+            ])
+            self.state.clear()
+            self.state.response_by_target = response_by_target
+            result = self.run_environment_child(registry, actions=actions)
+
+        self.assertEqual(len(languages), 14)
+        self.assertEqual(TARGET_LANGUAGE_CATALOGUE["default_index"], 1)
+        self.assertEqual(len(self.state.paths), len(languages))
+        self.assertEqual(result["cache_count"], len(languages))
+        for position, row in enumerate(languages):
+            payload = self.state.payloads[position]
+            if adapter_name == "ai":
+                prompt = payload["messages"][0]["content"]
+                self.assertIn(row["ai_target"], prompt)
+                self.assertIn("is_target_language", prompt)
+                if row["id"] not in ("zh_cn", "zh_tw"):
+                    self.assertNotIn("Charger=牛", prompt)
+                if row["id"] == "zh_tw":
+                    self.assertIn("隱身蟲", prompt)
+                    self.assertNotIn("隱形蟲", prompt)
+                expected_translation = "AI-" + row["id"]
+            else:
+                self.assertEqual(payload["to"] if adapter_name != "google"
+                                 else payload["target"], row[code_field[adapter_name]])
+                expected_translation = adapter_name.title() + "-" + row["id"]
+            action = result["actions"][position * 3 + 2]
+            self.assertEqual(action["result"], "OK\n" + expected_translation)
+
+        self.assertEqual(
+            result["actions"][len(languages) * 3 + 2]["result"],
+            "OK\n" + ("AI-" if adapter_name == "ai" else adapter_name.title() + "-") + languages[0]["id"],
+        )
+
+    @staticmethod
+    def _target_values_line(index: int) -> str:
+        return f"{TARGET_LANGUAGE_CATALOGUE['option_id']}\t{index}\n"
+
+    def _exercise_target_values_fallbacks(self) -> None:
+        cases = (
+            ("backup-after-missing-primary", None,
+             self._target_values_line(3), "en"),
+            ("backup-after-corrupt-primary", "not a values file\n",
+             self._target_values_line(2), "zh-TW"),
+            ("valid-primary-missing-option", "othermod.some_option\t2\n",
+             self._target_values_line(3), "zh-CN"),
+            ("valid-primary-missing-option-no-backup",
+             "othermod.some_option\t2\n", None, "zh-CN"),
+            ("invalid-index-does-not-use-backup", self._target_values_line(99),
+             self._target_values_line(2), "zh-CN"),
+            ("corrupt-primary-without-backup", "broken\n", None, "zh-CN"),
+        )
+        for other_value in ("true", "false", "0", "-1", "0.5", "invalid"):
+            cases += ((
+                f"othermod-value-{other_value}",
+                f"othermod.some_option\t{other_value}\n",
+                self._target_values_line(3),
+                "zh-CN",
+            ),)
+        config = {
+            "HD2CT_API_URL": self.url + "/Google/target-values-fallback",
+            "HD2CT_MODEL": "",
+            "HD2CT_API_KEY": "fake-api-key",
+        }
+        for case_name, primary, backup, expected_target in cases:
+            with self.subTest(target_file_case=case_name):
+                with tempfile.TemporaryDirectory(
+                    prefix="hd2ct-target-values-", dir=str(NATIVE_TEST_ROOT)
+                ) as temporary_directory:
+                    values_path = Path(temporary_directory) / "ModOptionsMenu.values"
+                    registry = {
+                        "user": config,
+                        "__target_values_path": str(values_path),
+                        "__target_primary": primary,
+                        "__target_backup": backup,
+                    }
+                    self.state.clear()
+                    self.state.response = google_response("Translated", "en")
+                    result = self.run_environment_child(
+                        registry,
+                        actions=[
+                            {"op": "submit", "token": "target-file-fallback",
+                             "body_hex": "736f75726365"},
+                            {"op": "wait", "token": "target-file-fallback"},
+                        ],
+                    )
+                self.assertEqual(result["actions"][1]["result"], "OK\nTranslated")
+                self.assertEqual(self.state.payloads[0]["target"], expected_target)
+
+    def _exercise_ai_target_language_flags(self) -> None:
+        config = {
+            "HD2CT_API_URL": self.url + "/ai/target-language-flags",
+            "HD2CT_MODEL": "fake-model",
+            "HD2CT_API_KEY": "fake-api-key",
+        }
+        with tempfile.TemporaryDirectory(
+            prefix="hd2ct-target-values-", dir=str(NATIVE_TEST_ROOT)
+        ) as temporary_directory:
+            values_path = Path(temporary_directory) / "ModOptionsMenu.values"
+            registry = {
+                "user": config,
+                "__target_values_path": str(values_path),
+                "__target_primary": self._target_values_line(3),
+            }
+
+            self.state.clear()
+            self.state.response = provider_response(
+                result_content("English translation", is_target_language=False)
+            )
+            source_chinese = "需要支援"
+            translated = self.run_environment_child(
+                registry,
+                actions=[
+                    {"op": "submit", "token": "ai-english-from-chinese",
+                     "body_hex": source_chinese.encode("utf-8").hex()},
+                    {"op": "wait", "token": "ai-english-from-chinese"},
+                ],
+            )
+            self.assertEqual(translated["actions"][1]["result"], "OK\nEnglish translation")
+            prompt = self.state.payloads[0]["messages"][0]["content"]
+            self.assertIn("English", prompt)
+            self.assertNotIn("Charger=牛", prompt)
+
+            self.state.clear()
+            source_english = "Already English"
+            self.state.response = provider_response(
+                result_content(source_english, is_target_language=True)
+            )
+            matched = self.run_environment_child(
+                registry,
+                actions=[
+                    {"op": "submit", "token": "ai-target-match",
+                     "body_hex": source_english.encode("utf-8").hex()},
+                    {"op": "wait", "token": "ai-target-match"},
+                    {"op": "submit", "token": "ai-target-match-cache",
+                     "body_hex": source_english.encode("utf-8").hex()},
+                    {"op": "wait", "token": "ai-target-match-cache"},
+                ],
+            )
+            self.assertEqual(matched["actions"][1]["result"], "SKIP\n")
+            self.assertEqual(matched["actions"][3]["result"], "SKIP\n")
+            self.assertEqual(len(self.state.paths), 1)
+            self.assertEqual(matched["cache_count"], 1)
+
+    def _exercise_catalogue_validation(self) -> None:
+        self.assertEqual(
+            target_languages.catalogue_sha256(TARGET_LANGUAGE_CATALOGUE),
+            target_languages.catalogue_sha256(target_languages.load_catalogue()),
+        )
+        invalid_catalogues = []
+        duplicate_id = json.loads(json.dumps(TARGET_LANGUAGE_CATALOGUE))
+        duplicate_id["languages"][1]["id"] = duplicate_id["languages"][0]["id"]
+        invalid_catalogues.append(("duplicate-id", duplicate_id))
+        invalid_default = json.loads(json.dumps(TARGET_LANGUAGE_CATALOGUE))
+        invalid_default["default_index"] = 0
+        invalid_catalogues.append(("default-index", invalid_default))
+        long_label = json.loads(json.dumps(TARGET_LANGUAGE_CATALOGUE))
+        long_label["languages"][0]["label"] = "x" * 49
+        invalid_catalogues.append(("long-label", long_label))
+        bad_code = json.loads(json.dumps(TARGET_LANGUAGE_CATALOGUE))
+        bad_code["languages"][0]["google"] = "zh CN"
+        invalid_catalogues.append(("bad-provider-code", bad_code))
+        for name, catalogue in invalid_catalogues:
+            with self.subTest(catalogue=name):
+                with self.assertRaises(ValueError):
+                    target_languages.validate_catalogue(catalogue)
 
     def assert_environment_initialization_uses_registry(self) -> None:
         user_config = {
@@ -1266,10 +1558,15 @@ class NativeHttpWorkerTests(unittest.TestCase):
         self.assertEqual(missing_signed_app_id["status"], 1)
         self.assertEqual(missing_signed_app_id["enabled"], 0)
         self.assertEqual(missing_signed_app_id["actions"][1]["result"], "ERR\nMISSING_CONFIG")
+        self._exercise_catalogue_validation()
+        self._exercise_target_values_fallbacks()
+        self._exercise_ai_target_language_flags()
+        for adapter_name in ("ai", "google", "baidu", "youdao"):
+            self._exercise_target_language_adapter(adapter_name)
         self.assert_environment_initialization_uses_registry()
 
     def test_english_translation_preserves_chinese_and_model_translation(self) -> None:
-        self.state.response = provider_response(result_content("前往撤离点", is_chinese=False))
+        self.state.response = provider_response(result_content("前往撤离点", is_target_language=False))
         english = "Move to extraction"
         translated = self.run_child(
             actions=[
@@ -1287,7 +1584,7 @@ class NativeHttpWorkerTests(unittest.TestCase):
         prompt = payload["messages"][0]["content"]
         for rule in (
             "中文原样返回",
-            "is_chinese",
+            "is_target_language",
             "translation",
             "Charger=牛",
         ):
@@ -1295,7 +1592,8 @@ class NativeHttpWorkerTests(unittest.TestCase):
                 self.assertIn(rule, prompt)
 
         self.state.clear()
-        self.state.response = provider_response(result_content("不应覆盖中文原文", is_chinese=True))
+        self.state.response = provider_response(
+            result_content("不应覆盖中文原文", is_target_language=True))
         chinese = "我们需要在 A1 补给。"
         preserved = self.run_child(
             actions=[
@@ -1312,7 +1610,8 @@ class NativeHttpWorkerTests(unittest.TestCase):
 
         self.state.clear()
         source_equal = "Hold this position."
-        self.state.response = provider_response(result_content(source_equal, is_chinese=False))
+        self.state.response = provider_response(
+            result_content(source_equal, is_target_language=False))
         same_translation = self.run_child(
             actions=[
                 {"op": "submit", "token": "same-translation",
@@ -1328,7 +1627,7 @@ class NativeHttpWorkerTests(unittest.TestCase):
         self.assertEqual(len(self.state.paths), 1)
 
         self.state.clear()
-        self.state.response = provider_response(result_content("打得不错", is_chinese=False))
+        self.state.response = provider_response(result_content("打得不错", is_target_language=False))
         raw_gg = "\tGgS \r\n"
         translated_gg = self.run_child(
             actions=[
@@ -1341,6 +1640,10 @@ class NativeHttpWorkerTests(unittest.TestCase):
 
     def test_http401_is_redacted_and_invalid_model_result_is_classified(self) -> None:
         self.assertEqual(self.meta_json["abi_version"], 2)
+        self.assertEqual(
+            self.meta_json["target_languages_sha256"],
+            target_languages.catalogue_sha256(TARGET_LANGUAGE_CATALOGUE),
+        )
         objdump = build_native_http.resolve_objdump(Path(self.meta_json["compiler"]), None)
         self.assertEqual(
             build_native_http.exported_names(self.dll, objdump),
@@ -1359,7 +1662,8 @@ class NativeHttpWorkerTests(unittest.TestCase):
 
         self.state.clear()
         self.state.status = 200
-        self.state.response = provider_response('{"is_chinese":"yes","translation":"ignored"}')
+        self.state.response = provider_response(
+            '{"is_target_language":"yes","translation":"ignored"}')
         malformed = self.run_child(
             actions=[
                 {"op": "submit", "token": "bad-model", "body_hex": "4869"},
@@ -1408,6 +1712,48 @@ class NativeHttpWorkerTests(unittest.TestCase):
         self.assertEqual(asynchronous["actions"][3]["result"], "OK\n你好，绝地潜兵。")
         self.assertEqual(asynchronous["actions"][4]["result"], "OK\n你好，绝地潜兵。")
         self.assertEqual(asynchronous["actions"][5]["result"], "OK\n你好，绝地潜兵。")
+
+        self.state.clear()
+        self.state.delay = 0.6
+        with tempfile.TemporaryDirectory(
+            prefix="hd2ct-target-values-", dir=str(NATIVE_TEST_ROOT)
+        ) as temporary_directory:
+            values_path = Path(temporary_directory) / "ModOptionsMenu.values"
+            marker_path = Path(temporary_directory) / "first-request-started"
+            registry = {
+                "user": {
+                    "HD2CT_API_URL": self.url + "/google/pending-target-snapshot",
+                    "HD2CT_MODEL": "",
+                    "HD2CT_API_KEY": "fake-api-key",
+                },
+                "__target_values_path": str(values_path),
+                "__target_primary": self._target_values_line(1),
+            }
+            self.state.request_started_marker = marker_path
+            self.state.response_by_target = {
+                "zh-CN": google_response("默认语言", "en"),
+                "en": google_response("English target", "zh-CN"),
+            }
+            snapshot = self.run_environment_child(
+                registry,
+                actions=[
+                    {"op": "submit", "token": "target-snapshot-first",
+                     "body_hex": "73616d6520736f75726365"},
+                    {"op": "wait_file", "path": str(marker_path)},
+                    {"op": "target_file", "kind": "primary",
+                     "contents": self._target_values_line(3)},
+                    {"op": "submit", "token": "target-snapshot-second",
+                     "body_hex": "73616d6520736f75726365"},
+                    {"op": "wait", "token": "target-snapshot-second"},
+                    {"op": "wait", "token": "target-snapshot-first"},
+                ],
+            )
+        self.assertTrue(snapshot["actions"][1]["found"])
+        self.assertEqual([payload["target"] for payload in self.state.payloads],
+                         ["zh-CN", "en"])
+        self.assertEqual(snapshot["actions"][4]["result"], "OK\nEnglish target")
+        self.assertEqual(snapshot["actions"][5]["result"], "OK\n默认语言")
+        self.assertEqual(snapshot["cache_count"], 2)
 
         self.state.clear()
         cached = self.run_child(

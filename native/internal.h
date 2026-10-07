@@ -29,6 +29,8 @@
 #define HD2CT_MAX_MODEL 256u
 #define HD2CT_MAX_KEY 4096u
 #define HD2CT_MAX_RESPONSE 1000000u
+#define HD2CT_MAX_VALUES_FILE_BYTES (512u * 1024u)
+#define HD2CT_MAX_VALUES_PATH 32768u
 #define HD2CT_JOB_COUNT 32u
 #define HD2CT_CACHE_COUNT 512u
 #define HD2CT_JOB_TTL_MS 60000ull
@@ -76,8 +78,19 @@ typedef struct HD2CT_WorkerJob {
     char api_key[HD2CT_MAX_KEY + 1u];
     char app_id[HD2CT_MAX_KEY + 1u];
     uint32_t adapter_id;
+    uint32_t target_language;
     uint32_t timeout_seconds;
 } HD2CT_WorkerJob;
+
+typedef struct HD2CT_TargetLanguage {
+    const char *id;
+    const char *label;
+    const char *ai_target;
+    const char *google_code;
+    const char *baidu_code;
+    const char *youdao_code;
+    uint32_t is_chinese;
+} HD2CT_TargetLanguage;
 
 typedef struct HD2CT_BuiltRequest {
     char *body;
@@ -135,6 +148,14 @@ int hd2ct_valid_model_key(const char *model, const char *api_key);
 int hd2ct_read_environment_value(const wchar_t *name, char *out,
                                  size_t out_capacity, int *present);
 int hd2ct_parse_timeout(const char *value, uint32_t *timeout_out);
+
+/* 目标语言目录与MOM已应用值读取。 */
+const HD2CT_TargetLanguage *hd2ct_target_language(uint32_t index);
+uint32_t hd2ct_default_target_language(void);
+uint32_t hd2ct_read_applied_target_language(void);
+#ifdef HD2CT_TESTING
+int hd2ct_test_set_values_file_path(const wchar_t *path);
+#endif
 
 /* 服务选择、适配器描述及共享签名与表单工具。 */
 uint32_t hd2ct_select_adapter(const char *url, const char *model);

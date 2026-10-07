@@ -62,6 +62,7 @@ int hd2ct_build_youdao_request(const HD2CT_WorkerJob *job,
     char sign[65] = {0};
     char curtime[24] = {0};
     char input[HD2CT_MAX_SOURCE + 32u] = {0};
+    const HD2CT_TargetLanguage *target = hd2ct_target_language(job->target_language);
     const char *parts[5];
     size_t lengths[5];
     size_t input_bytes = 0;
@@ -106,7 +107,8 @@ int hd2ct_build_youdao_request(const HD2CT_WorkerJob *job,
     form.data[0] = '\0';
     if (!hd2ct_form_add(&form, "q", job->source, job->source_bytes) ||
         !hd2ct_form_add(&form, "from", "auto", 4u) ||
-        !hd2ct_form_add(&form, "to", "zh-CHS", 6u) ||
+        !hd2ct_form_add(&form, "to", target->youdao_code,
+                        strlen(target->youdao_code)) ||
         !hd2ct_form_add(&form, "appKey", job->app_id, app_id_length) ||
         !hd2ct_form_add(&form, "salt", salt, strlen(salt)) ||
         !hd2ct_form_add(&form, "curtime", curtime, (size_t)curtime_bytes) ||

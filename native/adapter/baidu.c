@@ -8,6 +8,7 @@ int hd2ct_build_baidu_request(const HD2CT_WorkerJob *job,
 {
     char salt[33] = {0};
     char sign[33] = {0};
+    const HD2CT_TargetLanguage *target = hd2ct_target_language(job->target_language);
     const char *parts[4];
     size_t lengths[4];
     size_t q_length = job->source_bytes;
@@ -34,7 +35,8 @@ int hd2ct_build_baidu_request(const HD2CT_WorkerJob *job,
     form.data[0] = '\0';
     if (!hd2ct_form_add(&form, "q", job->source, q_length) ||
         !hd2ct_form_add(&form, "from", "auto", 4u) ||
-        !hd2ct_form_add(&form, "to", "zh", 2u) ||
+        !hd2ct_form_add(&form, "to", target->baidu_code,
+                        strlen(target->baidu_code)) ||
         !hd2ct_form_add(&form, "appid", job->app_id, app_id_length) ||
         !hd2ct_form_add(&form, "salt", salt, strlen(salt)) ||
         !hd2ct_form_add(&form, "sign", sign, strlen(sign)) ||

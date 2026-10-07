@@ -11,6 +11,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+import target_languages
+
 
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_DLL = ROOT / "artifacts" / "native" / "hd2ct_http.dll"
@@ -19,6 +21,7 @@ NATIVE_SOURCES = (
     NATIVE_DIR / "client.c",
     NATIVE_DIR / "common.c",
     NATIVE_DIR / "config.c",
+    NATIVE_DIR / "languages.c",
     NATIVE_DIR / "adapter" / "base.c",
     NATIVE_DIR / "adapter" / "chat_completions.c",
     NATIVE_DIR / "adapter" / "google.c",
@@ -124,14 +127,19 @@ def main() -> int:
     metadata = args.meta.resolve() if args.meta else output.with_name("hd2ct_http.meta.json")
     compiler = resolve_tool(args.cc)
     objdump = resolve_objdump(compiler, args.objdump)
+    try:
+        catalogue = target_languages.load_catalogue()
+    except ValueError as error:
+        raise RuntimeError(str(error)) from error
+    output.parent.mkdir(parents=True, exist_ok=True)
+    generated_header = target_languages.generate_c_header(output.parent, catalogue)
     missing_sources = [path for path in NATIVE_SOURCES if not path.is_file()]
-    missing_headers = [path for path in NATIVE_HEADERS if not path.is_file()]
+    missing_headers = [path for path in (*NATIVE_HEADERS, generated_header) if not path.is_file()]
     if missing_sources or missing_headers:
         missing = [*missing_sources, *missing_headers]
         raise RuntimeError(
             "原生源码或头文件缺失：" + ", ".join(str(path.relative_to(ROOT)) for path in missing)
         )
-    output.parent.mkdir(parents=True, exist_ok=True)
     metadata.parent.mkdir(parents=True, exist_ok=True)
     command = [
         str(compiler),
@@ -149,6 +157,8 @@ def main() -> int:
         "-Wl,--exclude-all-symbols",
         "-I",
         str(NATIVE_DIR),
+        "-I",
+        str(output.parent),
         *(str(source) for source in NATIVE_SOURCES),
         "-o",
         str(output),
@@ -194,6 +204,7 @@ def main() -> int:
         "filename": "hd2ct_http.dll",
         "size": len(binary),
         "sha256": hashlib.sha256(binary).hexdigest(),
+        "target_languages_sha256": target_languages.catalogue_sha256(catalogue),
         "architecture": "x86_64",
         "imports": imports,
         "compiler": str(compiler),

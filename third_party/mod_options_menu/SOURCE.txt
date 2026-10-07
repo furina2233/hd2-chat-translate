@@ -1,0 +1,11 @@
+ModOptionsMenu v1.2 来源与归属
+
+上游仓库：https://github.com/CowboyBingus/ModOptionsMenu
+固定发布页：https://github.com/CowboyBingus/ModOptionsMenu/releases/tag/v1.2
+发布资产：https://github.com/CowboyBingus/ModOptionsMenu/releases/download/v1.2/Mod-Options-Menu-v1.2.zip
+输入 ZIP SHA-256：a977d84e7f8fda62c587b5b5af2012aab3fa792e31945a9c8d5f458bfd453e13
+上游 patch SHA-256：ce6229cffe8c78706a37293ac64f553becb7f3816aa0cc6fbb108d74956b68a5
+Lua resource SHA-256：ea07ab3bc87bfef067230a0aa236e1f9282cfa54e80f6fc07924bd56ab399ee3
+Lua source SHA-256：e03334c76d9b4b064378076a08d7e85e11e757bafa9fc0380aff5669fee13c07
+
+本包仅保留上游发布资产中经固定摘要和边界验证的 Lua resource 原始字节，不改写其源码。上游许可证见 ModOptionsMenu-LICENSE.txt：Zero-Clause BSD (0BSD)，Copyright (C) 2026 by CowboyBingus。

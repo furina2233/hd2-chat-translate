@@ -15,6 +15,7 @@ import re
 import struct
 import uuid
 import zipfile
+import target_languages
 
 ROOT = Path(__file__).resolve().parents[1]
 RESOURCE_NAME = "mods/hd2chat/HD2ChatTranslate"
@@ -31,6 +32,8 @@ STANDALONE_FLAG = b"local STANDALONE_ENABLED = false --[[HD2_CHAT_STANDALONE_ENA
 NATIVE_MODULE_MARKER = b"--[[HD2CT_NATIVE_MODULE]]"
 STANDALONE_MARKER = NATIVE_MODULE_MARKER
 NATIVE_PAYLOAD_MARKER = b"--[[HD2CT_NATIVE_PAYLOAD]]"
+SETTINGS_MARKER = b"--[[HD2CT_TARGET_LANGUAGE_SETTINGS]]"
+SETTINGS_CATALOGUE_MARKER = b"--[[HD2CT_TARGET_LANGUAGE_CATALOGUE]]"
 MAX_SOURCE_BYTES = 512 * 1024
 MAX_ARCHIVE_LUA_RESOURCES = 16
 MAX_ARCHIVE_SIZE = 8 * 1024 * 1024
@@ -40,6 +43,9 @@ DELIVERY_NAME_PATTERN = re.compile(r"^HD2ChatTranslate([0-9]{14})\.zip$", re.ASC
 STANDALONE_DLL = ROOT / "artifacts" / "native" / "hd2ct_http.dll"
 STANDALONE_META = ROOT / "artifacts" / "native" / "hd2ct_http.meta.json"
 STANDALONE_LICENSE = ROOT / "native" / "vendor" / "cjson" / "LICENSE"
+MOD_OPTIONS_MENU_ZIP = ROOT / "artifacts" / "Mod-Options-Menu-v1.2.zip"
+MOD_OPTIONS_MENU_LICENSE = ROOT / "third_party" / "mod_options_menu" / "LICENSE"
+MOD_OPTIONS_MENU_SOURCE = ROOT / "third_party" / "mod_options_menu" / "SOURCE.txt"
 PROJECT_LICENSE = ROOT / "LICENSE"
 SHARED_LOADER_ZIP = ROOT / "artifacts" / "Bingus-Shared-Loader-v18.zip"
 SHARED_LOADER_ZIP_SHA256 = "53af5698aeacfb27b98dfa00054923d11dc854e1e67b4af14798877812a93ba6"
@@ -51,9 +57,25 @@ SHARED_LOADER_STREAM_MEMBER = SHARED_LOADER_PATCH_MEMBER + ".stream"
 SHARED_LOADER_GPU_MEMBER = SHARED_LOADER_PATCH_MEMBER + ".gpu_resources"
 SHARED_LOADER_README_MEMBER = "BingusSharedLoader-README.txt"
 SHARED_LOADER_MANIFEST_MEMBER = "BingusSharedLoader-manifest.json"
+MOD_OPTIONS_MENU_ZIP_SHA256 = "a977d84e7f8fda62c587b5b5af2012aab3fa792e31945a9c8d5f458bfd453e13"
+MOD_OPTIONS_MENU_ZIP_SIZE = 1_179_177
+MOD_OPTIONS_MENU_PATCH_MEMBER = "Addon/9ba626afa44a3aa3.patch_0"
+MOD_OPTIONS_MENU_STREAM_MEMBER = MOD_OPTIONS_MENU_PATCH_MEMBER + ".stream"
+MOD_OPTIONS_MENU_GPU_MEMBER = MOD_OPTIONS_MENU_PATCH_MEMBER + ".gpu_resources"
+MOD_OPTIONS_MENU_PATCH_SHA256 = "ce6229cffe8c78706a37293ac64f553becb7f3816aa0cc6fbb108d74956b68a5"
+MOD_OPTIONS_MENU_BLOB_SHA256 = "ea07ab3bc87bfef067230a0aa236e1f9282cfa54e80f6fc07924bd56ab399ee3"
+MOD_OPTIONS_MENU_SOURCE_SHA256 = "e03334c76d9b4b064378076a08d7e85e11e757bafa9fc0380aff5669fee13c07"
+MOD_OPTIONS_MENU_LICENSE_SHA256 = "4ee36d70b08394ea8241a6615fdc892802bd8eeac5693dc907631f76afa54d11"
+MOD_OPTIONS_MENU_RESOURCE_NAME = "mods/cowboybingus/mod_options_menu"
+MOD_OPTIONS_MENU_RESOURCE_HASH = 0xFD50351F21814B0E
+MOD_OPTIONS_MENU_RESOURCE_TYPE = 0xA14E8DFA2CD117E2
 
 
-def validate_native_dll(dll: bytes, metadata: bytes) -> tuple[int, str]:
+def validate_native_dll(
+    dll: bytes,
+    metadata: bytes,
+    catalogue: dict[str, object] | None = None,
+) -> tuple[int, str]:
     """核验固定原生 helper 的meta、SHA-256和PE入口布局。"""
     try:
         meta = json.loads(metadata.decode("utf-8"))
@@ -61,6 +83,7 @@ def validate_native_dll(dll: bytes, metadata: bytes) -> tuple[int, str]:
         raise ValueError("原生 helper meta 不是有效 UTF-8 JSON") from error
     if not isinstance(meta, dict):
         raise ValueError("原生 helper meta 格式无效")
+    expected_catalogue_sha256 = target_languages.catalogue_sha256(catalogue)
     imports = meta.get("imports")
     if (
         type(meta.get("schema_version")) is not int
@@ -74,10 +97,15 @@ def validate_native_dll(dll: bytes, metadata: bytes) -> tuple[int, str]:
         or not isinstance(meta.get("sha256"), str)
         or len(meta.get("sha256", "")) != 64
         or any(char not in "0123456789abcdef" for char in meta.get("sha256", ""))
+        or not isinstance(meta.get("target_languages_sha256"), str)
+        or len(meta.get("target_languages_sha256", "")) != 64
+        or any(char not in "0123456789abcdef" for char in meta.get("target_languages_sha256", ""))
         or not isinstance(imports, list)
         or any(not isinstance(item, str) or not item or len(item) > 260 for item in imports)
     ):
         raise ValueError("原生 helper meta 的ABI、架构或字段不匹配")
+    if meta["target_languages_sha256"] != expected_catalogue_sha256:
+        raise ValueError("原生 helper meta 的目标语言目录摘要不匹配")
     size = len(dll)
     digest = hashlib.sha256(dll).hexdigest()
     if size == 0 or meta["size"] != size or meta["sha256"].lower() != digest:
@@ -119,14 +147,19 @@ def validate_native_dll(dll: bytes, metadata: bytes) -> tuple[int, str]:
     return size, digest
 
 
-def standalone_module_source(template: bytes, dll: bytes, metadata: bytes) -> bytes:
+def standalone_module_source(
+    template: bytes,
+    dll: bytes,
+    metadata: bytes,
+    catalogue: dict[str, object] | None = None,
+) -> bytes:
     """将已核验的固定DLL作为hex载荷写入Lua加载器的唯一payload标记。"""
     if template.startswith((b"\xef\xbb\xbf", b"\x1b")) or b"\0" in template:
         raise ValueError("原生Lua适配器必须是无BOM、无字节码标记且无NUL的UTF-8文本")
     template.decode("utf-8")
     if template.count(NATIVE_PAYLOAD_MARKER) != 1:
         raise ValueError("原生Lua适配器必须恰好包含一个payload标记")
-    size, digest = validate_native_dll(dll, metadata)
+    size, digest = validate_native_dll(dll, metadata, catalogue)
     if len(template) + size * 2 > MAX_SOURCE_BYTES:
         raise ValueError("DLL hex载荷将超过512 KiB Lua源码上限；请将结果交由主控评估")
     payload = (
@@ -139,6 +172,40 @@ def standalone_module_source(template: bytes, dll: bytes, metadata: bytes) -> by
     if len(embedded) > MAX_SOURCE_BYTES:
         raise ValueError("独立原生Lua模块超过512 KiB源码上限")
     return embedded
+
+
+def _lua_string_literal(value: str) -> str:
+    """将UTF-8字符串编码成不受引号和反斜线影响的Lua字面量。"""
+    return '"' + "".join(f"\\{byte:03d}" for byte in value.encode("utf-8")) + '"'
+
+
+def target_language_settings_source(
+    template: bytes,
+    catalogue: dict[str, object],
+) -> bytes:
+    """把同一份已校验语言目录写入菜单注册模块。"""
+    if template.startswith((b"\xef\xbb\xbf", b"\x1b")) or b"\0" in template:
+        raise ValueError("目标语言设置模块必须是无BOM、无字节码标记且无NUL的UTF-8文本")
+    template.decode("utf-8")
+    if template.count(SETTINGS_CATALOGUE_MARKER) != 1:
+        raise ValueError("目标语言设置模块必须恰好包含一个目录注入标记")
+    data = target_languages.lua_catalogue_data(catalogue)
+    lines = [
+        "    option_id = " + _lua_string_literal(data["option_id"]) + ",",
+        "    mod_id = " + _lua_string_literal(data["mod_id"]) + ",",
+        f"    default_index = {data['default_index']},",
+        "    languages = {",
+    ]
+    for language in data["languages"]:
+        lines.append(
+            "        {id = %s, label = %s},"
+            % (_lua_string_literal(language["id"]), _lua_string_literal(language["label"]))
+        )
+    lines.extend(["    },"])
+    injected = template.replace(SETTINGS_CATALOGUE_MARKER, "\n".join(lines).encode("ascii"), 1)
+    if len(injected) > MAX_SOURCE_BYTES:
+        raise ValueError("目标语言设置模块超过512 KiB源码上限")
+    return injected
 
 
 def resource_hash(name: str) -> int:
@@ -177,6 +244,8 @@ def make_lua_resource_archive(resources: list[tuple[int, bytes]]) -> bytes:
             raise ValueError("archive Lua资源名hash无效或重复")
         if not isinstance(resource, bytes) or not resource:
             raise ValueError("archive Lua资源必须是非空字节串")
+        if len(resource) > MAX_SOURCE_BYTES:
+            raise ValueError("单个archive Lua资源超过512 KiB上限")
         hashes.add(resource_hash_value)
         total_resource_bytes += len(resource)
         if total_resource_bytes > MAX_ARCHIVE_SIZE:
@@ -317,6 +386,97 @@ def load_shared_loader_assets(loader_zip: Path | str | None = None) -> tuple[byt
     return _verified_shared_loader_resource(patch), readme, manifest
 
 
+def _verified_mod_options_menu_resource(patch: bytes) -> bytes:
+    """校验固定MOM v1.2 patch边界并返回未改写的Lua resource。"""
+    if resource_hash(MOD_OPTIONS_MENU_RESOURCE_NAME) != MOD_OPTIONS_MENU_RESOURCE_HASH:
+        raise ValueError("ModOptionsMenu v1.2资源名hash与固定值不匹配")
+    if len(patch) != 139_136 or hashlib.sha256(patch).hexdigest() != MOD_OPTIONS_MENU_PATCH_SHA256:
+        raise ValueError("ModOptionsMenu v1.2 patch大小或SHA-256不匹配")
+    header = struct.unpack_from("<III20sQQ24s", patch, 0)
+    if header != (0xF0000011, 1, 1, bytes(20), len(patch), 0, bytes(24)):
+        raise ValueError("ModOptionsMenu v1.2 archive头布局不匹配")
+    type_record = struct.unpack_from("<IIQIIII", patch, 72)
+    if type_record != (0, 0, MOD_OPTIONS_MENU_RESOURCE_TYPE, 1, 0, 16, 16):
+        raise ValueError("ModOptionsMenu v1.2资源类型或计数不匹配")
+    entry = struct.unpack_from("<7Q6I", patch, 104)
+    expected_entry = (
+        MOD_OPTIONS_MENU_RESOURCE_HASH,
+        MOD_OPTIONS_MENU_RESOURCE_TYPE,
+        192,
+        0,
+        0,
+        0,
+        0,
+        138_936,
+        0,
+        0,
+        16,
+        16,
+        0,
+    )
+    if entry != expected_entry:
+        raise ValueError("ModOptionsMenu v1.2 TOC entry布局不匹配")
+    resource_start = entry[2]
+    resource_end = resource_start + entry[7]
+    if resource_end > len(patch) or patch[resource_end:] != bytes(len(patch) - resource_end):
+        raise ValueError("ModOptionsMenu v1.2 resource边界或尾部填充不匹配")
+    resource = patch[resource_start:resource_end]
+    if hashlib.sha256(resource).hexdigest() != MOD_OPTIONS_MENU_BLOB_SHA256:
+        raise ValueError("ModOptionsMenu v1.2 Lua resource SHA-256不匹配")
+    if len(resource) != 138_936 or struct.unpack_from("<II", resource, 0) != (138_928, 2):
+        raise ValueError("ModOptionsMenu v1.2 Lua resource envelope不匹配")
+    source = resource[8:]
+    if hashlib.sha256(source).hexdigest() != MOD_OPTIONS_MENU_SOURCE_SHA256:
+        raise ValueError("ModOptionsMenu v1.2 Lua source SHA-256不匹配")
+    try:
+        source.decode("utf-8")
+    except UnicodeError as error:
+        raise ValueError("ModOptionsMenu v1.2 Lua source不是有效UTF-8") from error
+    return resource
+
+
+def load_mod_options_menu_resource(menu_zip: Path | str | None = None) -> bytes:
+    """读取固定release ZIP中的MOM patch，只校验并返回原始Lua resource。"""
+    menu_zip_path = Path(menu_zip) if menu_zip is not None else MOD_OPTIONS_MENU_ZIP
+    try:
+        zip_size = menu_zip_path.stat().st_size
+        if zip_size != MOD_OPTIONS_MENU_ZIP_SIZE or zip_size > MAX_ARCHIVE_SIZE:
+            raise ValueError("ModOptionsMenu v1.2 ZIP大小不匹配或超过上限")
+        package_bytes = menu_zip_path.read_bytes()
+    except OSError as error:
+        raise ValueError(f"缺少ModOptionsMenu v1.2 ZIP：{menu_zip_path}") from error
+    if len(package_bytes) != zip_size or hashlib.sha256(package_bytes).hexdigest() != MOD_OPTIONS_MENU_ZIP_SHA256:
+        raise ValueError("ModOptionsMenu v1.2 ZIP SHA-256不匹配")
+
+    required_names = (
+        MOD_OPTIONS_MENU_PATCH_MEMBER,
+        MOD_OPTIONS_MENU_STREAM_MEMBER,
+        MOD_OPTIONS_MENU_GPU_MEMBER,
+    )
+    try:
+        with zipfile.ZipFile(BytesIO(package_bytes), "r") as package:
+            matches: dict[str, list[zipfile.ZipInfo]] = {name: [] for name in required_names}
+            for info in package.infolist():
+                if info.filename in matches:
+                    matches[info.filename].append(info)
+            for name, infos in matches.items():
+                if len(infos) != 1:
+                    raise ValueError(f"ModOptionsMenu v1.2 ZIP缺少或重复白名单条目：{name}")
+            if matches[MOD_OPTIONS_MENU_PATCH_MEMBER][0].file_size != 139_136:
+                raise ValueError("ModOptionsMenu v1.2 patch条目长度不匹配")
+            for name in (MOD_OPTIONS_MENU_STREAM_MEMBER, MOD_OPTIONS_MENU_GPU_MEMBER):
+                if matches[name][0].file_size != 0:
+                    raise ValueError("ModOptionsMenu v1.2 patch sidecar必须为空")
+            patch = package.read(matches[MOD_OPTIONS_MENU_PATCH_MEMBER][0])
+            stream = package.read(matches[MOD_OPTIONS_MENU_STREAM_MEMBER][0])
+            gpu = package.read(matches[MOD_OPTIONS_MENU_GPU_MEMBER][0])
+    except (OSError, zipfile.BadZipFile, RuntimeError, EOFError) as error:
+        raise ValueError("ModOptionsMenu v1.2 ZIP无法安全读取") from error
+    if stream or gpu:
+        raise ValueError("ModOptionsMenu v1.2 patch sidecar必须为空")
+    return _verified_mod_options_menu_resource(patch)
+
+
 def entry_source(
     source: bytes,
     core_source: bytes,
@@ -326,6 +486,7 @@ def entry_source(
     translate_source: bytes | None = None,
     translate: bool = False,
     standalone_source: bytes | None = None,
+    settings_source: bytes | None = None,
     standalone: bool = False,
 ) -> bytes:
     if sum((bool(display_test), bool(translate), bool(standalone))) > 1:
@@ -337,6 +498,8 @@ def entry_source(
         sources.append(translate_source)
     if standalone_source is not None:
         sources.append(standalone_source)
+    if settings_source is not None:
+        sources.append(settings_source)
     if any(len(item) > MAX_SOURCE_BYTES for item in sources):
         raise ValueError("Lua 源文件超过构建大小上限")
     if source.startswith((b"\xef\xbb\xbf", b"\x1b")) or b"\0" in source:
@@ -357,6 +520,10 @@ def entry_source(
         if standalone_source.startswith((b"\xef\xbb\xbf", b"\x1b")) or b"\0" in standalone_source:
             raise ValueError("原生适配器必须是无BOM、无字节码标记的UTF-8 Lua文本")
         standalone_source.decode("utf-8")
+    if settings_source is not None:
+        if settings_source.startswith((b"\xef\xbb\xbf", b"\x1b")) or b"\0" in settings_source:
+            raise ValueError("目标语言设置必须是无BOM、无字节码标记的UTF-8文本")
+        settings_source.decode("utf-8")
     if source.count(CORE_MARKER) != 1:
         raise ValueError("入口必须恰好包含一个扫描核心嵌入标记")
     embedded = source.replace(CORE_MARKER, core_source.rstrip() + b"\n", 1)
@@ -373,14 +540,20 @@ def entry_source(
     standalone_flag_count = source.count(STANDALONE_FLAG)
     if standalone_marker_count > 1 or standalone_flag_count > 1:
         raise ValueError("入口包含多个独立模块或开关标记")
+    if source.count(SETTINGS_MARKER) != 1:
+        raise ValueError("入口必须恰好包含一个目标语言设置标记")
     if standalone and (standalone_marker_count != 1 or standalone_flag_count != 1):
         raise ValueError("独立翻译模式要求入口恰好包含一个模块标记和默认关闭标记")
     if standalone and (standalone_source is None or observer_source is None):
         raise ValueError("独立翻译模式必须嵌入原生网络模块和只读适配器")
+    if standalone and settings_source is None:
+        raise ValueError("独立翻译模式必须嵌入目标语言设置模块")
     if standalone and translate_source is None:
         raise ValueError("独立翻译模式必须嵌入翻译核心")
     if standalone_source is not None and not standalone:
         raise ValueError("未启用独立模式时不能注入原生网络模块")
+    if settings_source is not None and not standalone:
+        raise ValueError("未启用独立模式时不能注入目标语言设置模块")
     if translate and standalone:
         raise ValueError("两种翻译模式互斥")
     translate_marker_count = source.count(TRANSLATE_MARKER)
@@ -416,6 +589,11 @@ def entry_source(
         )
     if standalone:
         embedded = embedded.replace(STANDALONE_FLAG, STANDALONE_FLAG.replace(b"= false", b"= true"), 1)
+    embedded = embedded.replace(
+        SETTINGS_MARKER,
+        (settings_source if standalone else b"return nil").rstrip() + b"\n",
+        1,
+    )
     if embedded.startswith(b"-- HD2-Addon:"):
         _, separator, embedded = embedded.partition(b"\n")
         if not separator:
@@ -432,13 +610,16 @@ def addon_files(
     entry: bytes,
     *,
     loader_zip: Path | str | None = None,
+    menu_zip: Path | str | None = None,
 ) -> dict[str, bytes]:
     resource = struct.pack("<II", len(entry), 2) + entry
     loader_resource, loader_readme, loader_manifest = load_shared_loader_assets(loader_zip)
+    menu_resource = load_mod_options_menu_resource(menu_zip)
     archive = make_lua_resource_archive(
         [
             (SHARED_LOADER_RESOURCE_HASH, loader_resource),
             (resource_hash(RESOURCE_NAME), resource),
+            (MOD_OPTIONS_MENU_RESOURCE_HASH, menu_resource),
         ]
     )
     description = (
@@ -476,6 +657,13 @@ def addon_files(
         files["LICENSES/cJSON-LICENSE.txt"] = STANDALONE_LICENSE.read_bytes()
     except OSError as error:
         raise ValueError("standalone包缺少vendor/cJSON许可证原文") from error
+    try:
+        menu_license = MOD_OPTIONS_MENU_LICENSE.read_bytes()
+        menu_source_note = MOD_OPTIONS_MENU_SOURCE.read_bytes()
+    except OSError as error:
+        raise ValueError("standalone包缺少ModOptionsMenu许可证或来源说明") from error
+    if len(menu_license) != 674 or hashlib.sha256(menu_license).hexdigest() != MOD_OPTIONS_MENU_LICENSE_SHA256:
+        raise ValueError("ModOptionsMenu许可证字节与固定上游原文不匹配")
     loader_zip_path = Path(loader_zip) if loader_zip is not None else SHARED_LOADER_ZIP
     loader_input_note = (
         "artifacts/Bingus-Shared-Loader-v18.zip"
@@ -493,6 +681,8 @@ def addon_files(
     files["LICENSES/BingusSharedLoader-README.txt"] = loader_readme
     files["LICENSES/BingusSharedLoader-manifest.json"] = loader_manifest
     files["LICENSES/BingusSharedLoader-SOURCE.txt"] = source_note
+    files["LICENSES/ModOptionsMenu-LICENSE.txt"] = menu_license
+    files["LICENSES/ModOptionsMenu-SOURCE.txt"] = menu_source_note
     return files
 
 
@@ -538,6 +728,7 @@ def build_artifact(
     output: Path | str | None = None,
     *,
     loader_zip: Path | str | None = None,
+    menu_zip: Path | str | None = None,
     native_dll: Path | str | None = None,
     native_meta: Path | str | None = None,
 ) -> Path:
@@ -546,9 +737,12 @@ def build_artifact(
     observer_path = ROOT / "game" / "chat_observe_core.lua"
     translate_path = ROOT / "game" / "chat_translate_core.lua"
     standalone_module_path = ROOT / "game" / "chat_http_native.lua"
+    settings_path = ROOT / "game" / "settings.lua"
     dll_path = Path(native_dll) if native_dll is not None else STANDALONE_DLL
     meta_path = Path(native_meta) if native_meta is not None else STANDALONE_META
     loader_zip_path = Path(loader_zip) if loader_zip is not None else SHARED_LOADER_ZIP
+    menu_zip_path = Path(menu_zip) if menu_zip is not None else MOD_OPTIONS_MENU_ZIP
+    catalogue = target_languages.load_catalogue()
     output_path = _select_output_path(output)
     if output is None and os.path.lexists(output_path):
         raise ValueError(
@@ -557,7 +751,9 @@ def build_artifact(
         )
     source_paths = (
         entry_path, core_path, observer_path, translate_path, standalone_module_path,
-        dll_path, meta_path, STANDALONE_LICENSE, PROJECT_LICENSE, loader_zip_path,
+        settings_path, dll_path, meta_path, STANDALONE_LICENSE, PROJECT_LICENSE,
+        MOD_OPTIONS_MENU_LICENSE, MOD_OPTIONS_MENU_SOURCE,
+        target_languages.CATALOGUE_PATH, loader_zip_path, menu_zip_path,
     )
     if any(_same_path(output_path, path) for path in source_paths):
         raise ValueError("输出不能覆盖构建输入文件")
@@ -570,10 +766,17 @@ def build_artifact(
         raise ValueError("缺少 native/vendor/cjson/LICENSE")
     if not PROJECT_LICENSE.is_file():
         raise ValueError("缺少项目 LICENSE")
+    if not MOD_OPTIONS_MENU_LICENSE.is_file() or not MOD_OPTIONS_MENU_SOURCE.is_file():
+        raise ValueError("缺少ModOptionsMenu许可证或来源说明")
     native_module = standalone_module_source(
         standalone_module_path.read_bytes(),
         dll_path.read_bytes(),
         meta_path.read_bytes(),
+        catalogue,
+    )
+    settings_module = target_language_settings_source(
+        settings_path.read_bytes(),
+        catalogue,
     )
     packaged_entry = entry_source(
         entry_path.read_bytes(),
@@ -581,9 +784,10 @@ def build_artifact(
         observer_path.read_bytes(),
         translate_source=translate_path.read_bytes(),
         standalone_source=native_module,
+        settings_source=settings_module,
         standalone=True,
     )
-    files = addon_files(packaged_entry, loader_zip=loader_zip_path)
+    files = addon_files(packaged_entry, loader_zip=loader_zip_path, menu_zip=menu_zip_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     with zipfile.ZipFile(output_path, "x", compression=zipfile.ZIP_DEFLATED) as package:
         for name, content in sorted(files.items()):
@@ -602,6 +806,7 @@ def main() -> None:
         help="显式指定ZIP路径；文件名须为HD2ChatTranslateYYYYMMDDHHMMSS.zip。",
     )
     parser.add_argument("--loader-zip", type=Path, help="Bingus Shared Loader v18来源ZIP；默认使用项目artifacts路径。")
+    parser.add_argument("--menu-zip", type=Path, help="ModOptionsMenu v1.2来源ZIP；默认使用项目artifacts路径。")
     parser.add_argument("--native-dll", type=Path, help="原生HTTP helper DLL；默认使用项目artifacts/native路径。")
     parser.add_argument("--native-meta", type=Path, help="原生HTTP helper meta JSON；默认使用项目artifacts/native路径。")
     args = parser.parse_args()
@@ -611,6 +816,7 @@ def main() -> None:
         result = build_artifact(
             args.output,
             loader_zip=args.loader_zip,
+            menu_zip=args.menu_zip,
             native_dll=args.native_dll,
             native_meta=args.native_meta,
         )

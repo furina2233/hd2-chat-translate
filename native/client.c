@@ -24,6 +24,7 @@ typedef struct HD2CT_CacheEntry {
     uint64_t age;
     uint32_t used;
     uint32_t source_bytes;
+    uint32_t target_language;
     uint32_t result_bytes;
     char source[HD2CT_MAX_SOURCE + 1u];
     char result[HD2CT_MAX_RESULT + 1u];
@@ -230,6 +231,7 @@ static int hd2ct_find_cache_locked(const HD2CT_WorkerJob *job, char *result,
     for (i = 0; i < HD2CT_CACHE_COUNT; ++i) {
         HD2CT_CacheEntry *entry = &g_cache[i];
         if (entry->used && entry->source_bytes == job->source_bytes &&
+            entry->target_language == job->target_language &&
             memcmp(entry->source, job->source, job->source_bytes) == 0) {
             entry->age = ++g_cache_age;
             memcpy(result, entry->result, entry->result_bytes);
@@ -250,6 +252,7 @@ static void hd2ct_put_cache_locked(const HD2CT_WorkerJob *job,
     for (i = 0; i < HD2CT_CACHE_COUNT; ++i) {
         HD2CT_CacheEntry *entry = &g_cache[i];
         if (entry->used && entry->source_bytes == job->source_bytes &&
+            entry->target_language == job->target_language &&
             memcmp(entry->source, job->source, job->source_bytes) == 0) {
             target = i;
             oldest = 0;
@@ -269,6 +272,7 @@ static void hd2ct_put_cache_locked(const HD2CT_WorkerJob *job,
     g_cache[target].used = 1;
     g_cache[target].age = ++g_cache_age;
     g_cache[target].source_bytes = job->source_bytes;
+    g_cache[target].target_language = job->target_language;
     g_cache[target].result_bytes = result_bytes;
     memcpy(g_cache[target].source, job->source, job->source_bytes);
     g_cache[target].source[job->source_bytes] = '\0';
@@ -431,7 +435,7 @@ static int hd2ct_take_next_job_locked(HD2CT_WorkerJob *copy)
     return 1;
 }
 
-static void hd2ct_process_job(HINTERNET session, const HD2CT_WorkerJob *job)
+static void hd2ct_process_job(HINTERNET session, HD2CT_WorkerJob *job)
 {
     char result[HD2CT_MAX_RESULT + 1u];
     uint32_t result_bytes = 0;
@@ -459,6 +463,7 @@ static void hd2ct_process_job(HINTERNET session, const HD2CT_WorkerJob *job)
         hd2ct_complete_job(job, result, result_bytes, 0, 0);
         return;
     }
+    job->target_language = hd2ct_read_applied_target_language();
     AcquireSRWLockExclusive(&g_lock);
     cache_hit = hd2ct_find_cache_locked(job, result, &result_bytes);
     ReleaseSRWLockExclusive(&g_lock);

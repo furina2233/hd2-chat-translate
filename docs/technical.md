@@ -8,6 +8,7 @@
 - [game/chat_probe_core.lua](../game/chat_probe_core.lua) 校验固定游戏构建及代码签名，并限制内存读取。
 - [game/chat_translate_core.lua](../game/chat_translate_core.lua) 管理新消息、请求队列、响应、过期和回写状态。
 - [game/chat_http_native.lua](../game/chat_http_native.lua) 校验并加载随包嵌入的原生 DLL。
+- [game/settings.lua](../game/settings.lua) 向 Mod Options Menu 注册目标语言选项，不读取或控制翻译服务配置。
 - [native/client.c](../native/client.c) 管理公开 ABI、后台线程、队列、缓存与限流；原生客户端各模块共同链接为一个 DLL。
 - [tools/build_package.py](../tools/build_package.py) 将固定 loader 资源、Lua addon 和原生模块合成 Arsenal 安装包。
 
@@ -22,6 +23,7 @@
 | [client.c](../native/client.c) | 配置初始化、线程生命周期及集中管理的队列、缓存、限流状态 |
 | [common.c](../native/common.c) | UTF-8、文本、JSON 与结果格式的共用工具 |
 | [config.c](../native/config.c) | 持久环境变量读取、配置校验和 URL 补全 |
+| [languages.c](../native/languages.c) | 后台读取已应用的目标语言并提供服务商语言码 |
 | [adapter/base.c](../native/adapter/base.c) | 基适配器、服务选型、适配器表与共用表单、签名工具 |
 | [adapter/chat_completions.c](../native/adapter/chat_completions.c) | Chat Completions 请求、提示词与响应解析 |
 | [adapter/google.c](../native/adapter/google.c) | Google Basic v2 请求与响应解析 |
@@ -55,9 +57,9 @@ HD2CT_MODEL 非空时选择 AI 翻译；缺失、为空或仅含空白时选择�
 
 AI 适配器把地址根路径补全为 /chat/completions，或把精确的 /v1、/v1/ 补全为 /v1/chat/completions。机器翻译适配器仅把根路径补全为各自接口；其他路径保持原样。已支持服务要求 HTTPS，只有 localhost、127.0.0.0/8 和 ::1 可使用 HTTP。拒绝 URL 凭据、查询、片段、反斜杠、空白和控制字符；禁用重定向、cookies 和自动认证。
 
-AI Chat Completions 请求 JSON 含 model、temperature=0、reasoning_effort="none"、response_format.type=json_object 及 system/user 两条 messages。每次请求都显式指定思考强度为 none。聊天正文单独放在 user message；提示词常量 HD2CT_SYSTEM_PROMPT 位于 [native/adapter/chat_completions.c](../native/adapter/chat_completions.c)。它要求中文原样保留、其他语言翻为简短自然的简体中文，并要求 JSON 仅含 is_chinese 和 translation。当前规则包含常见缩写、游戏术语和敌名映射，例如 Charger=牛、Spore Charger=孢子牛；不对 gg 或 ggs 加特例。
+AI Chat Completions 请求 JSON 含 model、temperature=0、reasoning_effort="none"、response_format.type=json_object 及 system/user 两条 messages。每次请求都显式指定思考强度为 none。聊天正文单独放在 user message；提示词位于 [native/adapter/chat_completions.c](../native/adapter/chat_completions.c)。原生客户端按任务的目标语言生成提示词，要求已符合目标语言的文本原样保留，其余文本翻为该语言，并要求 JSON 仅含 is_target_language 和 translation。简体、繁体中文分别使用对应提示词和中文游戏术语映射，例如 Charger=牛、Spore Charger=孢子牛；其他目标语言不套用中文敌名。不对 gg 或 ggs 加特例。
 
-响应读取 Chat Completions 的 choices[0].message.content，并要求其为只含 is_chinese(bool) 与 translation(string) 的 JSON 对象。若 is_chinese 为 true，C 向 Lua 返回保持原文结果；否则 translation 必须是合法 UTF-8、非空且不超过 16,384 字节。所有翻译方式的译文与原文完全相同时也由 C 决定保持原文。
+响应读取 Chat Completions 的 choices[0].message.content，并要求其为只含 is_target_language(bool) 与 translation(string) 的 JSON 对象。若 is_target_language 为 true，C 向 Lua 返回保持原文结果；否则 translation 必须是合法 UTF-8、非空且不超过 16,384 字节。所有翻译方式的译文与原文完全相同时也由 C 决定保持原文。
 
 ## 原生任务接口
 
@@ -79,17 +81,27 @@ ABI 2 的 DLL 只导出三个函数，签名见 [client.h](../native/client.h)�
 
 | 适配器 | 协议与认证 | 成功响应 |
 | --- | --- | --- |
-| [Google Basic v2](https://docs.cloud.google.com/translate/docs/reference/rest/v2/translate) | POST /language/translate/v2；JSON q、target=zh-CN、format=text；[x-goog-api-key 请求头](https://docs.cloud.google.com/docs/authentication/api-keys-use)，不把密钥写入 URL | data.translations 的 translatedText、detectedSourceLanguage |
-| [百度通用翻译](https://fanyi-api.baidu.com/doc_bd/21) | POST /api/trans/vip/translate；UTF-8 表单 q、from=auto、to=zh、appid、salt、sign；sign=MD5(appid+原始 q+salt+密钥)，小写十六进制 | from、trans_result 中的 dst |
-| [有道文本翻译](https://ai.youdao.com/DOCSIRMA/html/trans/api/wbfy/index.html) | POST /api；UTF-8 表单 q、from=auto、to=zh-CHS、appKey、salt、curtime、signType=v3、sign、strict=true；sign=SHA256(appKey+input+salt+curtime+密钥) | errorCode=0、l、translation |
+| [Google Basic v2](https://docs.cloud.google.com/translate/docs/reference/rest/v2/translate) | POST /language/translate/v2；JSON q、target、format=text；[x-goog-api-key 请求头](https://docs.cloud.google.com/docs/authentication/api-keys-use)，不把密钥写入 URL | data.translations 的 translatedText、detectedSourceLanguage |
+| [百度通用翻译](https://fanyi-api.baidu.com/doc_bd/21) | POST /api/trans/vip/translate；UTF-8 表单 q、from=auto、to、appid、salt、sign；sign=MD5(appid+原始 q+salt+密钥)，小写十六进制 | from、trans_result 中的 dst |
+| [有道文本翻译](https://ai.youdao.com/DOCSIRMA/html/trans/api/wbfy/index.html) | POST /api；UTF-8 表单 q、from=auto、to、appKey、salt、curtime、signType=v3、sign、strict=true；sign=SHA256(appKey+input+salt+curtime+密钥) | errorCode=0、l、translation |
 
 有道 input 按 Unicode 码点计数：最多 20 个码点时为完整 q，否则为前 10 个码点、十进制码点总数、后 10 个码点。签名使用尚未 URL 编码的 UTF-8 文本，表单各字段随后编码；curtime 为 UTC Unix 秒。签名及随机 salt 使用 Windows BCrypt。
 
-机器翻译不发送 AI 提示词；Google 省略 source 参数启用自动检测，百度、有道使用 from=auto。有道 strict=true 保证按指定目标处理，避免默认自动中译英。成功结果按实际译文与原文比较，不按源语言字段替换为原文；完全相同返回 SKIP，不同返回 OK。缓存保存完整的 OK 或 SKIP 结果，命中时保持同一显示决定。
+机器翻译不发送 AI 提示词；Google 省略 source 参数启用自动检测，百度、有道使用 from=auto。target/to 使用目标语言目录中的服务商语言码，默认分别为 zh-CN、zh、zh-CHS。有道 strict=true 保证按指定目标处理，避免默认自动中译英。成功结果按实际译文与原文比较，不按源语言字段替换为原文；完全相同返回 SKIP，不同返回 OK。缓存保存完整的 OK 或 SKIP 结果，键包含原文与目标语言，命中时保持同一显示决定。
 
 三家文本接口的公开文档没有给出自动检测同语种时可用于确定源文本为中文的专用错误码。[Google 文档](https://docs.cloud.google.com/translate/docs/languages)的同语言限制位于 AutoML 自定义模型范围，不能用于断言 Basic v2 的自动检测行为；百度 58001、有道 102 都可能表示其他不支持的语言。因此按实际响应判断成功或失败，通用语言错误显示短提示，不据此吞掉消息。同语种服务端响应需用有效凭据另行实测，离线回环只验证适配器解析与显示规则。
 
 未知机器翻译服务收到消息后返回 UNSUPPORTED_SERVICE，不发 HTTP 请求，不占用限流或缓存错误。已支持服务缺少配置时返回 MISSING_CONFIG，配置无效时返回 INVALID_CONFIG，后台初始化失败时返回 SERVICE_ERROR；显式禁用返回 SKIP。错误码映射为固定短提示，响应原文、签名、密钥及堆栈不进入聊天或状态报告。
+
+## 游戏内目标语言
+
+菜单使用 [Mod Options Menu v1.2](https://github.com/CowboyBingus/ModOptionsMenu/releases/tag/v1.2) 的原生 MODS 页、choice 类型及 APPLY 保存行为。安装包合并其未经修改的 Lua 资源和 0BSD 许可；选项 ID 为 `hd2chattranslate.target_language`，mod_id 为 `hd2chattranslate`，默认值为 1（简体中文）。使用说明见[游戏内设置](settings.md)。
+
+[resources/target_languages.json](../resources/target_languages.json) 是菜单标签、AI 目标语言与三个机器翻译语言码的共同来源。[tools/target_languages.py](../tools/target_languages.py) 校验目录并在原生构建目录生成 C 表头；打包时从同一目录生成 Lua 选择项。保存值是从 1 开始的索引，因此已有语言顺序必须保持稳定，扩展时在末尾追加。构建 metadata 记录目录摘要，安装包构建器拒绝 DLL 与菜单目录不一致的组合。
+
+C 在后台 worker 开始处理任务时读取 `%LOCALAPPDATA%\CowboyBingus\Helldivers2\Logs\ModOptionsMenu.values`，不在 Submit、Poll 或游戏更新帧中执行设置文件 I/O。只校验本插件的选项值；主文件缺失、不可读或没有制表符分隔记录时尝试 `.bak`，主文件已有记录而本插件项缺失或无效时直接使用默认中文。其他模组的开关、滑块等值不会导致读取旧备份。读取上限为 512 KiB，拒绝非普通文件与 reparse point，并允许菜单原子替换文件。此路径对应随包 loader 的默认日志目录；不支持其他 loader 自定义的日志目录。
+
+目标语言在该任务内保持不变，已开始的请求不会因 APPLY 改变，后续开始处理的任务使用新选择；缓存按语言隔离。Lua 仅注册菜单项，不读取已选值、服务凭据或启用状态，公开 ABI 仍只有提交、轮询、取消三个函数。
 
 ## 调度、队列与数据上限
 
@@ -123,7 +135,7 @@ Lua FFI 的 BY_HANDLE_FILE_INFORMATION 定义为 52 字节，并核对 dwVolumeS
 
 ## Arsenal patch 格式
 
-生成的 addon patch 使用一个 Lua type（type_count=1）和两个资源文件（file_count=2），类型值为 0xA14E8DFA2CD117E2。资源按名称 hash 排序，编号为 0、1；资源数据按 16 字节边界对齐。Bingus Shared Loader v18 的 Lua resource 从固定输入中校验后原字节嵌入；stream 与 gpu_resources sidecar 均为空。
+生成的 addon patch 使用一个 Lua type（type_count=1）和三个资源文件（file_count=3），类型值为 0xA14E8DFA2CD117E2。资源按名称 hash 排序，编号为 0、1、2，依次为 loader、聊天插件、Mod Options Menu；资源数据按 16 字节边界对齐。Bingus Shared Loader v18 和 Mod Options Menu v1.2 的 Lua resource 从固定输入中校验后原字节嵌入；stream 与 gpu_resources sidecar 均为空。
 
 Arsenal manifest Guid 固定为 a741d044-972b-4dc5-b08e-1a68441e1d7f，patch 文件名为 9ba626afa44a3aa3.patch_0。构建时保留这两个身份值，以便导入新 ZIP 时更新同名模组。Lua resource 名为 mods/hd2chat/HD2ChatTranslate，加载器依据此标识发现 addon。
 

@@ -1,0 +1,2 @@
+# 保持上游菜单许可的原始 LF 换行，确保打包摘要可跨 Windows 克隆复现。
+third_party/mod_options_menu/LICENSE text eol=lf

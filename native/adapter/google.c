@@ -5,13 +5,14 @@
 int hd2ct_build_google_request(const HD2CT_WorkerJob *job,
                                       HD2CT_BuiltRequest *request)
 {
+    const HD2CT_TargetLanguage *target = hd2ct_target_language(job->target_language);
     cJSON *root = cJSON_CreateObject();
     char *printed = NULL;
     size_t length;
     int ok = 0;
     if (root == NULL ||
         cJSON_AddStringToObject(root, "q", job->source) == NULL ||
-        cJSON_AddStringToObject(root, "target", "zh-CN") == NULL ||
+        cJSON_AddStringToObject(root, "target", target->google_code) == NULL ||
         cJSON_AddStringToObject(root, "format", "text") == NULL) {
         goto cleanup;
     }

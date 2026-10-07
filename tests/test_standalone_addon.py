@@ -160,15 +160,22 @@ def fake_metadata(dll: bytes) -> bytes:
             "sha256": hashlib.sha256(dll).hexdigest(),
             "architecture": "x86_64",
             "imports": ["KERNEL32.dll", "WINHTTP.dll"],
+            "target_languages_sha256": builder.target_languages.catalogue_sha256(),
         }
     ).encode("utf-8")
 
 
 def make_entry(dll: bytes) -> bytes:
+    catalogue = builder.target_languages.load_catalogue()
     native_source = builder.standalone_module_source(
         (ROOT / "game" / "chat_http_native.lua").read_bytes(),
         dll,
         fake_metadata(dll),
+        catalogue,
+    )
+    settings_source = builder.target_language_settings_source(
+        (ROOT / "game" / "settings.lua").read_bytes(),
+        catalogue,
     )
     return builder.entry_source(
         (ROOT / "game" / "chat_probe.lua").read_bytes(),
@@ -176,6 +183,7 @@ def make_entry(dll: bytes) -> bytes:
         (ROOT / "game" / "chat_observe_core.lua").read_bytes(),
         translate_source=(ROOT / "game" / "chat_translate_core.lua").read_bytes(),
         standalone_source=native_source,
+        settings_source=settings_source,
         standalone=True,
     )
 
@@ -484,18 +492,22 @@ class StandaloneBuilderTests(unittest.TestCase):
             self.assertTrue(entry.startswith(b"-- HD2-Addon: mods/hd2chat/HD2ChatTranslate\n"))
             archive = files["Addon/9ba626afa44a3aa3.patch_0"]
             header = struct.unpack_from("<III20sQQ24s", archive, 0)
-            self.assertEqual((header[0], header[1], header[2], header[4]), (0xF0000011, 1, 2, len(archive)))
+            self.assertEqual((header[0], header[1], header[2], header[4]), (0xF0000011, 1, 3, len(archive)))
             type_record = struct.unpack_from("<IIQIIII", archive, 72)
-            self.assertEqual(type_record, (0, 0, builder.RESOURCE_TYPE, 2, 0, 16, 16))
-            entries = [struct.unpack_from("<7Q6I", archive, 104 + 80 * index) for index in range(2)]
+            self.assertEqual(type_record, (0, 0, builder.RESOURCE_TYPE, 3, 0, 16, 16))
+            entries = [struct.unpack_from("<7Q6I", archive, 104 + 80 * index) for index in range(3)]
             self.assertEqual(
                 [item[0] for item in entries],
-                [builder.SHARED_LOADER_RESOURCE_HASH, builder.resource_hash(builder.RESOURCE_NAME)],
+                [
+                    builder.SHARED_LOADER_RESOURCE_HASH,
+                    builder.resource_hash(builder.RESOURCE_NAME),
+                    builder.MOD_OPTIONS_MENU_RESOURCE_HASH,
+                ],
             )
-            self.assertEqual([item[-1] for item in entries], [0, 1])
+            self.assertEqual([item[-1] for item in entries], [0, 1, 2])
             parsed = read_archive_contract(archive)
-            self.assertEqual((parsed["type_count"], parsed["file_count"]), (1, 2))
-            self.assertEqual([row[-1] for row in parsed["file_rows"]], [0, 1])
+            self.assertEqual((parsed["type_count"], parsed["file_count"]), (1, 3))
+            self.assertEqual([row[-1] for row in parsed["file_rows"]], [0, 1, 2])
             for item in entries:
                 self.assertEqual(item[1], builder.RESOURCE_TYPE)
                 self.assertEqual(item[2] % 16, 0)
@@ -508,7 +520,23 @@ class StandaloneBuilderTests(unittest.TestCase):
                 archive[entries[1][2]:entries[1][2] + entries[1][7]],
                 struct.pack("<II", len(entry), 2) + entry,
             )
+            menu_resource = builder.load_mod_options_menu_resource()
+            self.assertEqual(
+                archive[entries[2][2]:entries[2][2] + entries[2][7]],
+                menu_resource,
+            )
+            bad_menu_zip = Path(directory) / "tampered-menu.zip"
+            tampered_menu = bytearray(builder.MOD_OPTIONS_MENU_ZIP.read_bytes())
+            tampered_menu[-1] ^= 1
+            bad_menu_zip.write_bytes(tampered_menu)
+            with self.assertRaisesRegex(ValueError, "ZIP SHA-256"):
+                builder.load_mod_options_menu_resource(bad_menu_zip)
+            with self.assertRaisesRegex(ValueError, "缺少ModOptionsMenu"):
+                builder.load_mod_options_menu_resource(Path(directory) / "missing-menu.zip")
+            with self.assertRaisesRegex(ValueError, "输出不能覆盖"):
+                builder.build_artifact(builder.MOD_OPTIONS_MENU_ZIP)
             self.assertIn(b"HD2CT_DLL_HEX", archive[entries[1][2]:entries[1][2] + entries[1][7]])
+            self.assertIn(b"target_language_settings", entry)
 
             manifest = json.loads(files["manifest.json"])
             self.assertEqual(manifest["Guid"], builder.ADDON_GUID)
@@ -523,6 +551,13 @@ class StandaloneBuilderTests(unittest.TestCase):
                 self.assertIn("列表最顶", text)
             self.assertEqual(files["LICENSES/BingusSharedLoader-README.txt"], loader_readme)
             self.assertEqual(files["LICENSES/BingusSharedLoader-manifest.json"], loader_manifest)
+            self.assertEqual(files["LICENSES/ModOptionsMenu-LICENSE.txt"], builder.MOD_OPTIONS_MENU_LICENSE.read_bytes())
+            self.assertEqual(
+                hashlib.sha256(files["LICENSES/ModOptionsMenu-LICENSE.txt"]).hexdigest(),
+                builder.MOD_OPTIONS_MENU_LICENSE_SHA256,
+            )
+            self.assertIn(b"releases/tag/v1.2", files["LICENSES/ModOptionsMenu-SOURCE.txt"])
+            self.assertIn(b"Zero-Clause BSD (0BSD)", files["LICENSES/ModOptionsMenu-SOURCE.txt"])
             self.assertIn(b"GNU GENERAL PUBLIC LICENSE", files["LICENSE"])
             self.assertEqual(files["LICENSE"], builder.PROJECT_LICENSE.read_bytes())
             self.assertEqual(files["LICENSES/cJSON-LICENSE.txt"], builder.STANDALONE_LICENSE.read_bytes())
@@ -538,6 +573,62 @@ class StandaloneBuilderTests(unittest.TestCase):
             )
             self.assertIsNotNone(self.lua)
             self.assertEqual(self.lua.run(compile_script), "standalone syntax ok")
+
+            catalogue = builder.target_languages.load_catalogue()
+            settings_source = builder.target_language_settings_source(
+                (ROOT / "game" / "settings.lua").read_bytes(), catalogue
+            ).decode("utf-8")
+            settings_delimiter = "[========["
+            settings_closing = "]========]"
+            self.assertNotIn(settings_closing, settings_source)
+            labels = "|".join(row["label"] for row in catalogue["languages"])
+            settings_script = (
+                "local module = assert(loadstring("
+                + settings_delimiter + settings_source + settings_closing
+                + "))()\n"
+                "local step = module.new()\n"
+                "local calls, saved_id, saved_spec = 0, nil, nil\n"
+                "assert(step(0) == false)\n"
+                "local function forbidden() error('option values must not be read') end\n"
+                "_G.ModOptionsMenu = {api = 1, version = 2, get = forbidden, set = forbidden, on_change = forbidden, "
+                "register_option = function(id, spec) calls = calls + 1; saved_id = id; saved_spec = spec; return true end}\n"
+                "assert(step(999) == false and calls == 0)\n"
+                "assert(step(1000) == false and calls == 0)\n"
+                "_G.ModOptionsMenu.version = 4\n"
+                "assert(step(1999) == false and calls == 0)\n"
+                "assert(step(2000) == true and calls == 1)\n"
+                "assert(step(3000) == true and calls == 1)\n"
+                "assert(saved_spec.type == 'choice' and saved_spec.label == '目标语言 / Target Language')\n"
+                "assert(saved_spec.mod == 'HD2 Chat Translate' and saved_spec.mod_id == 'hd2chattranslate')\n"
+                "assert(saved_spec.default == 1 and #saved_spec.choices == 14)\n"
+                "assert(table.concat(saved_spec.choices, '|') == 'LABELS')\n"
+                "assert(saved_id == 'hd2chattranslate.target_language')\n"
+                "local logs, failed_step = {}, module.new()\n"
+                "_G.print = function(message) logs[#logs + 1] = message end\n"
+                "_G.ModOptionsMenu = {api = 1, version = 3, register_option = function() error('private failure') end}\n"
+                "assert(failed_step(0) == false and failed_step(1000) == false and #logs == 1)\n"
+                "assert(logs[1] == '[HD2 Chat Translate] target language option registration failed')\n"
+                "_G.ModOptionsMenu = {api = 1, version = 3, register_option = function() return true end}\n"
+                "assert(failed_step(2000) == true and failed_step(3000) == true and #logs == 1)\n"
+                "local clock_calls, step_calls, game_calls, now = 0, 0, 0, 0\n"
+                "local wrapped = module.wrap_update(function(...) game_calls = game_calls + 1; return 'game', nil, ... end, "
+                "function(time) step_calls = step_calls + 1; return time >= 10 end, "
+                "function() clock_calls = clock_calls + 1; return now end)\n"
+                "local first, second, third = wrapped('payload')\n"
+                "assert(first == 'game' and second == nil and third == 'payload')\n"
+                "assert(select('#', wrapped('payload')) == 3)\n"
+                "now = 10; assert(select('#', wrapped('payload')) == 3)\n"
+                "assert(clock_calls == 3 and step_calls == 3 and game_calls == 3)\n"
+                "wrapped('payload'); assert(clock_calls == 3 and step_calls == 3 and game_calls == 4)\n"
+                "assert(select('#', wrapped('payload', nil)) == 4)\n"
+                "assert(clock_calls == 3 and step_calls == 3 and game_calls == 5)\n"
+                "local throwing = module.wrap_update(function() error('game update failure') end, "
+                "function() return true end, function() return 0 end)\n"
+                "local call_ok, call_error = pcall(throwing)\n"
+                "assert(not call_ok and tostring(call_error):find('game update failure', 1, true))\n"
+                "RESULT = 'settings registration ok'"
+            ).replace("LABELS", labels)
+            self.assertEqual(self.lua.run(settings_script), "settings registration ok")
 
             dll_path = Path(directory) / "hd2ct_http.dll"
             meta_path = Path(directory) / "hd2ct_http.meta.json"
@@ -558,6 +649,22 @@ class StandaloneBuilderTests(unittest.TestCase):
                     (ROOT / "game" / "chat_http_native.lua").read_bytes(),
                     dll,
                     json.dumps(old_abi_metadata).encode("utf-8"),
+                )
+            missing_catalogue_metadata = dict(metadata)
+            del missing_catalogue_metadata["target_languages_sha256"]
+            with self.assertRaisesRegex(ValueError, "字段不匹配"):
+                builder.standalone_module_source(
+                    (ROOT / "game" / "chat_http_native.lua").read_bytes(),
+                    dll,
+                    json.dumps(missing_catalogue_metadata).encode("utf-8"),
+                )
+            wrong_catalogue_metadata = dict(metadata)
+            wrong_catalogue_metadata["target_languages_sha256"] = "0" * 64
+            with self.assertRaisesRegex(ValueError, "目标语言目录摘要"):
+                builder.standalone_module_source(
+                    (ROOT / "game" / "chat_http_native.lua").read_bytes(),
+                    dll,
+                    json.dumps(wrong_catalogue_metadata).encode("utf-8"),
                 )
 
             meta_path.write_bytes(fake_metadata(dll))

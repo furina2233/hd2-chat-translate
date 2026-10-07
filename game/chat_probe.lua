@@ -3,6 +3,19 @@ local core = (function()
 --[[HD2_CHAT_PROBE_CORE]]
 end)()
 
+local target_language_settings = (function()
+--[[HD2CT_TARGET_LANGUAGE_SETTINGS]]
+end)()
+local target_language_settings_step
+if type(target_language_settings) == "table"
+    and type(target_language_settings.new) == "function" then
+    local settings_ok, settings_step = pcall(target_language_settings.new)
+    if settings_ok and type(settings_step) == "function" then
+        target_language_settings_step = settings_step
+    end
+end
+local target_language_settings_clock
+
 --[[HD2_STARTUP_REPORT_RETENTION_BEGIN]]
 local startup_report_retention = (function()
     local FILE_ATTRIBUTE_DIRECTORY = 0x10
@@ -778,6 +791,9 @@ local function initialize_probe()
     ]]
 
     local kernel = ffi.load("kernel32.dll")
+    target_language_settings_clock = function()
+        return tonumber(kernel.GetTickCount64())
+    end
     local retention_ok, retention_summary = pcall(
         startup_report_retention.run, ffi, kernel, OBSERVE_ENABLED, TRANSLATE_ENABLED)
     if not retention_ok then
@@ -2983,4 +2999,16 @@ if setup_ok then
     end
 else
     pcall(print, "[HD2 Chat Probe] initialization failed; research scan did not start")
+end
+
+if target_language_settings_step and target_language_settings_clock
+    and type(target_language_settings) == "table"
+    and type(target_language_settings.wrap_update) == "function" then
+    local wrapped_ok, wrapped_update = pcall(
+        target_language_settings.wrap_update,
+        _G.update,
+        target_language_settings_step,
+        target_language_settings_clock
+    )
+    if wrapped_ok and type(wrapped_update) == "function" then _G.update = wrapped_update end
 end

@@ -29,6 +29,17 @@ if (-not (Test-Path -LiteralPath artifacts/Bingus-Shared-Loader-v18.zip)) {
 
 预期 SHA-256 为 53af5698aeacfb27b98dfa00054923d11dc854e1e67b4af14798877812a93ba6，与[官方发布资产摘要](https://github.com/CowboyBingus/BingusSharedLoader/releases/expanded_assets/v18)一致。构建器也会核验内部启动 patch 和 Lua 资源摘要，不匹配时拒绝构建。
 
+目标语言菜单使用 [Mod Options Menu v1.2](https://github.com/CowboyBingus/ModOptionsMenu/releases/tag/v1.2) 的官方发布包。同样需保持原 ZIP，将 `Mod-Options-Menu-v1.2.zip` 放到 `artifacts/`：
+
+~~~pwsh
+if (-not (Test-Path -LiteralPath artifacts/Mod-Options-Menu-v1.2.zip)) {
+    Invoke-WebRequest -Uri 'https://github.com/CowboyBingus/ModOptionsMenu/releases/download/v1.2/Mod-Options-Menu-v1.2.zip' -OutFile artifacts/Mod-Options-Menu-v1.2.zip
+}
+(Get-FileHash -LiteralPath artifacts/Mod-Options-Menu-v1.2.zip -Algorithm SHA256).Hash
+~~~
+
+预期 SHA-256 为 `a977d84e7f8fda62c587b5b5af2012aab3fa792e31945a9c8d5f458bfd453e13`。构建器校验 ZIP、patch 和 Lua 资源，只原样合入菜单资源，不运行上游脚本。
+
 native/vendor/cjson/ 已包含固定的 [cJSON v1.7.19](https://github.com/DaveGamble/cJSON/tree/v1.7.19) 源码与 MIT 许可。无需另行下载、安装 HD2SDK 或提取游戏资源。
 
 ## 编译原生网络模块
@@ -46,7 +57,7 @@ if ($LASTEXITCODE -ne 0) { throw '原生模块构建失败' }
 python tools/build_native_http.py --cc 'C:\tools\mingw64\bin\gcc.exe' --objdump 'C:\tools\mingw64\bin\objdump.exe'
 ~~~
 
-生成 artifacts/native/hd2ct_http.dll 和 artifacts/native/hd2ct_http.meta.json。脚本校验 Win64 PE 格式、三个任务接口导出及 WinHTTP、注册表、BCrypt 和 Windows CRT 系统依赖，并记录 ABI 2、长度、SHA-256 与编译器版本。机器翻译的签名和随机数使用 Windows 自带 BCrypt，构建脚本会链接对应系统库。不接受额外的 MinGW 动态运行库依赖。
+生成 artifacts/native/hd2ct_http.dll 和 artifacts/native/hd2ct_http.meta.json。脚本从 `resources/target_languages.json` 自动生成同目录的 `target_languages.generated.h`，无需自行准备或提交该生成文件。脚本校验 Win64 PE 格式、三个任务接口导出及 WinHTTP、注册表、BCrypt 和 Windows CRT 系统依赖，并记录 ABI 2、长度、SHA-256、目标语言目录摘要与编译器版本。机器翻译的签名和随机数使用 Windows 自带 BCrypt，构建脚本会链接对应系统库。不接受额外的 MinGW 动态运行库依赖。
 
 可用 --output 和 --meta 指定中间产物路径；两者必须成对交给下一步，不可混用旧 DLL 与新 metadata。更换编译器时二进制摘要可能改变，包构建器会嵌入本次实际模块及其摘要。
 
@@ -57,15 +68,15 @@ python tools/build_package.py
 if ($LASTEXITCODE -ne 0) { throw '安装包构建失败' }
 ~~~
 
-默认读取上一步的 DLL/meta、game/ 源码与固定 loader ZIP，输出 artifacts/HD2ChatTranslateYYYYMMDDHHMMSS.zip。命名时间为北京时间；--output 也必须使用此格式，已有文件不会覆盖，同秒重复构建需等下一秒。
+默认读取上一步的 DLL/meta、game/ 源码、共享语言目录与两个固定上游 ZIP，输出 artifacts/HD2ChatTranslateYYYYMMDDHHMMSS.zip。命名时间为北京时间；--output 也必须使用此格式，已有文件不会覆盖，同秒重复构建需等下一秒。修改语言目录后必须重新构建 DLL；安装包构建器会拒绝目录摘要不匹配的旧模块。
 
 使用其他依赖路径时可显式传入：
 
 ~~~pwsh
-python tools/build_package.py --loader-zip 'C:\dependencies\Bingus-Shared-Loader-v18.zip' --native-dll 'C:\build\hd2ct_http.dll' --native-meta 'C:\build\hd2ct_http.meta.json'
+python tools/build_package.py --loader-zip 'C:\dependencies\Bingus-Shared-Loader-v18.zip' --menu-zip 'C:\dependencies\Mod-Options-Menu-v1.2.zip' --native-dll 'C:\build\hd2ct_http.dll' --native-meta 'C:\build\hd2ct_http.meta.json'
 ~~~
 
-包中包含 manifest.json、项目 GPLv3 原文、一个合并 patch、空 stream/gpu_resources sidecar、cJSON 许可和 loader 上游来源文件。模型地址、模型名和密钥不会进入包。包保留既有 Guid 与资源名，导入 Arsenal 时更新同名模组。
+包中包含 manifest.json、项目 GPLv3 原文、一个合并 patch、空 stream/gpu_resources sidecar、cJSON、loader 和菜单框架的许可及来源文件。合并 patch 包含 loader、聊天翻译与菜单三个 Lua 资源，只需导入一个 ZIP。模型地址、模型名和密钥不会进入包。包保留既有 Guid 与资源名，导入 Arsenal 时更新同名模组。
 
 ## 离线验证
 
@@ -104,7 +115,7 @@ python -m zipfile -t $taskPackage
 Get-FileHash -LiteralPath $taskPackage -Algorithm SHA256
 ~~~
 
-离线测试和 ZIP 核验不能代替实际游戏验收。关闭游戏后在 Arsenal 导入并部署，启动后发送新英文聊天，确认原文及“译文：”行显示。连续发送至少三条长短不同的英文消息，确认较早消息已为增加的行数留出空间且没有重叠；再检查收到新消息以及打开、关闭输入框后的布局。使用步骤见[安装、配置与使用](../README.md#安装与更新)。
+离线测试和 ZIP 核验不能代替实际游戏验收。关闭游戏后在 Arsenal 导入并部署，启动后发送新英文聊天，确认原文及“译文：”行显示。连续发送至少三条长短不同的英文消息，确认较早消息已为增加的行数留出空间且没有重叠；再检查收到新消息以及打开、关闭输入框后的布局。在 ESC → MODS 中改变目标语言并应用，发送新消息核对目标语言，再重启核对保存值。环境变量配置见[安装、配置与使用](../README.md#安装与更新)，菜单操作见[游戏内设置](settings.md)。
 
 性能回归以假单调时钟检查不同帧率下扫描、响应处理和报告次数，不等同于真实游戏 FPS。游戏内性能对比应在相同场景、画质设置和帧率上限下进行，并等待启动核验结束。
 
@@ -117,6 +128,8 @@ Get-FileHash -LiteralPath $taskPackage -Algorithm SHA256
 | DLL 有额外动态依赖 | 使用不引入额外运行库的工具链并核对导入，不要移除校验 |
 | DLL 与 metadata 不匹配 | 重新执行原生构建，使用同次生成的两个文件 |
 | loader 摘要或条目不匹配 | 重新获取固定 v18 发布资产并保留原 ZIP |
+| 菜单 ZIP 摘要或条目不匹配 | 重新获取固定 Mod Options Menu v1.2 原始发布资产 |
+| 目标语言目录与 metadata 不匹配 | 用当前目录重新构建 DLL 与 metadata，再打包 |
 | 文件名不符合要求或已存在 | 使用新的 HD2ChatTranslate年月日时分秒.zip 名称 |
 | Lua 回归报错或被跳过 | 指定兼容 Win64 LuaJIT DLL 后重跑 |
 
