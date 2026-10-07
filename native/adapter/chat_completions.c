@@ -21,6 +21,15 @@ static const char HD2CT_CHINESE_PROMPT[] =
     "War Strider=大双足；Harvester=三足；Fleshmob=肉瘤体。完整特定名称优先，常规复数或同类变体沿用译名。"
     "术语：reinforce=增援；extract=撤离；resupply=补给；stratagem=战备。";
 
+static const char HD2CT_RESPONSE_FORMAT[] =
+    "{\"type\":\"json_schema\",\"json_schema\":{"
+    "\"name\":\"hd2ct_translation\",\"strict\":true,"
+    "\"schema\":{\"type\":\"object\",\"properties\":{"
+    "\"is_target_language\":{\"type\":\"boolean\"},"
+    "\"translation\":{\"type\":\"string\"}},"
+    "\"required\":[\"is_target_language\",\"translation\"],"
+    "\"additionalProperties\":false}}}";
+
 static int hd2ct_exact_result_fields(const cJSON *object)
 {
     const cJSON *item;
@@ -174,7 +183,7 @@ static int hd2ct_make_request_json(const HD2CT_WorkerJob *job, char **json_out,
     }
     system_prompt = prompt_buffer;
     root = cJSON_CreateObject();
-    response_format = cJSON_CreateObject();
+    response_format = cJSON_Parse(HD2CT_RESPONSE_FORMAT);
     messages = cJSON_CreateArray();
     system_message = cJSON_CreateObject();
     user_message = cJSON_CreateObject();
@@ -185,7 +194,6 @@ static int hd2ct_make_request_json(const HD2CT_WorkerJob *job, char **json_out,
     if (cJSON_AddStringToObject(root, "model", job->model) == NULL ||
         cJSON_AddNumberToObject(root, "temperature", 0) == NULL ||
         cJSON_AddStringToObject(root, "reasoning_effort", "none") == NULL ||
-        cJSON_AddStringToObject(response_format, "type", "json_object") == NULL ||
         cJSON_AddItemToObject(root, "response_format", response_format) == 0) {
         goto cleanup;
     }

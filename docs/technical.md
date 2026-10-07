@@ -59,7 +59,7 @@ HD2CT_MODEL 非空时选择 AI 翻译；缺失、为空或仅含空白时选择�
 
 AI 适配器把地址根路径补全为 /chat/completions，或把精确的 /v1、/v1/ 补全为 /v1/chat/completions。机器翻译适配器仅把根路径补全为各自接口；其他路径保持原样。已支持服务要求 HTTPS，只有 localhost、127.0.0.0/8 和 ::1 可使用 HTTP。拒绝 URL 凭据、查询、片段、反斜杠、空白和控制字符；禁用重定向、cookies 和自动认证。
 
-AI Chat Completions 请求 JSON 含 model、temperature=0、reasoning_effort="none"、response_format.type=json_object 及 system/user 两条 messages。每次请求都显式指定思考强度为 none。聊天正文单独放在 user message；提示词位于 [native/adapter/chat_completions.c](../native/adapter/chat_completions.c)。系统提示词由中文编写的通用部分和简体中文专属部分组成：通用部分拼入目标语言，约束文本翻译、昵称和坐标保留及精确 JSON 字段 is_target_language/translation；仅简体中文目标会追加网络缩写、敌名和游戏黑话对照，例如 Charger=牛、Spore Charger=孢子牛，并保留中文原文。繁体中文和其他目标只使用通用部分。不对 gg 或 ggs 加特例。
+AI Chat Completions 请求 JSON 含 model、temperature=0、reasoning_effort="none"、response_format.type=json_schema 及 system/user 两条 messages。每次请求都显式指定思考强度为 none。聊天正文单独放在 user message；提示词位于 [native/adapter/chat_completions.c](../native/adapter/chat_completions.c)。响应 schema 严格要求 is_target_language（布尔值）和 translation（字符串），并禁止额外属性；服务端需支持结构化输出。完整简体中文请求示例见 [ai-request-example.json](ai-request-example.json)。系统提示词由中文编写的通用部分和简体中文专属部分组成：通用部分拼入目标语言，约束文本翻译及精确 JSON 字段 is_target_language/translation；仅简体中文目标会追加网络缩写、敌名和游戏黑话对照，例如 Charger=牛、Spore Charger=孢子牛，并保留中文原文。繁体中文和其他目标只使用通用部分。不对 gg 或 ggs 加特例。
 
 响应读取 Chat Completions 的 choices[0].message.content，并要求其为只含 is_target_language(bool) 与 translation(string) 的 JSON 对象。若 is_target_language 为 true，C 向 Lua 返回保持原文结果；否则 translation 必须是合法 UTF-8、非空且不超过 16,384 字节。所有翻译方式的译文与原文完全相同时也由 C 决定保持原文。
 

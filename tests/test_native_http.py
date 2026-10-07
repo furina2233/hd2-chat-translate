@@ -26,6 +26,22 @@ import target_languages
 NATIVE_SOURCES = build_native_http.NATIVE_SOURCES
 NATIVE_TEST_ROOT = ROOT / "artifacts" / "validation"
 TARGET_LANGUAGE_CATALOGUE = target_languages.load_catalogue()
+AI_RESPONSE_FORMAT = {
+    "type": "json_schema",
+    "json_schema": {
+        "name": "hd2ct_translation",
+        "strict": True,
+        "schema": {
+            "type": "object",
+            "properties": {
+                "is_target_language": {"type": "boolean"},
+                "translation": {"type": "string"},
+            },
+            "required": ["is_target_language", "translation"],
+            "additionalProperties": False,
+        },
+    },
+}
 
 ENVIRONMENT_CHILD = r"""
 import ctypes
@@ -1034,6 +1050,7 @@ class NativeHttpWorkerTests(unittest.TestCase):
         for position, row in enumerate(languages):
             payload = self.state.payloads[position]
             if adapter_name == "ai":
+                self.assertEqual(payload["response_format"], AI_RESPONSE_FORMAT)
                 prompt = payload["messages"][0]["content"]
                 self.assertIn(row["ai_target"], prompt)
                 self.assertIn("目标语言为" + row["ai_target"], prompt)
@@ -1056,6 +1073,7 @@ class NativeHttpWorkerTests(unittest.TestCase):
                     self.assertIn("lol=哈哈", prompt)
                 expected_translation = "AI-" + row["id"]
             else:
+                self.assertNotIn("response_format", payload)
                 self.assertEqual(payload["to"] if adapter_name != "google"
                                  else payload["target"], row[code_field[adapter_name]])
                 expected_translation = adapter_name.title() + "-" + row["id"]
@@ -1873,9 +1891,22 @@ class NativeHttpWorkerTests(unittest.TestCase):
         payload = self.state.payloads[0]
         self.assertEqual([item["role"] for item in payload["messages"]], ["system", "user"])
         self.assertEqual(payload["messages"][1]["content"], english)
-        self.assertEqual(payload["response_format"], {"type": "json_object"})
+        self.assertEqual(payload["response_format"], AI_RESPONSE_FORMAT)
         self.assertEqual(payload["temperature"], 0)
         self.assertEqual(payload["reasoning_effort"], "none")
+        example = json.loads(
+            (ROOT / "docs" / "ai-request-example.json").read_text(encoding="utf-8")
+        )
+        expected_example = dict(payload)
+        expected_example["model"] = "YOUR_MODEL"
+        expected_example["messages"] = [
+            payload["messages"][0],
+            {
+                "role": "user",
+                "content": "We need reinforcements. A Charger is approaching A1.",
+            },
+        ]
+        self.assertEqual(example, expected_example)
         prompt = payload["messages"][0]["content"]
         for rule in (
             "目标语言为简体中文",
