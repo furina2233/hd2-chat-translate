@@ -327,7 +327,7 @@ LSTATUS WINAPI fixture_RegGetValueW(
     return ERROR_FILE_NOT_FOUND;
 }
 
-#include "hd2ct_http.c"
+#include "client.c"
 
 __declspec(dllexport) void __cdecl fixture_ClearRegistry(void)
 {

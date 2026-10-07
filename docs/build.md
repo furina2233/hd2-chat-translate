@@ -33,7 +33,7 @@ native/vendor/cjson/ 已包含固定的 [cJSON v1.7.19](https://github.com/DaveG
 
 ## 编译原生网络模块
 
-构建脚本按 `tools/build_native_http.py` 中的 `NATIVE_SOURCES` 清单编译所有原生客户端 `.c` 文件，并与固定版本的 cJSON 一起链接为 `hd2ct_http.dll`。源码模块划分见[技术说明](technical.md#原生客户端模块)；添加模块时需同步更新源码清单。
+构建脚本按 `tools/build_native_http.py` 中的 `NATIVE_SOURCES` 清单编译 `native/` 的客户端基础模块与 `native/adapter/` 的翻译适配器，并与固定版本的 cJSON 一起链接为 `hd2ct_http.dll`。源码模块划分和命名规则见[技术说明](technical.md#原生客户端模块)；添加模块时需同步更新源码清单。
 
 ~~~pwsh
 python tools/build_native_http.py

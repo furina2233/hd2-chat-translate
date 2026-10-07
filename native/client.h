@@ -1,5 +1,5 @@
-#ifndef HD2CT_HTTP_H
-#define HD2CT_HTTP_H
+#ifndef HD2CT_CLIENT_H
+#define HD2CT_CLIENT_H
 
 #include <stdint.h>
 

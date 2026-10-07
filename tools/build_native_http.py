@@ -16,20 +16,20 @@ ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_DLL = ROOT / "artifacts" / "native" / "hd2ct_http.dll"
 NATIVE_DIR = ROOT / "native"
 NATIVE_SOURCES = (
-    NATIVE_DIR / "hd2ct_http.c",
-    NATIVE_DIR / "hd2ct_http_common.c",
-    NATIVE_DIR / "hd2ct_http_config.c",
-    NATIVE_DIR / "hd2ct_http_adapters.c",
-    NATIVE_DIR / "hd2ct_http_ai.c",
-    NATIVE_DIR / "hd2ct_http_google.c",
-    NATIVE_DIR / "hd2ct_http_baidu.c",
-    NATIVE_DIR / "hd2ct_http_youdao.c",
-    NATIVE_DIR / "hd2ct_http_transport.c",
+    NATIVE_DIR / "client.c",
+    NATIVE_DIR / "common.c",
+    NATIVE_DIR / "config.c",
+    NATIVE_DIR / "adapter" / "base.c",
+    NATIVE_DIR / "adapter" / "chat_completions.c",
+    NATIVE_DIR / "adapter" / "google.c",
+    NATIVE_DIR / "adapter" / "baidu.c",
+    NATIVE_DIR / "adapter" / "youdao.c",
+    NATIVE_DIR / "transport.c",
     NATIVE_DIR / "vendor" / "cjson" / "cJSON.c",
 )
 NATIVE_HEADERS = (
-    NATIVE_DIR / "hd2ct_http.h",
-    NATIVE_DIR / "hd2ct_http_internal.h",
+    NATIVE_DIR / "client.h",
+    NATIVE_DIR / "internal.h",
     NATIVE_DIR / "vendor" / "cjson" / "cJSON.h",
 )
 ALLOWED_IMPORTS = {
@@ -153,6 +153,8 @@ def main() -> int:
         "-DCJSON_NESTING_LIMIT=32",
         "-DCJSON_HIDE_SYMBOLS",
         "-Wl,--exclude-all-symbols",
+        "-I",
+        str(NATIVE_DIR),
         *(str(source) for source in NATIVE_SOURCES),
         "-o",
         str(output),

@@ -8,7 +8,7 @@
 - [game/chat_probe_core.lua](../game/chat_probe_core.lua) 校验固定游戏构建及代码签名，并限制内存读取。
 - [game/chat_translate_core.lua](../game/chat_translate_core.lua) 管理新消息、请求队列、响应、过期和回写状态。
 - [game/chat_http_native.lua](../game/chat_http_native.lua) 校验并加载随包嵌入的原生 DLL。
-- [native/hd2ct_http.c](../native/hd2ct_http.c) 管理公开 ABI、后台线程、队列、缓存与限流；原生客户端各模块共同链接为一个 DLL。
+- [native/client.c](../native/client.c) 管理公开 ABI、后台线程、队列、缓存与限流；原生客户端各模块共同链接为一个 DLL。
 - [tools/build_package.py](../tools/build_package.py) 将固定 loader 资源、Lua addon 和原生模块合成 Arsenal 安装包。
 
 当前兼容范围为 Steam build 25480438、游戏 EXE 1.8.46015.0。门禁同时核对 game.dll SHA-256 2e2c3b7c2500646dadd5f2b4c6e0504dbb7e7896139f64cddc0d1813c718f51e、文件长度 15,522,408、PE timestamp 1790161983、SizeOfImage 74,727,424，以及可执行节 RVA 0x1000、长度 34,667,155、标志 0x60000020 和已知指令签名。指纹或签名不匹配时不会进入聊天回写路径。
@@ -17,19 +17,21 @@
 
 | 文件 | 职责 |
 | --- | --- |
-| [hd2ct_http.h](../native/hd2ct_http.h) | Lua 使用的九个公开 ABI 函数 |
-| [hd2ct_http_internal.h](../native/hd2ct_http_internal.h) | 模块间的私有类型、上限与函数声明 |
-| [hd2ct_http.c](../native/hd2ct_http.c) | 配置初始化、线程生命周期及集中管理的队列、缓存、限流状态 |
-| [hd2ct_http_common.c](../native/hd2ct_http_common.c) | UTF-8、文本、JSON 与结果格式的共用工具 |
-| [hd2ct_http_config.c](../native/hd2ct_http_config.c) | 持久环境变量读取、配置校验和 URL 补全 |
-| [hd2ct_http_adapters.c](../native/hd2ct_http_adapters.c) | 基适配器、服务选型、适配器表与共用表单、签名工具 |
-| [hd2ct_http_ai.c](../native/hd2ct_http_ai.c) | Chat Completions 请求、提示词与响应解析 |
-| [hd2ct_http_google.c](../native/hd2ct_http_google.c) | Google Basic v2 请求与响应解析 |
-| [hd2ct_http_baidu.c](../native/hd2ct_http_baidu.c) | 百度通用翻译请求与响应解析 |
-| [hd2ct_http_youdao.c](../native/hd2ct_http_youdao.c) | 有道文本翻译请求与响应解析 |
-| [hd2ct_http_transport.c](../native/hd2ct_http_transport.c) | WinHTTP 传输、请求截止时间、取消检查与网络资源清理 |
+| [client.h](../native/client.h) | Lua 使用的九个公开 ABI 函数 |
+| [internal.h](../native/internal.h) | 模块间的私有类型、上限与函数声明 |
+| [client.c](../native/client.c) | 配置初始化、线程生命周期及集中管理的队列、缓存、限流状态 |
+| [common.c](../native/common.c) | UTF-8、文本、JSON 与结果格式的共用工具 |
+| [config.c](../native/config.c) | 持久环境变量读取、配置校验和 URL 补全 |
+| [adapter/base.c](../native/adapter/base.c) | 基适配器、服务选型、适配器表与共用表单、签名工具 |
+| [adapter/chat_completions.c](../native/adapter/chat_completions.c) | Chat Completions 请求、提示词与响应解析 |
+| [adapter/google.c](../native/adapter/google.c) | Google Basic v2 请求与响应解析 |
+| [adapter/baidu.c](../native/adapter/baidu.c) | 百度通用翻译请求与响应解析 |
+| [adapter/youdao.c](../native/adapter/youdao.c) | 有道文本翻译请求与响应解析 |
+| [transport.c](../native/transport.c) | WinHTTP 传输、请求截止时间、取消检查与网络资源清理 |
 
 各 `.c` 文件独立编译，私有函数只在 DLL 内链接。队列及线程共享状态集中在入口模块，通过少量私有函数协作；JSON 解析使用仓库内的 cJSON v1.7.19。
+
+客户端基础模块放在 `native/`，翻译适配器及其共用实现放在 `native/adapter/`，第三方依赖放在 `native/vendor/`。源码文件名使用按职责或接口命名的小写 `snake_case`；内部符号保留 `hd2ct_` 前缀，公开 ABI 保留 `HD2CT_` 前缀，交付 DLL 名为 `hd2ct_http.dll`。
 
 ## 聊天正文与布局路径
 
@@ -53,7 +55,7 @@ HD2CT_MODEL 非空时选择 AI 翻译；缺失、为空或仅含空白时选择�
 
 AI 适配器把地址根路径补全为 /chat/completions，或把精确的 /v1、/v1/ 补全为 /v1/chat/completions。机器翻译适配器仅把根路径补全为各自接口；其他路径保持原样。已支持服务要求 HTTPS，只有 localhost、127.0.0.0/8 和 ::1 可使用 HTTP。拒绝 URL 凭据、查询、片段、反斜杠、空白和控制字符；禁用重定向、cookies 和自动认证。
 
-AI Chat Completions 请求 JSON 含 model、temperature=0、reasoning_effort="none"、response_format.type=json_object 及 system/user 两条 messages。每次请求都显式指定思考强度为 none。聊天正文单独放在 user message；提示词常量 HD2CT_SYSTEM_PROMPT 位于 [native/hd2ct_http_ai.c](../native/hd2ct_http_ai.c)。它要求中文原样保留、其他语言翻为简短自然的简体中文，并要求 JSON 仅含 is_chinese 和 translation。当前规则包含常见缩写、游戏术语和敌名映射，例如 Charger=牛、Spore Charger=孢子牛；不对 gg 或 ggs 加特例。
+AI Chat Completions 请求 JSON 含 model、temperature=0、reasoning_effort="none"、response_format.type=json_object 及 system/user 两条 messages。每次请求都显式指定思考强度为 none。聊天正文单独放在 user message；提示词常量 HD2CT_SYSTEM_PROMPT 位于 [native/adapter/chat_completions.c](../native/adapter/chat_completions.c)。它要求中文原样保留、其他语言翻为简短自然的简体中文，并要求 JSON 仅含 is_chinese 和 translation。当前规则包含常见缩写、游戏术语和敌名映射，例如 Charger=牛、Spore Charger=孢子牛；不对 gg 或 ggs 加特例。
 
 响应读取 Chat Completions 的 choices[0].message.content，并要求其为只含 is_chinese(bool) 与 translation(string) 的 JSON 对象。若 is_chinese 为 true，原文直接作为结果；否则 translation 必须是合法 UTF-8、非空且不超过 16,384 字节。
 

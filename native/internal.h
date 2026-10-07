@@ -1,5 +1,5 @@
-#ifndef HD2CT_HTTP_INTERNAL_H
-#define HD2CT_HTTP_INTERNAL_H
+#ifndef HD2CT_INTERNAL_H
+#define HD2CT_INTERNAL_H
 
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
@@ -11,7 +11,7 @@
 #define WINVER 0x0601
 #endif
 
-#include "hd2ct_http.h"
+#include "client.h"
 #include "vendor/cjson/cJSON.h"
 
 #include <windows.h>

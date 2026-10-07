@@ -1,4 +1,4 @@
-#include "hd2ct_http_internal.h"
+#include "internal.h"
 
 #include <string.h>
 #include <stdio.h>
