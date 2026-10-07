@@ -3,15 +3,73 @@ local catalogue = {
 --[[HD2CT_TARGET_LANGUAGE_CATALOGUE]]
 }
 
+local menu_locales = {
+--[[HD2CT_MENU_LOCALES]]
+}
+
+local function current_locale()
+    local translations = rawget(_G, "BingusTranslations")
+    if type(translations) ~= "table" or rawget(translations, "version") ~= 1 then
+        return rawget(menu_locales, "en")
+    end
+
+    local game_language = rawget(translations, "game_language")
+    if type(game_language) ~= "string" then
+        return rawget(menu_locales, "en")
+    end
+
+    local locale = rawget(menu_locales, game_language)
+    if type(locale) == "table" then return locale end
+
+    local base_language = string.match(game_language, "^([^-]+)")
+    if type(base_language) == "string" then
+        locale = rawget(menu_locales, base_language)
+        if type(locale) == "table" then return locale end
+    end
+    return rawget(menu_locales, "en")
+end
+
+local function localized_text(key, index, seconds)
+    local locale = current_locale()
+    local value
+    if key == "target_language_choices" then
+        local choices = rawget(locale, key)
+        if type(choices) == "table" then value = rawget(choices, index) end
+    else
+        value = rawget(locale, key)
+    end
+    if type(value) ~= "string" then
+        locale = rawget(menu_locales, "en")
+        if key == "target_language_choices" then
+            value = rawget(rawget(locale, key), index)
+        else
+            value = rawget(locale, key)
+        end
+    end
+
+    if key == "timeout_choice_format" then
+        if seconds ~= 10 and seconds ~= 20 and seconds ~= 30 then seconds = 20 end
+        local rendered = string.gsub(value, "{seconds}", string.format("%d", seconds), 1)
+        return rendered
+    end
+    return value
+end
+
+local function text_callback(key, index, seconds)
+    return function()
+        return localized_text(key, index, seconds)
+    end
+end
+
 local function new_registration_step()
     local language_choices = {}
-    for index, language in ipairs(catalogue.languages) do
-        language_choices[index] = language.label
+    for index in ipairs(catalogue.languages) do
+        language_choices[index] = text_callback("target_language_choices", index)
     end
 
     local timeout_choices = {}
     for index, choice in ipairs(catalogue.menu_options.timeout.choices) do
-        timeout_choices[index] = choice.label
+        timeout_choices[index] = text_callback("timeout_choice_format", nil, choice.seconds)
     end
 
     local specs = {
@@ -19,35 +77,35 @@ local function new_registration_step()
             option_id = catalogue.option_id,
             spec = {
                 type = "choice",
-                label = "目标语言 / Target Language",
+                label = text_callback("target_language_label"),
                 mod = "HD2 Chat Translate",
                 mod_id = catalogue.mod_id,
                 default = catalogue.default_index,
                 choices = language_choices,
-                description = "APPLY 后开始处理的任务使用新目标语言。",
+                description = text_callback("target_language_description"),
             },
         },
         {
             option_id = catalogue.menu_options.enabled.option_id,
             spec = {
                 type = catalogue.menu_options.enabled.type,
-                label = catalogue.menu_options.enabled.label,
+                label = text_callback("enabled_label"),
                 mod = "HD2 Chat Translate",
                 mod_id = catalogue.mod_id,
                 default = catalogue.menu_options.enabled.default,
-                description = catalogue.menu_options.enabled.description,
+                description = text_callback("enabled_description"),
             },
         },
         {
             option_id = catalogue.menu_options.timeout.option_id,
             spec = {
                 type = catalogue.menu_options.timeout.type,
-                label = catalogue.menu_options.timeout.label,
+                label = text_callback("timeout_label"),
                 mod = "HD2 Chat Translate",
                 mod_id = catalogue.mod_id,
                 default = catalogue.menu_options.timeout.default_index,
                 choices = timeout_choices,
-                description = catalogue.menu_options.timeout.description,
+                description = text_callback("timeout_description"),
             },
         },
     }

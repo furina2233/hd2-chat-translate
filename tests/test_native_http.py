@@ -1038,21 +1038,22 @@ class NativeHttpWorkerTests(unittest.TestCase):
                 self.assertIn(row["ai_target"], prompt)
                 self.assertIn("目标语言为" + row["ai_target"], prompt)
                 self.assertIn("is_target_language", prompt)
+                self.assertIn("若原文已经是目标语言，设置is_target_language=true并原样返回", prompt)
+                self.assertIn("只输出JSON对象", prompt)
+                self.assertIn("且只能包含is_target_language（布尔值）和translation（字符串）", prompt)
                 self.assertNotIn("Translate the input", prompt)
                 if row["id"] != "zh_cn":
                     self.assertNotIn("Charger=牛", prompt)
                     self.assertNotIn("Stalker=隐身虫", prompt)
                     self.assertNotIn("lol=哈哈", prompt)
+                    self.assertNotIn("以下为游戏内敌人的口语表达", prompt)
                     self.assertTrue(prompt.endswith("translation（字符串）。"))
                 if row["id"] == "zh_tw":
-                    self.assertNotIn("简体中文专属规则", prompt)
                     self.assertIn("目标语言为繁體中文", prompt)
                 if row["id"] == "zh_cn":
+                    self.assertIn("以下为游戏内敌人的口语表达", prompt)
                     self.assertIn("Charger=牛", prompt)
-                    self.assertIn("忽略大小写", prompt)
                     self.assertIn("lol=哈哈", prompt)
-                    self.assertIn("简体中文专属规则", prompt)
-                    self.assertIn("中文原样返回，is_target_language=true", prompt)
                 expected_translation = "AI-" + row["id"]
             else:
                 self.assertEqual(payload["to"] if adapter_name != "google"
@@ -1878,8 +1879,8 @@ class NativeHttpWorkerTests(unittest.TestCase):
         prompt = payload["messages"][0]["content"]
         for rule in (
             "目标语言为简体中文",
-            "简体中文专属规则",
-            "中文原样返回，is_target_language=true",
+            "以下为游戏内敌人的口语表达",
+            "若原文已经是目标语言，设置is_target_language=true并原样返回",
             "is_target_language",
             "translation",
             "Charger=牛",

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+import copy
 import hashlib
 import io
 import json
@@ -19,6 +20,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "tests"))
 sys.path.insert(0, str(ROOT / "tools"))
 import build_package as builder  # noqa: E402
+import menu_locales  # noqa: E402
 from lua_support import LUA_DLL, LuaJIT  # noqa: E402
 
 
@@ -176,6 +178,7 @@ def make_entry(dll: bytes) -> bytes:
     settings_source = builder.target_language_settings_source(
         (ROOT / "game" / "settings.lua").read_bytes(),
         catalogue,
+        menu_locales.load_catalogue(),
     )
     return builder.entry_source(
         (ROOT / "game" / "chat_probe.lua").read_bytes(),
@@ -575,13 +578,74 @@ class StandaloneBuilderTests(unittest.TestCase):
             self.assertEqual(self.lua.run(compile_script), "standalone syntax ok")
 
             catalogue = builder.target_languages.load_catalogue()
+            localizations = menu_locales.load_catalogue()
             settings_source = builder.target_language_settings_source(
-                (ROOT / "game" / "settings.lua").read_bytes(), catalogue
+                (ROOT / "game" / "settings.lua").read_bytes(), catalogue, localizations
             ).decode("utf-8")
             settings_delimiter = "[========["
             settings_closing = "]========]"
             self.assertNotIn(settings_closing, settings_source)
-            labels = "|".join(row["label"] for row in catalogue["languages"])
+            english = localizations["locales"]["en"]
+            english_values = [english[key] for key in menu_locales.TEXT_KEYS]
+            english_values.extend(english["target_languages"].values())
+            self.assertTrue(all(value.isascii() for value in english_values))
+
+            with self.assertRaisesRegex(ValueError, "重复JSON键"):
+                menu_locales.parse_catalogue(
+                    b'{"schema_version":1,"schema_version":1,"locales":{}}'
+                )
+            invalid_locales = copy.deepcopy(localizations)
+            del invalid_locales["locales"]["ru"]
+            with self.assertRaisesRegex(ValueError, "locale集合字段无效"):
+                menu_locales.validate_catalogue(invalid_locales)
+            invalid_locales = copy.deepcopy(localizations)
+            invalid_locales["locales"]["en"]["unexpected"] = "text"
+            with self.assertRaisesRegex(ValueError, "en文本字段无效"):
+                menu_locales.validate_catalogue(invalid_locales)
+            invalid_locales = copy.deepcopy(localizations)
+            invalid_locales["locales"]["en"]["target_language_description"] = "x" * 401
+            with self.assertRaisesRegex(ValueError, "400字符上限"):
+                menu_locales.validate_catalogue(invalid_locales)
+            invalid_locales = copy.deepcopy(localizations)
+            invalid_locales["locales"]["en"]["timeout_choice_format"] = "{timeout} seconds"
+            with self.assertRaisesRegex(ValueError, "seconds.*占位符"):
+                menu_locales.validate_catalogue(invalid_locales)
+
+            locale_assertions = []
+            for locale_tag in menu_locales.SUPPORTED_LOCALES:
+                translated = localizations["locales"][locale_tag]
+                locale_assertions.extend((
+                    "_G.BingusTranslations.game_language = "
+                    + builder._lua_string_literal(locale_tag) + "\n",
+                    "assert(language_spec.label() == "
+                    + builder._lua_string_literal(translated["target_language_label"]) + ")\n",
+                    "assert(language_spec.description() == "
+                    + builder._lua_string_literal(translated["target_language_description"]) + ")\n",
+                    "assert(enabled_spec.label() == "
+                    + builder._lua_string_literal(translated["enabled_label"]) + ")\n",
+                    "assert(enabled_spec.description() == "
+                    + builder._lua_string_literal(translated["enabled_description"]) + ")\n",
+                    "assert(timeout_spec.label() == "
+                    + builder._lua_string_literal(translated["timeout_label"]) + ")\n",
+                    "assert(timeout_spec.description() == "
+                    + builder._lua_string_literal(translated["timeout_description"]) + ")\n",
+                ))
+                for index, language in enumerate(catalogue["languages"], start=1):
+                    locale_assertions.append(
+                        f"assert(language_spec.choices[{index}]() == "
+                        + builder._lua_string_literal(
+                            translated["target_languages"][language["id"]]
+                        ) + ")\n"
+                    )
+                for index, choice in enumerate(catalogue["menu_options"]["timeout"]["choices"], start=1):
+                    locale_assertions.append(
+                        f"assert(timeout_spec.choices[{index}]() == "
+                        + builder._lua_string_literal(
+                            translated["timeout_choice_format"].replace(
+                                "{seconds}", str(choice["seconds"])
+                            )
+                        ) + ")\n"
+                    )
             settings_script = (
                 "local module = assert(loadstring("
                 + settings_delimiter + settings_source + settings_closing
@@ -607,17 +671,42 @@ class StandaloneBuilderTests(unittest.TestCase):
                 "assert(calls[3] == 'hd2chattranslate.enabled' and calls[4] == 'hd2chattranslate.timeout')\n"
                 "assert(step(4000) == true and #calls == 4)\n"
                 "local language_spec = saved_specs['hd2chattranslate.target_language']\n"
-                "assert(language_spec.type == 'choice' and language_spec.label == '目标语言 / Target Language')\n"
+                "assert(language_spec.type == 'choice' and type(language_spec.label) == 'function')\n"
                 "assert(language_spec.mod == 'HD2 Chat Translate' and language_spec.mod_id == 'hd2chattranslate')\n"
                 "assert(language_spec.default == 1 and #language_spec.choices == 10)\n"
-                "assert(table.concat(language_spec.choices, '|') == 'LABELS')\n"
+                "for i = 1, #language_spec.choices do assert(type(language_spec.choices[i]) == 'function') end\n"
                 "local enabled_spec = saved_specs['hd2chattranslate.enabled']\n"
                 "assert(enabled_spec.type == 'toggle' and enabled_spec.default == true)\n"
-                "assert(enabled_spec.label == '启用' and enabled_spec.mod_id == 'hd2chattranslate')\n"
-                "assert(enabled_spec.description == '无论是否启用，都会监听聊天框。要想完全移除，请在模组管理器中卸载模组。')\n"
+                "assert(type(enabled_spec.label) == 'function' and type(enabled_spec.description) == 'function')\n"
+                "assert(enabled_spec.mod_id == 'hd2chattranslate')\n"
                 "local timeout_spec = saved_specs['hd2chattranslate.timeout']\n"
                 "assert(timeout_spec.type == 'choice' and timeout_spec.default == 2)\n"
-                "assert(table.concat(timeout_spec.choices, '|') == '10秒|20秒|30秒')\n"
+                "assert(type(timeout_spec.label) == 'function' and type(timeout_spec.description) == 'function')\n"
+                "assert(#timeout_spec.choices == 3)\n"
+                "for i = 1, #timeout_spec.choices do assert(type(timeout_spec.choices[i]) == 'function') end\n"
+                "_G.BingusTranslations = nil\n"
+                "assert(language_spec.label() == 'Target language')\n"
+                "assert(enabled_spec.description() == 'The chat box is monitored whether this is enabled or not. To remove the mod completely, uninstall it in the mod manager.')\n"
+                "assert(timeout_spec.choices[2]() == '20 seconds')\n"
+                "_G.BingusTranslations = {version = 1, game_language = 'en'}\n"
+                "local language_registry = _G.BingusTranslations\n"
+                + "".join(locale_assertions)
+                + "assert(_G.BingusTranslations == language_registry and language_registry.version == 1)\n"
+                + "assert(#calls == 4 and calls[1] == 'hd2chattranslate.target_language' and calls[4] == 'hd2chattranslate.timeout')\n"
+                + "assert(language_spec.default == 1 and timeout_spec.default == 2 and #language_spec.choices == 10)\n"
+                + "_G.BingusTranslations.game_language = 'fr-CA'; assert(language_spec.label() == "
+                + builder._lua_string_literal(localizations["locales"]["fr"]["target_language_label"]) + ")\n"
+                + "_G.BingusTranslations.game_language = 'es-MX'; assert(language_spec.label() == "
+                + builder._lua_string_literal(localizations["locales"]["es"]["target_language_label"]) + ")\n"
+                + "_G.BingusTranslations.game_language = 'pt-PT'; assert(language_spec.label() == "
+                + builder._lua_string_literal(localizations["locales"]["pt"]["target_language_label"]) + ")\n"
+                + "_G.BingusTranslations.game_language = 'unknown-XX'; assert(language_spec.label() == 'Target language')\n"
+                + "_G.BingusTranslations.version = 2; assert(language_spec.label() == 'Target language')\n"
+                + "_G.BingusTranslations = {version = 1, game_language = 5}; assert(language_spec.label() == 'Target language')\n"
+                + "_G.BingusTranslations = setmetatable({}, {__index = function() error('registry metamethod called') end})\n"
+                + "assert(language_spec.label() == 'Target language')\n"
+                + "_G.BingusTranslations = 'invalid'; assert(language_spec.label() == 'Target language')\n"
+                + "assert(#calls == 4 and language_spec.default == 1 and timeout_spec.default == 2)\n"
                 "local logs, failed_step = {}, module.new()\n"
                 "_G.print = function(message) logs[#logs + 1] = message end\n"
                 "local failed_calls, failed_once = {}, true\n"
@@ -647,7 +736,7 @@ class StandaloneBuilderTests(unittest.TestCase):
                 "local call_ok, call_error = pcall(throwing)\n"
                 "assert(not call_ok and tostring(call_error):find('game update failure', 1, true))\n"
                 "RESULT = 'settings registration ok'"
-            ).replace("LABELS", labels)
+            )
             self.assertEqual(self.lua.run(settings_script), "settings registration ok")
 
             dll_path = Path(directory) / "hd2ct_http.dll"

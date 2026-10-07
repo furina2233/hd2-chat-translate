@@ -16,6 +16,7 @@ import struct
 import uuid
 import zipfile
 import target_languages
+import menu_locales
 
 ROOT = Path(__file__).resolve().parents[1]
 RESOURCE_NAME = "mods/hd2chat/HD2ChatTranslate"
@@ -34,6 +35,7 @@ STANDALONE_MARKER = NATIVE_MODULE_MARKER
 NATIVE_PAYLOAD_MARKER = b"--[[HD2CT_NATIVE_PAYLOAD]]"
 SETTINGS_MARKER = b"--[[HD2CT_TARGET_LANGUAGE_SETTINGS]]"
 SETTINGS_CATALOGUE_MARKER = b"--[[HD2CT_TARGET_LANGUAGE_CATALOGUE]]"
+MENU_LOCALES_MARKER = b"--[[HD2CT_MENU_LOCALES]]"
 MAX_SOURCE_BYTES = 512 * 1024
 MAX_ARCHIVE_LUA_RESOURCES = 16
 MAX_ARCHIVE_SIZE = 8 * 1024 * 1024
@@ -182,8 +184,9 @@ def _lua_string_literal(value: str) -> str:
 def target_language_settings_source(
     template: bytes,
     catalogue: dict[str, object],
+    localizations: dict[str, object],
 ) -> bytes:
-    """把同一份已校验语言目录写入菜单注册模块。"""
+    """把目标语言目录和已校验UI文本写入菜单注册模块。"""
     if template.startswith((b"\xef\xbb\xbf", b"\x1b")) or b"\0" in template:
         raise ValueError("目标语言设置模块必须是无BOM、无字节码标记且无NUL的UTF-8文本")
     template.decode("utf-8")
@@ -234,6 +237,55 @@ def target_language_settings_source(
         )
     lines.extend(["    },"])
     injected = template.replace(SETTINGS_CATALOGUE_MARKER, "\n".join(lines).encode("ascii"), 1)
+    if len(injected) > MAX_SOURCE_BYTES:
+        raise ValueError("目标语言设置模块超过512 KiB源码上限")
+    return menu_locales_source(injected, catalogue, localizations)
+
+
+def menu_locales_source(
+    template: bytes,
+    catalogue: dict[str, object],
+    localizations: dict[str, object],
+) -> bytes:
+    """把一次读取并校验的UI本地化快照编码为Lua纯数据表。"""
+    if template.startswith((b"\xef\xbb\xbf", b"\x1b")) or b"\0" in template:
+        raise ValueError("目标语言设置模块必须是无BOM、无字节码标记且无NUL的UTF-8文本")
+    template.decode("utf-8")
+    if template.count(MENU_LOCALES_MARKER) != 1:
+        raise ValueError("目标语言设置模块必须恰好包含一个菜单本地化注入标记")
+    translations = menu_locales.validate_catalogue(localizations)
+    languages = catalogue.get("languages")
+    if not isinstance(languages, list) or not languages:
+        raise ValueError("目标语言目录缺少有序语言列表")
+    target_ids = [
+        language.get("id") if isinstance(language, dict) else None
+        for language in languages
+    ]
+    if (
+        any(not isinstance(target_id, str) for target_id in target_ids)
+        or len(target_ids) != len(set(target_ids))
+        or set(target_ids) != set(menu_locales.TARGET_LANGUAGE_IDS)
+    ):
+        raise ValueError("目标语言目录ID与菜单本地化选项不匹配")
+
+    lines: list[str] = []
+    locale_rows = translations["locales"]
+    for locale_tag in menu_locales.SUPPORTED_LOCALES:
+        entry = locale_rows[locale_tag]
+        lines.append("        [" + _lua_string_literal(locale_tag) + "] = {")
+        for key in menu_locales.TEXT_KEYS:
+            lines.append(
+                "            " + key + " = " + _lua_string_literal(entry[key]) + ","
+            )
+        lines.append("            target_language_choices = {")
+        target_names = entry["target_languages"]
+        for index, target_id in enumerate(target_ids, start=1):
+            lines.append(
+                "                [%d] = %s,"
+                % (index, _lua_string_literal(target_names[target_id]))
+            )
+        lines.extend(("            },", "        },"))
+    injected = template.replace(MENU_LOCALES_MARKER, "\n".join(lines).encode("ascii"), 1)
     if len(injected) > MAX_SOURCE_BYTES:
         raise ValueError("目标语言设置模块超过512 KiB源码上限")
     return injected
@@ -774,6 +826,7 @@ def build_artifact(
     loader_zip_path = Path(loader_zip) if loader_zip is not None else SHARED_LOADER_ZIP
     menu_zip_path = Path(menu_zip) if menu_zip is not None else MOD_OPTIONS_MENU_ZIP
     catalogue = target_languages.load_catalogue()
+    localizations = menu_locales.load_catalogue()
     output_path = _select_output_path(output)
     if output is None and os.path.lexists(output_path):
         raise ValueError(
@@ -785,6 +838,7 @@ def build_artifact(
         settings_path, dll_path, meta_path, STANDALONE_LICENSE, PROJECT_LICENSE,
         MOD_OPTIONS_MENU_LICENSE, MOD_OPTIONS_MENU_SOURCE,
         target_languages.CATALOGUE_PATH, loader_zip_path, menu_zip_path,
+        menu_locales.CATALOGUE_PATH,
     )
     if any(_same_path(output_path, path) for path in source_paths):
         raise ValueError("输出不能覆盖构建输入文件")
@@ -808,6 +862,7 @@ def build_artifact(
     settings_module = target_language_settings_source(
         settings_path.read_bytes(),
         catalogue,
+        localizations,
     )
     packaged_entry = entry_source(
         entry_path.read_bytes(),

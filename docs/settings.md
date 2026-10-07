@@ -2,6 +2,8 @@
 
 安装包合并 [Mod Options Menu v1.2](https://github.com/CowboyBingus/ModOptionsMenu/releases/tag/v1.2)，在游戏 ESC 菜单中提供原生 `MODS` 页。本插件注册目标语言、启用和请求超时三项。
 
+菜单标题、说明、目标语言名称和超时单位会跟随游戏的 Text Language。支持英语、英式英语、法语、意大利语、德语、西班牙语、拉丁美洲西班牙语、日语、韩语、巴西葡萄牙语、葡萄牙语、波兰语、俄语、简体中文和繁体中文。切换游戏语言后关闭并重新打开 ESC 菜单即可刷新；不支持的地区变体会尝试对应的基础语言，仍未匹配时显示英语。
+
 ## 选择目标语言
 
 1. 打开 ESC → MODS → HD2 Chat Translate。

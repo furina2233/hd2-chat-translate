@@ -68,7 +68,7 @@ python tools/build_package.py
 if ($LASTEXITCODE -ne 0) { throw '安装包构建失败' }
 ~~~
 
-默认读取上一步的 DLL/meta、game/ 源码、共享语言目录与两个固定上游 ZIP，输出 artifacts/HD2ChatTranslateYYYYMMDDHHMMSS.zip。命名时间为北京时间；--output 也必须使用此格式，已有文件不会覆盖，同秒重复构建需等下一秒。修改语言目录后必须重新构建 DLL；安装包构建器会拒绝目录摘要不匹配的旧模块。
+默认读取上一步的 DLL/meta、game/ 源码、共享目标语言目录、`resources/menu_locales.json` 与两个固定上游 ZIP，输出 artifacts/HD2ChatTranslateYYYYMMDDHHMMSS.zip。打包器校验全部15种菜单locale和每种语言的标题、说明、目标语言名称及超时格式，再把文本快照嵌入 Lua 设置模块；游戏运行时不读取该JSON文件。命名时间为北京时间；--output 也必须使用此格式，已有文件不会覆盖，同秒重复构建需等下一秒。修改目标语言目录后必须重新构建 DLL；安装包构建器会拒绝目录摘要不匹配的旧模块。
 
 使用其他依赖路径时可显式传入：
 

@@ -1,0 +1,320 @@
+{
+  "schema_version": 1,
+  "locales": {
+    "en": {
+      "target_language_label": "Target language",
+      "target_language_description": "Choose the language used for tasks started after pressing APPLY.",
+      "enabled_label": "Enabled",
+      "enabled_description": "The chat box is monitored whether this is enabled or not. To remove the mod completely, uninstall it in the mod manager.",
+      "timeout_label": "Request timeout",
+      "timeout_description": "Maximum time to wait for a single request.",
+      "timeout_choice_format": "{seconds} seconds",
+      "target_languages": {
+        "zh_cn": "Chinese (Simplified)",
+        "zh_tw": "Chinese (Traditional)",
+        "en": "English",
+        "ja": "Japanese",
+        "ko": "Korean",
+        "fr": "French",
+        "de": "German",
+        "es": "Spanish",
+        "pt": "Portuguese",
+        "it": "Italian"
+      }
+    },
+    "en-GB": {
+      "target_language_label": "Target language",
+      "target_language_description": "Choose the language for tasks started after pressing APPLY.",
+      "enabled_label": "Enabled",
+      "enabled_description": "The chat box is monitored whether this is enabled or not. To remove the mod completely, uninstall it in the mod manager.",
+      "timeout_label": "Request timeout",
+      "timeout_description": "Maximum time to wait for a single request.",
+      "timeout_choice_format": "{seconds} seconds",
+      "target_languages": {
+        "zh_cn": "Chinese (Simplified)",
+        "zh_tw": "Chinese (Traditional)",
+        "en": "English",
+        "ja": "Japanese",
+        "ko": "Korean",
+        "fr": "French",
+        "de": "German",
+        "es": "Spanish",
+        "pt": "Portuguese",
+        "it": "Italian"
+      }
+    },
+    "fr": {
+      "target_language_label": "Langue cible",
+      "target_language_description": "Choisissez la langue utilisée pour les tâches démarrées après avoir appuyé sur APPLY.",
+      "enabled_label": "Activé",
+      "enabled_description": "Le chat est surveillé même lorsque cette option est désactivée. Pour supprimer entièrement le mod, désinstallez-le dans le gestionnaire de mods.",
+      "timeout_label": "Délai d’attente de la requête",
+      "timeout_description": "Durée maximale d’attente pour une seule requête.",
+      "timeout_choice_format": "{seconds} secondes",
+      "target_languages": {
+        "zh_cn": "Chinois (simplifié)",
+        "zh_tw": "Chinois (traditionnel)",
+        "en": "Anglais",
+        "ja": "Japonais",
+        "ko": "Coréen",
+        "fr": "Français",
+        "de": "Allemand",
+        "es": "Espagnol",
+        "pt": "Portugais",
+        "it": "Italien"
+      }
+    },
+    "it": {
+      "target_language_label": "Lingua di destinazione",
+      "target_language_description": "Scegli la lingua da usare per le attività avviate dopo aver premuto APPLY.",
+      "enabled_label": "Attivato",
+      "enabled_description": "La chat viene monitorata anche quando questa opzione è disattivata. Per rimuovere completamente la mod, disinstallala nel gestore delle mod.",
+      "timeout_label": "Timeout della richiesta",
+      "timeout_description": "Tempo massimo di attesa per una singola richiesta.",
+      "timeout_choice_format": "{seconds} secondi",
+      "target_languages": {
+        "zh_cn": "Cinese (semplificato)",
+        "zh_tw": "Cinese (tradizionale)",
+        "en": "Inglese",
+        "ja": "Giapponese",
+        "ko": "Coreano",
+        "fr": "Francese",
+        "de": "Tedesco",
+        "es": "Spagnolo",
+        "pt": "Portoghese",
+        "it": "Italiano"
+      }
+    },
+    "de": {
+      "target_language_label": "Zielsprache",
+      "target_language_description": "Wählen Sie die Sprache für Aufgaben, die nach dem Drücken von APPLY gestartet werden.",
+      "enabled_label": "Aktiviert",
+      "enabled_description": "Der Chat wird unabhängig davon überwacht, ob diese Option aktiviert ist. Um das Mod vollständig zu entfernen, deinstallieren Sie es im Mod-Manager.",
+      "timeout_label": "Anfragezeitlimit",
+      "timeout_description": "Maximale Wartezeit für eine einzelne Anfrage.",
+      "timeout_choice_format": "{seconds} Sekunden",
+      "target_languages": {
+        "zh_cn": "Chinesisch (vereinfacht)",
+        "zh_tw": "Chinesisch (traditionell)",
+        "en": "Englisch",
+        "ja": "Japanisch",
+        "ko": "Koreanisch",
+        "fr": "Französisch",
+        "de": "Deutsch",
+        "es": "Spanisch",
+        "pt": "Portugiesisch",
+        "it": "Italienisch"
+      }
+    },
+    "es": {
+      "target_language_label": "Idioma de destino",
+      "target_language_description": "Elige el idioma para las tareas que se inicien después de pulsar APPLY.",
+      "enabled_label": "Activado",
+      "enabled_description": "El chat se supervisa aunque esta opción esté desactivada. Para eliminar el mod por completo, desinstálalo en el gestor de mods.",
+      "timeout_label": "Tiempo de espera de la solicitud",
+      "timeout_description": "Tiempo máximo de espera para una sola solicitud.",
+      "timeout_choice_format": "{seconds} segundos",
+      "target_languages": {
+        "zh_cn": "Chino (simplificado)",
+        "zh_tw": "Chino (tradicional)",
+        "en": "Inglés",
+        "ja": "Japonés",
+        "ko": "Coreano",
+        "fr": "Francés",
+        "de": "Alemán",
+        "es": "Español",
+        "pt": "Portugués",
+        "it": "Italiano"
+      }
+    },
+    "es-419": {
+      "target_language_label": "Idioma de destino",
+      "target_language_description": "Elige el idioma que se usará en las tareas que comiencen después de presionar APPLY.",
+      "enabled_label": "Activado",
+      "enabled_description": "Se monitorea el chat aunque esta opción esté desactivada. Para eliminar el mod por completo, desinstálalo desde el administrador de mods.",
+      "timeout_label": "Tiempo límite de la solicitud",
+      "timeout_description": "Tiempo máximo de espera para una sola solicitud.",
+      "timeout_choice_format": "{seconds} segundos",
+      "target_languages": {
+        "zh_cn": "Chino (simplificado)",
+        "zh_tw": "Chino (tradicional)",
+        "en": "Inglés",
+        "ja": "Japonés",
+        "ko": "Coreano",
+        "fr": "Francés",
+        "de": "Alemán",
+        "es": "Español",
+        "pt": "Portugués",
+        "it": "Italiano"
+      }
+    },
+    "ja": {
+      "target_language_label": "翻訳先の言語",
+      "target_language_description": "APPLYを押した後に開始するタスクで使用する言語を選択します。",
+      "enabled_label": "有効",
+      "enabled_description": "有効かどうかにかかわらず、チャット欄を監視します。Modを完全に削除するには、Mod Managerでアンインストールしてください。",
+      "timeout_label": "リクエストのタイムアウト",
+      "timeout_description": "1回のリクエストで待機する最大時間です。",
+      "timeout_choice_format": "{seconds}秒",
+      "target_languages": {
+        "zh_cn": "中国語（簡体字）",
+        "zh_tw": "中国語（繁体字）",
+        "en": "英語",
+        "ja": "日本語",
+        "ko": "韓国語",
+        "fr": "フランス語",
+        "de": "ドイツ語",
+        "es": "スペイン語",
+        "pt": "ポルトガル語",
+        "it": "イタリア語"
+      }
+    },
+    "ko": {
+      "target_language_label": "대상 언어",
+      "target_language_description": "APPLY를 누른 뒤 시작하는 작업에 사용할 언어를 선택하세요.",
+      "enabled_label": "사용",
+      "enabled_description": "이 옵션의 사용 여부와 관계없이 채팅 창을 모니터링합니다. 모드를 완전히 제거하려면 모드 관리자에서 모드를 제거하세요.",
+      "timeout_label": "요청 시간 제한",
+      "timeout_description": "단일 요청의 최대 대기 시간입니다.",
+      "timeout_choice_format": "{seconds}초",
+      "target_languages": {
+        "zh_cn": "중국어 (간체)",
+        "zh_tw": "중국어 (번체)",
+        "en": "영어",
+        "ja": "일본어",
+        "ko": "한국어",
+        "fr": "프랑스어",
+        "de": "독일어",
+        "es": "스페인어",
+        "pt": "포르투갈어",
+        "it": "이탈리아어"
+      }
+    },
+    "pt-BR": {
+      "target_language_label": "Idioma de destino",
+      "target_language_description": "Escolha o idioma das tarefas iniciadas depois de pressionar APPLY.",
+      "enabled_label": "Ativado",
+      "enabled_description": "O chat é monitorado mesmo quando esta opção está desativada. Para remover o mod completamente, desinstale-o no gerenciador de mods.",
+      "timeout_label": "Tempo limite da solicitação",
+      "timeout_description": "Tempo máximo de espera de uma única solicitação.",
+      "timeout_choice_format": "{seconds} segundos",
+      "target_languages": {
+        "zh_cn": "Chinês (simplificado)",
+        "zh_tw": "Chinês (tradicional)",
+        "en": "Inglês",
+        "ja": "Japonês",
+        "ko": "Coreano",
+        "fr": "Francês",
+        "de": "Alemão",
+        "es": "Espanhol",
+        "pt": "Português",
+        "it": "Italiano"
+      }
+    },
+    "pt": {
+      "target_language_label": "Idioma de destino",
+      "target_language_description": "Escolha o idioma das tarefas iniciadas depois de premir APPLY.",
+      "enabled_label": "Ativado",
+      "enabled_description": "O chat é monitorizado mesmo quando esta opção está desativada. Para remover completamente o mod, desinstale-o no gestor de mods.",
+      "timeout_label": "Tempo limite do pedido",
+      "timeout_description": "Tempo máximo de espera de um pedido.",
+      "timeout_choice_format": "{seconds} segundos",
+      "target_languages": {
+        "zh_cn": "Chinês simplificado",
+        "zh_tw": "Chinês tradicional",
+        "en": "Inglês",
+        "ja": "Japonês",
+        "ko": "Coreano",
+        "fr": "Francês",
+        "de": "Alemão",
+        "es": "Espanhol",
+        "pt": "Português",
+        "it": "Italiano"
+      }
+    },
+    "pl": {
+      "target_language_label": "Język docelowy",
+      "target_language_description": "Wybierz język zadań rozpoczętych po naciśnięciu APPLY.",
+      "enabled_label": "Włączone",
+      "enabled_description": "Czat jest monitorowany niezależnie od tego, czy ta opcja jest włączona. Aby całkowicie usunąć moda, odinstaluj go w menedżerze modów.",
+      "timeout_label": "Limit czasu żądania",
+      "timeout_description": "Maksymalny czas oczekiwania na pojedyncze żądanie.",
+      "timeout_choice_format": "{seconds} s",
+      "target_languages": {
+        "zh_cn": "Chiński (uproszczony)",
+        "zh_tw": "Chiński (tradycyjny)",
+        "en": "Angielski",
+        "ja": "Japoński",
+        "ko": "Koreański",
+        "fr": "Francuski",
+        "de": "Niemiecki",
+        "es": "Hiszpański",
+        "pt": "Portugalski",
+        "it": "Włoski"
+      }
+    },
+    "ru": {
+      "target_language_label": "Целевой язык",
+      "target_language_description": "Выберите язык для задач, запущенных после нажатия APPLY.",
+      "enabled_label": "Включено",
+      "enabled_description": "Чат отслеживается независимо от того, включена ли эта настройка. Чтобы полностью удалить мод, удалите его в менеджере модов.",
+      "timeout_label": "Тайм-аут запроса",
+      "timeout_description": "Максимальное время ожидания одного запроса.",
+      "timeout_choice_format": "{seconds} секунд",
+      "target_languages": {
+        "zh_cn": "Китайский (упрощённый)",
+        "zh_tw": "Китайский (традиционный)",
+        "en": "Английский",
+        "ja": "Японский",
+        "ko": "Корейский",
+        "fr": "Французский",
+        "de": "Немецкий",
+        "es": "Испанский",
+        "pt": "Португальский",
+        "it": "Итальянский"
+      }
+    },
+    "zh-Hans": {
+      "target_language_label": "目标语言",
+      "target_language_description": "按下 APPLY 后开始处理的任务将使用新的目标语言。",
+      "enabled_label": "启用",
+      "enabled_description": "无论是否启用，都会监听聊天框。要想完全移除，请在模组管理器中卸载模组。",
+      "timeout_label": "请求超时",
+      "timeout_description": "单次请求最长等待时间。",
+      "timeout_choice_format": "{seconds}秒",
+      "target_languages": {
+        "zh_cn": "简体中文",
+        "zh_tw": "繁体中文",
+        "en": "英语",
+        "ja": "日语",
+        "ko": "韩语",
+        "fr": "法语",
+        "de": "德语",
+        "es": "西班牙语",
+        "pt": "葡萄牙语",
+        "it": "意大利语"
+      }
+    },
+    "zh-Hant": {
+      "target_language_label": "目標語言",
+      "target_language_description": "按下 APPLY 後開始處理的任務將使用新的目標語言。",
+      "enabled_label": "啟用",
+      "enabled_description": "無論是否啟用，都會監聽聊天框。若要完全移除，請在模組管理器中解除安裝模組。",
+      "timeout_label": "請求逾時",
+      "timeout_description": "單次請求的最長等待時間。",
+      "timeout_choice_format": "{seconds}秒",
+      "target_languages": {
+        "zh_cn": "簡體中文",
+        "zh_tw": "繁體中文",
+        "en": "英語",
+        "ja": "日語",
+        "ko": "韓語",
+        "fr": "法語",
+        "de": "德語",
+        "es": "西班牙語",
+        "pt": "葡萄牙語",
+        "it": "義大利語"
+      }
+    }
+  }
+}
