@@ -4,22 +4,55 @@ local catalogue = {
 }
 
 local function new_registration_step()
-    local choices = {}
+    local language_choices = {}
     for index, language in ipairs(catalogue.languages) do
-        choices[index] = language.label
+        language_choices[index] = language.label
     end
 
-    local option_id = catalogue.option_id
-    local spec = {
-        type = "choice",
-        label = "目标语言 / Target Language",
-        mod = "HD2 Chat Translate",
-        mod_id = catalogue.mod_id,
-        default = catalogue.default_index,
-        choices = choices,
-        description = "APPLY 后开始处理的任务使用新目标语言。",
+    local timeout_choices = {}
+    for index, choice in ipairs(catalogue.menu_options.timeout.choices) do
+        timeout_choices[index] = choice.label
+    end
+
+    local specs = {
+        {
+            option_id = catalogue.option_id,
+            spec = {
+                type = "choice",
+                label = "目标语言 / Target Language",
+                mod = "HD2 Chat Translate",
+                mod_id = catalogue.mod_id,
+                default = catalogue.default_index,
+                choices = language_choices,
+                description = "APPLY 后开始处理的任务使用新目标语言。",
+            },
+        },
+        {
+            option_id = catalogue.menu_options.enabled.option_id,
+            spec = {
+                type = catalogue.menu_options.enabled.type,
+                label = catalogue.menu_options.enabled.label,
+                mod = "HD2 Chat Translate",
+                mod_id = catalogue.mod_id,
+                default = catalogue.menu_options.enabled.default,
+                description = catalogue.menu_options.enabled.description,
+            },
+        },
+        {
+            option_id = catalogue.menu_options.timeout.option_id,
+            spec = {
+                type = catalogue.menu_options.timeout.type,
+                label = catalogue.menu_options.timeout.label,
+                mod = "HD2 Chat Translate",
+                mod_id = catalogue.mod_id,
+                default = catalogue.menu_options.timeout.default_index,
+                choices = timeout_choices,
+                description = catalogue.menu_options.timeout.description,
+            },
+        },
     }
     local registered = false
+    local next_option = 1
     local next_attempt_ms = 0
     local failure_logged = false
 
@@ -39,16 +72,20 @@ local function new_registration_step()
         local register_option = rawget(menu, "register_option")
         if type(register_option) ~= "function" then return false end
 
-        local ok, result = pcall(register_option, option_id, spec)
-        if ok and result == true then
-            registered = true
-            return true
+        while next_option <= #specs do
+            local item = specs[next_option]
+            local ok, result = pcall(register_option, item.option_id, item.spec)
+            if not ok or result ~= true then
+                if not failure_logged then
+                    failure_logged = true
+                    pcall(print, "[HD2 Chat Translate] menu option registration failed")
+                end
+                return false
+            end
+            next_option = next_option + 1
         end
-        if not failure_logged then
-            failure_logged = true
-            pcall(print, "[HD2 Chat Translate] target language option registration failed")
-        end
-        return false
+        registered = true
+        return true
     end
 end
 

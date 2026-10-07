@@ -69,8 +69,13 @@ lib.fixture_ConfigMatches.argtypes = [
     ctypes.c_char_p, ctypes.c_char_p, ctypes.c_char_p, ctypes.c_char_p,
 ]
 lib.fixture_ConfigMatches.restype = ctypes.c_int
-lib.fixture_TimeoutSeconds.argtypes = []
-lib.fixture_TimeoutSeconds.restype = ctypes.c_uint32
+lib.fixture_ReadRuntimeSettings.argtypes = [
+    ctypes.POINTER(ctypes.c_uint32), ctypes.POINTER(ctypes.c_uint32),
+    ctypes.POINTER(ctypes.c_uint32),
+]
+lib.fixture_ReadRuntimeSettings.restype = None
+lib.fixture_RequestDeadlineRemaining.argtypes = [ctypes.c_char_p]
+lib.fixture_RequestDeadlineRemaining.restype = ctypes.c_uint64
 lib.fixture_NormalizeUrl.argtypes = [
     ctypes.c_uint32, ctypes.c_char_p, ctypes.c_void_p, ctypes.c_uint32,
 ]
@@ -247,21 +252,47 @@ for action in actions:
         while not marker_path.is_file() and time.monotonic() < deadline:
             time.sleep(0.005)
         action_results.append({"found": marker_path.is_file()})
+    elif op == "read_settings":
+        target_language = ctypes.c_uint32()
+        timeout_seconds = ctypes.c_uint32()
+        menu_enabled = ctypes.c_uint32()
+        lib.fixture_ReadRuntimeSettings(
+            ctypes.byref(target_language), ctypes.byref(timeout_seconds),
+            ctypes.byref(menu_enabled),
+        )
+        action_results.append({
+            "target_language": target_language.value,
+            "timeout_seconds": timeout_seconds.value,
+            "menu_enabled": menu_enabled.value,
+        })
+    elif op == "request_remaining":
+        remaining = lib.fixture_RequestDeadlineRemaining(action["token"].encode("ascii"))
+        action_results.append({"remaining_ms": int(remaining)})
     else:
         raise RuntimeError("unknown environment fixture action")
 
-wait_initialized()
+if lib.fixture_Initialized() != 0:
+    wait_initialized()
 if lock_hold_ms:
     lib.fixture_ReleaseLock()
 status = lib.fixture_Status()
 enabled = lib.fixture_Enabled()
+target_language = ctypes.c_uint32()
+timeout_seconds = ctypes.c_uint32()
+menu_enabled = ctypes.c_uint32()
+lib.fixture_ReadRuntimeSettings(
+    ctypes.byref(target_language), ctypes.byref(timeout_seconds),
+    ctypes.byref(menu_enabled),
+)
 result = {
     "status": status,
     "enabled": enabled,
     "init_state": lib.fixture_Initialized(),
     "bootstrap_count": lib.fixture_BootstrapCount(),
     "submit": action_results[0].get("accepted") if action_results else None,
-    "timeout": lib.fixture_TimeoutSeconds(),
+    "timeout": timeout_seconds.value,
+    "target_language": target_language.value,
+    "menu_enabled": menu_enabled.value,
     "cache_count": lib.fixture_CacheCount(),
     "rate_count": lib.fixture_RateCount(),
     "actions": action_results,
@@ -406,9 +437,37 @@ __declspec(dllexport) int __cdecl fixture_ConfigMatches(
         strcmp(g_api_key, api_key) == 0 && strcmp(g_app_id, app_id) == 0;
 }
 
-__declspec(dllexport) uint32_t __cdecl fixture_TimeoutSeconds(void)
+__declspec(dllexport) void __cdecl fixture_ReadRuntimeSettings(
+    uint32_t *target_language, uint32_t *timeout_seconds, uint32_t *enabled)
 {
-    return g_timeout_seconds;
+    HD2CT_RuntimeSettings settings;
+    hd2ct_read_applied_settings(&settings);
+    if (target_language != NULL) *target_language = settings.target_language;
+    if (timeout_seconds != NULL) *timeout_seconds = settings.timeout_seconds;
+    if (enabled != NULL) *enabled = settings.enabled;
+}
+
+__declspec(dllexport) uint64_t __cdecl fixture_RequestDeadlineRemaining(
+    const char *token)
+{
+    size_t token_length;
+    uint32_t i;
+    uint64_t now = GetTickCount64();
+    uint64_t remaining = 0u;
+    if (!hd2ct_valid_token(token, &token_length)) return 0u;
+    AcquireSRWLockExclusive(&g_lock);
+    for (i = 0u; i < HD2CT_JOB_COUNT; ++i) {
+        HD2CT_JobSlot *slot = &g_jobs[i];
+        if (slot->state == HD2CT_SLOT_ACTIVE &&
+            strlen(slot->token) == token_length &&
+            memcmp(slot->token, token, token_length) == 0 &&
+            slot->request_deadline_ms > now) {
+            remaining = slot->request_deadline_ms - now;
+            break;
+        }
+    }
+    ReleaseSRWLockExclusive(&g_lock);
+    return remaining;
 }
 
 __declspec(dllexport) uint32_t __cdecl fixture_NormalizeUrl(
@@ -674,7 +733,16 @@ class NativeHttpWorkerTests(unittest.TestCase):
                     prompt = payload["messages"][0].get("content", "")
                     if isinstance(prompt, str):
                         response_key = next(
-                            (key for key in response_by_target if key in prompt), None
+                            (
+                                key
+                                for key in response_by_target
+                                if prompt.startswith(
+                                    "你是《绝地潜兵2》的队友聊天翻译助手。目标语言为"
+                                    + key
+                                    + "。只处理"
+                                )
+                            ),
+                            None,
                         )
                 if response_key in response_by_target:
                     response = response_by_target[response_key]
@@ -721,7 +789,9 @@ class NativeHttpWorkerTests(unittest.TestCase):
         url: str | None = None,
         actions: list[dict] | None = None,
         timeout: float = 15.0,
-        timeout_seconds: int = 20,
+        timeout_index: int = 2,
+        enabled_value: str = "true",
+        target_language_index: int = 1,
         model: str = "fake-model",
     ) -> dict:
         selected_url = url if url is not None else self.url + "/"
@@ -729,14 +799,49 @@ class NativeHttpWorkerTests(unittest.TestCase):
             "HD2CT_API_URL": selected_url,
             "HD2CT_MODEL": model,
             "HD2CT_API_KEY": "fake-api-key",
-            "HD2CT_ENABLED": "1",
-            "HD2CT_TIMEOUT_SECONDS": str(timeout_seconds),
+            "HD2CT_ENABLED": "0",
+            "HD2CT_TIMEOUT_SECONDS": "not-a-number",
         }
         if "baidu" in selected_url.lower() or "youdao" in selected_url.lower():
             config["HD2CT_APP_ID"] = "fake-app-id"
-        return self.run_environment_child(
-            {"user": config}, actions=actions, timeout=timeout,
-        )
+        with tempfile.TemporaryDirectory(
+            prefix="hd2ct-menu-values-", dir=str(NATIVE_TEST_ROOT)
+        ) as temporary_directory:
+            values_path = Path(temporary_directory) / "ModOptionsMenu.values"
+            registry = {
+                "user": config,
+                "__target_values_path": str(values_path),
+                "__target_primary": self._runtime_values_text(
+                    target_language_index, enabled_value, timeout_index
+                ),
+            }
+            return self.run_environment_child(
+                registry, actions=actions, timeout=timeout,
+            )
+
+    def run_menu_child(
+        self,
+        registry: dict[str, dict[str, str]],
+        primary_contents: str | None,
+        actions: list[dict] | None = None,
+        backup_contents: str | None = None,
+        expected_config: dict[str, str] | None = None,
+        timeout: float = 15.0,
+    ) -> dict:
+        with tempfile.TemporaryDirectory(
+            prefix="hd2ct-menu-values-", dir=str(NATIVE_TEST_ROOT)
+        ) as temporary_directory:
+            values_path = Path(temporary_directory) / "ModOptionsMenu.values"
+            fixture = dict(registry)
+            fixture["__target_values_path"] = str(values_path)
+            fixture["__target_primary"] = primary_contents
+            fixture["__target_backup"] = backup_contents
+            return self.run_environment_child(
+                fixture,
+                expected_config=expected_config,
+                actions=actions,
+                timeout=timeout,
+            )
 
     @classmethod
     def environment_test_dll(cls) -> Path:
@@ -922,7 +1027,7 @@ class NativeHttpWorkerTests(unittest.TestCase):
             self.state.response_by_target = response_by_target
             result = self.run_environment_child(registry, actions=actions)
 
-        self.assertEqual(len(languages), 14)
+        self.assertEqual(len(languages), 10)
         self.assertEqual(TARGET_LANGUAGE_CATALOGUE["default_index"], 1)
         self.assertEqual(len(self.state.paths), len(languages))
         self.assertEqual(result["cache_count"], len(languages))
@@ -931,12 +1036,23 @@ class NativeHttpWorkerTests(unittest.TestCase):
             if adapter_name == "ai":
                 prompt = payload["messages"][0]["content"]
                 self.assertIn(row["ai_target"], prompt)
+                self.assertIn("目标语言为" + row["ai_target"], prompt)
                 self.assertIn("is_target_language", prompt)
-                if row["id"] not in ("zh_cn", "zh_tw"):
+                self.assertNotIn("Translate the input", prompt)
+                if row["id"] != "zh_cn":
                     self.assertNotIn("Charger=牛", prompt)
+                    self.assertNotIn("Stalker=隐身虫", prompt)
+                    self.assertNotIn("lol=哈哈", prompt)
+                    self.assertTrue(prompt.endswith("translation（字符串）。"))
                 if row["id"] == "zh_tw":
-                    self.assertIn("隱身蟲", prompt)
-                    self.assertNotIn("隱形蟲", prompt)
+                    self.assertNotIn("简体中文专属规则", prompt)
+                    self.assertIn("目标语言为繁體中文", prompt)
+                if row["id"] == "zh_cn":
+                    self.assertIn("Charger=牛", prompt)
+                    self.assertIn("忽略大小写", prompt)
+                    self.assertIn("lol=哈哈", prompt)
+                    self.assertIn("简体中文专属规则", prompt)
+                    self.assertIn("中文原样返回，is_target_language=true", prompt)
                 expected_translation = "AI-" + row["id"]
             else:
                 self.assertEqual(payload["to"] if adapter_name != "google"
@@ -954,6 +1070,17 @@ class NativeHttpWorkerTests(unittest.TestCase):
     def _target_values_line(index: int) -> str:
         return f"{TARGET_LANGUAGE_CATALOGUE['option_id']}\t{index}\n"
 
+    @staticmethod
+    def _runtime_values_text(
+        target_index: int = 1, enabled_value: str = "true", timeout_index: int = 2,
+    ) -> str:
+        options = TARGET_LANGUAGE_CATALOGUE["menu_options"]
+        return "".join((
+            f"{TARGET_LANGUAGE_CATALOGUE['option_id']}\t{target_index}\n",
+            f"{options['enabled']['option_id']}\t{enabled_value}\n",
+            f"{options['timeout']['option_id']}\t{timeout_index}\n",
+        ))
+
     def _exercise_target_values_fallbacks(self) -> None:
         cases = (
             ("backup-after-missing-primary", None,
@@ -968,6 +1095,13 @@ class NativeHttpWorkerTests(unittest.TestCase):
              self._target_values_line(2), "zh-CN"),
             ("corrupt-primary-without-backup", "broken\n", None, "zh-CN"),
         )
+        for removed_index in range(11, 15):
+            cases += ((
+                f"removed-language-index-{removed_index}",
+                self._target_values_line(removed_index),
+                self._target_values_line(2),
+                "zh-CN",
+            ),)
         for other_value in ("true", "false", "0", "-1", "0.5", "invalid"):
             cases += ((
                 f"othermod-value-{other_value}",
@@ -1036,7 +1170,7 @@ class NativeHttpWorkerTests(unittest.TestCase):
             )
             self.assertEqual(translated["actions"][1]["result"], "OK\nEnglish translation")
             prompt = self.state.payloads[0]["messages"][0]["content"]
-            self.assertIn("English", prompt)
+            self.assertIn("英语", prompt)
             self.assertNotIn("Charger=牛", prompt)
 
             self.state.clear()
@@ -1065,6 +1199,22 @@ class NativeHttpWorkerTests(unittest.TestCase):
             target_languages.catalogue_sha256(TARGET_LANGUAGE_CATALOGUE),
             target_languages.catalogue_sha256(target_languages.load_catalogue()),
         )
+        self.assertEqual(
+            [row["id"] for row in TARGET_LANGUAGE_CATALOGUE["languages"]],
+            ["zh_cn", "zh_tw", "en", "ja", "ko", "fr", "de", "es", "pt", "it"],
+        )
+        menu_options = TARGET_LANGUAGE_CATALOGUE["menu_options"]
+        self.assertEqual(
+            [choice["seconds"] for choice in menu_options["timeout"]["choices"]],
+            [10, 20, 30],
+        )
+        self.assertEqual(menu_options["timeout"]["default_index"], 2)
+        self.assertEqual(
+            len({TARGET_LANGUAGE_CATALOGUE["option_id"],
+                 menu_options["enabled"]["option_id"],
+                 menu_options["timeout"]["option_id"]}),
+            3,
+        )
         invalid_catalogues = []
         duplicate_id = json.loads(json.dumps(TARGET_LANGUAGE_CATALOGUE))
         duplicate_id["languages"][1]["id"] = duplicate_id["languages"][0]["id"]
@@ -1078,6 +1228,16 @@ class NativeHttpWorkerTests(unittest.TestCase):
         bad_code = json.loads(json.dumps(TARGET_LANGUAGE_CATALOGUE))
         bad_code["languages"][0]["google"] = "zh CN"
         invalid_catalogues.append(("bad-provider-code", bad_code))
+        bad_timeout_order = json.loads(json.dumps(TARGET_LANGUAGE_CATALOGUE))
+        bad_timeout_order["menu_options"]["timeout"]["choices"][1]["seconds"] = 60
+        invalid_catalogues.append(("bad-timeout-order", bad_timeout_order))
+        bad_timeout_default = json.loads(json.dumps(TARGET_LANGUAGE_CATALOGUE))
+        bad_timeout_default["menu_options"]["timeout"]["default_index"] = 1
+        invalid_catalogues.append(("bad-timeout-default", bad_timeout_default))
+        duplicate_menu_id = json.loads(json.dumps(TARGET_LANGUAGE_CATALOGUE))
+        duplicate_menu_id["menu_options"]["timeout"]["option_id"] = \
+            duplicate_menu_id["menu_options"]["enabled"]["option_id"]
+        invalid_catalogues.append(("duplicate-menu-option-id", duplicate_menu_id))
         for name, catalogue in invalid_catalogues:
             with self.subTest(catalogue=name):
                 with self.assertRaises(ValueError):
@@ -1113,19 +1273,153 @@ class NativeHttpWorkerTests(unittest.TestCase):
         self.assertEqual(result["rate_count"], 0)
         self.assertEqual(self.state.paths, [])
 
-        disabled = self.run_environment_child({"user": {"HD2CT_ENABLED": "0"}})
-        self.assertEqual(disabled["status"], 3)
-        self.assertEqual(disabled["enabled"], 0)
-        self.assertEqual(disabled["actions"][1]["result"], "SKIP\n")
-        self.assertEqual(disabled["rate_count"], 0)
-        self.assertEqual(self.state.paths, [])
+        for case_name, user, expected_status in (
+            ("valid", {
+                "HD2CT_API_URL": self.url + "/Google/disabled-valid",
+                "HD2CT_MODEL": "",
+                "HD2CT_API_KEY": "fake-api-key",
+            }, 0),
+            ("missing-config", {
+                "HD2CT_API_URL": self.url + "/Google/disabled-missing",
+                "HD2CT_MODEL": "",
+            }, 1),
+            ("invalid-config", {
+                "HD2CT_API_URL": "ftp://example.com/Google/disabled-invalid",
+                "HD2CT_MODEL": "",
+                "HD2CT_API_KEY": "fake-api-key",
+            }, 2),
+            ("unknown-service", {
+                "HD2CT_API_URL": "http://127.0.0.1:1/unknown-service",
+                "HD2CT_MODEL": "",
+                "HD2CT_API_KEY": "fake-api-key",
+            }, 5),
+        ):
+            with self.subTest(disabled_config=case_name):
+                self.state.clear()
+                disabled = self.run_menu_child(
+                    {"user": user},
+                    self._runtime_values_text(enabled_value="false"),
+                    actions=[
+                        {"op": "submit", "token": "disabled-" + case_name,
+                         "body_hex": "73616665"},
+                        {"op": "wait", "token": "disabled-" + case_name},
+                    ],
+                )
+                self.assertEqual(disabled["status"], expected_status)
+                self.assertEqual(disabled["enabled"], int(expected_status == 0))
+                self.assertEqual(disabled["menu_enabled"], 0)
+                self.assertEqual(disabled["actions"][1]["result"], "SKIP\n")
+                self.assertEqual(disabled["cache_count"], 0)
+                self.assertEqual(disabled["rate_count"], 0)
+                self.assertEqual(self.state.paths, [])
 
-        invalid_option = self.run_environment_child(
-            {"user": {"HD2CT_TIMEOUT_SECONDS": "invalid"}}
+        for timeout_index, expected_timeout in ((1, 10), (2, 20), (3, 30),
+                                                (4, 20), (5, 20)):
+            with self.subTest(menu_timeout_index=timeout_index):
+                settings = self.run_menu_child(
+                    {},
+                    self._runtime_values_text(timeout_index=timeout_index),
+                    actions=[{"op": "read_settings"}],
+                )
+                self.assertEqual(settings["actions"][0], {
+                    "target_language": 1,
+                    "timeout_seconds": expected_timeout,
+                    "menu_enabled": 1,
+                })
+
+        settings = self.run_menu_child(
+            {}, None, actions=[{"op": "read_settings"}],
         )
-        self.assertEqual(invalid_option["status"], 2)
-        self.assertEqual(invalid_option["enabled"], 0)
-        self.assertEqual(invalid_option["actions"][1]["result"], "ERR\nINVALID_CONFIG")
+        self.assertEqual(settings["actions"][0], {
+            "target_language": 1,
+            "timeout_seconds": 20,
+            "menu_enabled": 1,
+        })
+        settings = self.run_menu_child(
+            {}, self._runtime_values_text(
+                target_index=99, enabled_value="True", timeout_index=4,
+            ),
+            actions=[{"op": "read_settings"}],
+        )
+        self.assertEqual(settings["actions"][0], {
+            "target_language": 1,
+            "timeout_seconds": 20,
+            "menu_enabled": 1,
+        })
+
+        primary_with_other_mod = "othermod.some_option\t2\n"
+        backup_settings = self._runtime_values_text(
+            target_index=3, enabled_value="false", timeout_index=3,
+        )
+        settings = self.run_menu_child(
+            {}, primary_with_other_mod,
+            actions=[{"op": "read_settings"}],
+            backup_contents=backup_settings,
+        )
+        self.assertEqual(settings["actions"][0], {
+            "target_language": 1,
+            "timeout_seconds": 20,
+            "menu_enabled": 1,
+        })
+        settings = self.run_menu_child(
+            {}, "corrupt\n",
+            actions=[{"op": "read_settings"}],
+            backup_contents=backup_settings,
+        )
+        self.assertEqual(settings["actions"][0], {
+            "target_language": 3,
+            "timeout_seconds": 30,
+            "menu_enabled": 0,
+        })
+
+        self.state.clear()
+        self.state.response = google_response("menu translation", "en")
+        self.state.delay = 0.4
+        request_marker = self.temp_path / "menu-toggle-request-started"
+        request_marker.unlink(missing_ok=True)
+        self.state.request_started_marker = request_marker
+        menu_toggle_config = {
+            "HD2CT_API_URL": self.url + "/Google/menu-toggle",
+            "HD2CT_MODEL": "",
+            "HD2CT_API_KEY": "fake-api-key",
+            "HD2CT_ENABLED": "0",
+            "HD2CT_TIMEOUT_SECONDS": "invalid",
+        }
+        source_hex = "6d656e752d736e617073686f74"
+        toggle = self.run_menu_child(
+            {"user": menu_toggle_config},
+            self._runtime_values_text(
+                target_index=1, enabled_value="false", timeout_index=2,
+            ),
+            actions=[
+                {"op": "submit", "token": "toggle-off-first", "body_hex": source_hex},
+                {"op": "wait", "token": "toggle-off-first"},
+                {"op": "target_file", "kind": "primary", "contents":
+                 self._runtime_values_text(target_index=1, enabled_value="true", timeout_index=1)},
+                {"op": "submit", "token": "toggle-on-snapshot", "body_hex": source_hex},
+                {"op": "wait_file", "path": str(request_marker), "timeout": 5.0},
+                {"op": "target_file", "kind": "primary", "contents":
+                 self._runtime_values_text(target_index=3, enabled_value="false", timeout_index=3)},
+                {"op": "wait", "token": "toggle-on-snapshot", "timeout": 8.0},
+                {"op": "target_file", "kind": "primary", "contents":
+                 self._runtime_values_text(target_index=1, enabled_value="false", timeout_index=2)},
+                {"op": "submit", "token": "toggle-off-cached", "body_hex": source_hex},
+                {"op": "wait", "token": "toggle-off-cached"},
+            ],
+            timeout=15.0,
+        )
+        self.assertEqual(toggle["status"], 0)
+        self.assertEqual(toggle["enabled"], 1)
+        self.assertEqual(toggle["menu_enabled"], 0)
+        self.assertEqual(toggle["timeout"], 20)
+        self.assertEqual(toggle["actions"][1]["result"], "SKIP\n")
+        self.assertTrue(toggle["actions"][4]["found"])
+        self.assertEqual(toggle["actions"][6]["result"], "OK\nmenu translation")
+        self.assertEqual(toggle["actions"][9]["result"], "SKIP\n")
+        self.assertEqual(toggle["cache_count"], 1)
+        self.assertEqual(toggle["rate_count"], 1)
+        self.assertEqual(self.state.paths, ["/Google/menu-toggle"])
+        self.assertEqual(self.state.payloads[0]["target"], "zh-CN")
 
         for missing_name in user_config:
             user = dict(user_config)
@@ -1583,7 +1877,9 @@ class NativeHttpWorkerTests(unittest.TestCase):
         self.assertEqual(payload["reasoning_effort"], "none")
         prompt = payload["messages"][0]["content"]
         for rule in (
-            "中文原样返回",
+            "目标语言为简体中文",
+            "简体中文专属规则",
+            "中文原样返回，is_target_language=true",
             "is_target_language",
             "translation",
             "Charger=牛",
@@ -1863,15 +2159,16 @@ class NativeHttpWorkerTests(unittest.TestCase):
         self.assertIsNone(cancelled["actions"][3]["result"])
 
         self.state.clear()
-        self.state.delay = 1.5
+        self.state.delay = 10.5
         timed_out = self.run_child(
             actions=[
                 {"op": "submit", "token": "timeout-one", "body_hex": "6869"},
-                {"op": "wait", "token": "timeout-one", "timeout": 3.0},
+                {"op": "wait", "token": "timeout-one", "timeout": 12.0},
             ],
-            timeout=5.0,
-            timeout_seconds=1,
+            timeout=15.0,
+            timeout_index=1,
         )
+        self.assertEqual(timed_out["timeout"], 10)
         self.assertEqual(timed_out["actions"][1]["result"], "ERR\nTIMEOUT")
 
 if __name__ == "__main__":

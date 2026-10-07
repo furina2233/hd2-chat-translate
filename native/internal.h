@@ -80,7 +80,14 @@ typedef struct HD2CT_WorkerJob {
     uint32_t adapter_id;
     uint32_t target_language;
     uint32_t timeout_seconds;
+    uint32_t menu_enabled;
 } HD2CT_WorkerJob;
+
+typedef struct HD2CT_RuntimeSettings {
+    uint32_t target_language;
+    uint32_t timeout_seconds;
+    uint32_t enabled;
+} HD2CT_RuntimeSettings;
 
 typedef struct HD2CT_TargetLanguage {
     const char *id;
@@ -147,12 +154,11 @@ int hd2ct_valid_secret(const char *value, size_t maximum);
 int hd2ct_valid_model_key(const char *model, const char *api_key);
 int hd2ct_read_environment_value(const wchar_t *name, char *out,
                                  size_t out_capacity, int *present);
-int hd2ct_parse_timeout(const char *value, uint32_t *timeout_out);
 
-/* 目标语言目录与MOM已应用值读取。 */
+/* 共享菜单目录与MOM已应用设置读取。 */
 const HD2CT_TargetLanguage *hd2ct_target_language(uint32_t index);
 uint32_t hd2ct_default_target_language(void);
-uint32_t hd2ct_read_applied_target_language(void);
+void hd2ct_read_applied_settings(HD2CT_RuntimeSettings *settings);
 #ifdef HD2CT_TESTING
 int hd2ct_test_set_values_file_path(const wchar_t *path);
 #endif

@@ -10,9 +10,12 @@ static wchar_t g_test_values_file_path[HD2CT_MAX_VALUES_PATH];
 
 typedef struct HD2CT_ParsedValues {
     uint32_t any_valid_line;
-    uint32_t option_present;
-    uint32_t option_value_valid;
     uint32_t target_language;
+    uint32_t target_valid;
+    uint32_t enabled;
+    uint32_t enabled_valid;
+    uint32_t timeout_index;
+    uint32_t timeout_valid;
 } HD2CT_ParsedValues;
 
 const HD2CT_TargetLanguage *hd2ct_target_language(uint32_t index)
@@ -114,8 +117,8 @@ cleanup:
     return valid;
 }
 
-static int hd2ct_parse_target_index(const unsigned char *text, size_t length,
-                                    uint32_t *index_out)
+static int hd2ct_parse_index(const unsigned char *text, size_t length,
+                             uint32_t maximum, uint32_t *index_out)
 {
     uint32_t value = 0u;
     size_t i;
@@ -123,28 +126,56 @@ static int hd2ct_parse_target_index(const unsigned char *text, size_t length,
     for (i = 0u; i < length; ++i) {
         unsigned char digit = text[i];
         if (digit < '0' || digit > '9') return 0;
-        value = value * 10u + (uint32_t)(digit - '0');
-        if (value > HD2CT_TARGET_LANGUAGE_COUNT) return 0;
+        digit = (unsigned char)(digit - '0');
+        if ((uint32_t)digit > maximum ||
+            value > (maximum - (uint32_t)digit) / 10u) return 0;
+        value = value * 10u + (uint32_t)digit;
     }
     if (value == 0u) return 0;
     *index_out = value;
     return 1;
 }
 
+static int hd2ct_parse_boolean(const unsigned char *text, size_t length,
+                               uint32_t *enabled_out)
+{
+    static const char enabled_text[] = "true";
+    static const char disabled_text[] = "false";
+    if (length == sizeof(enabled_text) - 1u &&
+        memcmp(text, enabled_text, sizeof(enabled_text) - 1u) == 0) {
+        *enabled_out = 1u;
+        return 1;
+    }
+    if (length == sizeof(disabled_text) - 1u &&
+        memcmp(text, disabled_text, sizeof(disabled_text) - 1u) == 0) {
+        *enabled_out = 0u;
+        return 1;
+    }
+    return 0;
+}
+
 static int hd2ct_parse_values_text(const unsigned char *text, size_t length,
                                    HD2CT_ParsedValues *parsed)
 {
-    static const char option_id[] = HD2CT_TARGET_LANGUAGE_OPTION_ID;
+    static const char target_option_id[] = HD2CT_TARGET_LANGUAGE_OPTION_ID;
+    static const char enabled_option_id[] = HD2CT_ENABLED_OPTION_ID;
+    static const char timeout_option_id[] = HD2CT_TIMEOUT_OPTION_ID;
     size_t cursor = 0u;
     memset(parsed, 0, sizeof(*parsed));
     parsed->target_language = HD2CT_DEFAULT_TARGET_LANGUAGE;
+    parsed->enabled = HD2CT_ENABLED_DEFAULT;
+    parsed->timeout_index = HD2CT_DEFAULT_TIMEOUT_INDEX;
     while (cursor < length) {
         size_t line_start = cursor;
         size_t line_end;
         size_t tab = SIZE_MAX;
         size_t i;
         int extra_tab = 0;
+        const unsigned char *value;
+        size_t value_length;
         int target_line;
+        int enabled_line;
+        int timeout_line;
         while (cursor < length && text[cursor] != '\r' && text[cursor] != '\n') {
             if (text[cursor] == '\t' && tab == SIZE_MAX) tab = cursor;
             ++cursor;
@@ -154,28 +185,40 @@ static int hd2ct_parse_values_text(const unsigned char *text, size_t length,
             ++cursor;
         }
         if (tab == SIZE_MAX || tab == line_start) continue;
-        target_line = tab - line_start == sizeof(option_id) - 1u &&
-            memcmp(text + line_start, option_id, sizeof(option_id) - 1u) == 0;
+        value = text + tab + 1u;
+        value_length = line_end - tab - 1u;
+        target_line = tab - line_start == sizeof(target_option_id) - 1u &&
+            memcmp(text + line_start, target_option_id,
+                   sizeof(target_option_id) - 1u) == 0;
+        enabled_line = tab - line_start == sizeof(enabled_option_id) - 1u &&
+            memcmp(text + line_start, enabled_option_id,
+                   sizeof(enabled_option_id) - 1u) == 0;
+        timeout_line = tab - line_start == sizeof(timeout_option_id) - 1u &&
+            memcmp(text + line_start, timeout_option_id,
+                   sizeof(timeout_option_id) - 1u) == 0;
         for (i = tab + 1u; i < line_end; ++i) {
             if (text[i] == '\t') {
                 extra_tab = 1;
                 break;
             }
         }
-        if (target_line) {
-            parsed->any_valid_line = 1u;
-            parsed->option_present = 1u;
-            parsed->option_value_valid = 0u;
-            parsed->target_language = HD2CT_DEFAULT_TARGET_LANGUAGE;
-            if (!extra_tab && hd2ct_parse_target_index(
-                    text + tab + 1u, line_end - tab - 1u,
-                    &parsed->target_language)) {
-                parsed->option_value_valid = 1u;
-            }
-            continue;
-        }
         /* MOM对其它模组值只按id和值分隔符读取，不限制值的数据类型。 */
         parsed->any_valid_line = 1u;
+        if (target_line) {
+            parsed->target_language = HD2CT_DEFAULT_TARGET_LANGUAGE;
+            parsed->target_valid = !extra_tab && hd2ct_parse_index(
+                value, value_length, HD2CT_TARGET_LANGUAGE_COUNT,
+                &parsed->target_language);
+        } else if (enabled_line) {
+            parsed->enabled = HD2CT_ENABLED_DEFAULT;
+            parsed->enabled_valid = !extra_tab && hd2ct_parse_boolean(
+                value, value_length, &parsed->enabled);
+        } else if (timeout_line) {
+            parsed->timeout_index = HD2CT_DEFAULT_TIMEOUT_INDEX;
+            parsed->timeout_valid = !extra_tab && hd2ct_parse_index(
+                value, value_length, HD2CT_TIMEOUT_CHOICE_COUNT,
+                &parsed->timeout_index);
+        }
     }
     return parsed->any_valid_line != 0u;
 }
@@ -190,28 +233,44 @@ static int hd2ct_append_backup_suffix(wchar_t *path, size_t capacity)
     return 1;
 }
 
-uint32_t hd2ct_read_applied_target_language(void)
+static void hd2ct_apply_parsed_values(const HD2CT_ParsedValues *parsed,
+                                      HD2CT_RuntimeSettings *settings)
+{
+    if (parsed->target_valid != 0u) {
+        settings->target_language = parsed->target_language;
+    }
+    if (parsed->enabled_valid != 0u) {
+        settings->enabled = parsed->enabled;
+    }
+    if (parsed->timeout_valid != 0u) {
+        settings->timeout_seconds =
+            g_hd2ct_timeout_seconds[parsed->timeout_index - 1u];
+    }
+}
+
+void hd2ct_read_applied_settings(HD2CT_RuntimeSettings *settings)
 {
     wchar_t path[HD2CT_MAX_VALUES_PATH];
     unsigned char *buffer;
     size_t bytes = 0u;
     HD2CT_ParsedValues parsed;
-    uint32_t target = HD2CT_DEFAULT_TARGET_LANGUAGE;
     int read_ok;
+    if (settings == NULL) return;
+    settings->target_language = HD2CT_DEFAULT_TARGET_LANGUAGE;
+    settings->timeout_seconds = HD2CT_DEFAULT_TIMEOUT_SECONDS;
+    settings->enabled = HD2CT_ENABLED_DEFAULT;
     if (!hd2ct_values_primary_path(path,
                                   sizeof(path) / sizeof(path[0]))) {
-        return target;
+        return;
     }
     buffer = (unsigned char *)HeapAlloc(
         GetProcessHeap(), HEAP_ZERO_MEMORY,
         (SIZE_T)HD2CT_MAX_VALUES_FILE_BYTES + 1u);
-    if (buffer == NULL) return target;
+    if (buffer == NULL) return;
 
     read_ok = hd2ct_read_values_file(path, buffer, &bytes);
     if (read_ok && hd2ct_parse_values_text(buffer, bytes, &parsed)) {
-        if (parsed.option_present != 0u && parsed.option_value_valid != 0u) {
-            target = parsed.target_language;
-        }
+        hd2ct_apply_parsed_values(&parsed, settings);
         goto cleanup;
     }
 
@@ -221,9 +280,8 @@ uint32_t hd2ct_read_applied_target_language(void)
     }
     bytes = 0u;
     if (hd2ct_read_values_file(path, buffer, &bytes) &&
-        hd2ct_parse_values_text(buffer, bytes, &parsed) &&
-        parsed.option_present != 0u && parsed.option_value_valid != 0u) {
-        target = parsed.target_language;
+        hd2ct_parse_values_text(buffer, bytes, &parsed)) {
+        hd2ct_apply_parsed_values(&parsed, settings);
     }
 
 cleanup:
@@ -231,5 +289,4 @@ cleanup:
     HeapFree(GetProcessHeap(), 0, buffer);
     SecureZeroMemory(path, sizeof(path));
     SecureZeroMemory(&parsed, sizeof(parsed));
-    return target;
 }

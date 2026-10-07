@@ -194,8 +194,39 @@ def target_language_settings_source(
         "    option_id = " + _lua_string_literal(data["option_id"]) + ",",
         "    mod_id = " + _lua_string_literal(data["mod_id"]) + ",",
         f"    default_index = {data['default_index']},",
-        "    languages = {",
+        "    menu_options = {",
     ]
+    enabled = data["menu_options"]["enabled"]
+    lines.extend([
+        "        enabled = {",
+        "            option_id = " + _lua_string_literal(enabled["option_id"]) + ",",
+        "            type = " + _lua_string_literal(enabled["type"]) + ",",
+        "            label = " + _lua_string_literal(enabled["label"]) + ",",
+        "            default = true,",
+        "            description = " + _lua_string_literal(enabled["description"]) + ",",
+        "        },",
+    ])
+    timeout = data["menu_options"]["timeout"]
+    lines.extend([
+        "        timeout = {",
+        "            option_id = " + _lua_string_literal(timeout["option_id"]) + ",",
+        "            type = " + _lua_string_literal(timeout["type"]) + ",",
+        "            label = " + _lua_string_literal(timeout["label"]) + ",",
+        f"            default_index = {timeout['default_index']},",
+        "            description = " + _lua_string_literal(timeout["description"]) + ",",
+        "            choices = {",
+    ])
+    for choice in timeout["choices"]:
+        lines.append(
+            "                {label = %s, seconds = %d},"
+            % (_lua_string_literal(choice["label"]), choice["seconds"])
+        )
+    lines.extend([
+        "            },",
+        "        },",
+        "    },",
+        "    languages = {",
+    ])
     for language in data["languages"]:
         lines.append(
             "        {id = %s, label = %s},"
@@ -625,8 +656,8 @@ def addon_files(
     description = (
         "进程内聊天翻译：通过游戏内原生网络线程将聊天交给配置的翻译服务，"
         "翻译成功后显示原文、换行和“译文：”加译文；服务判断无需回写时保持原文，请求失败显示简短提示，不广播译文。"
-        "读取 HD2CT_API_URL、HD2CT_MODEL、HD2CT_API_KEY、HD2CT_APP_ID、"
-        "HD2CT_TIMEOUT_SECONDS（默认20）和 HD2CT_ENABLED（默认1）环境变量。"
+        "读取 HD2CT_API_URL、HD2CT_MODEL、HD2CT_API_KEY 和 HD2CT_APP_ID 环境变量；"
+        "启用状态与请求超时由游戏内菜单控制。"
         "内置 Bingus Shared Loader v18，无需另外导入。Arsenal 默认优先级请放在列表最底；"
         "启用 first-mod-wins 时请放在列表最顶。"
     )

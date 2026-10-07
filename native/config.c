@@ -232,24 +232,3 @@ int hd2ct_read_environment_value(const wchar_t *name, char *out,
     bytes = hd2ct_wide_to_utf8(wide_value, wide_length, out, (int)out_capacity);
     return bytes > 0 && (size_t)bytes < out_capacity;
 }
-
-int hd2ct_parse_timeout(const char *value, uint32_t *timeout_out)
-{
-    uint32_t result = 0;
-    size_t i;
-    size_t length = strlen(value);
-    if (length == 0 || length > 3u) {
-        return 0;
-    }
-    for (i = 0; i < length; ++i) {
-        if (value[i] < '0' || value[i] > '9') {
-            return 0;
-        }
-        result = result * 10u + (uint32_t)(value[i] - '0');
-    }
-    if (result < 1u || result > 120u) {
-        return 0;
-    }
-    *timeout_out = result;
-    return 1;
-}
