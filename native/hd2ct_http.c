@@ -8,6 +8,7 @@
 #include <windows.h>
 #include <winhttp.h>
 #include <winreg.h>
+#include <bcrypt.h>
 #include <process.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -45,6 +46,55 @@ enum {
     HD2CT_SLOT_DONE = 3
 };
 
+enum {
+    HD2CT_FAMILY_AI = 1,
+    HD2CT_FAMILY_MACHINE = 2
+};
+
+enum {
+    HD2CT_ADAPTER_AI = 1,
+    HD2CT_ADAPTER_GOOGLE = 2,
+    HD2CT_ADAPTER_BAIDU = 3,
+    HD2CT_ADAPTER_YOUDAO = 4,
+    HD2CT_ADAPTER_UNKNOWN = 5
+};
+
+typedef struct HD2CT_WorkerJob HD2CT_WorkerJob;
+
+typedef struct HD2CT_BuiltRequest {
+    char *body;
+    DWORD body_bytes;
+    const char *content_type;
+    const char *header_name;
+    const char *header_prefix;
+    const char *header_value;
+} HD2CT_BuiltRequest;
+
+typedef struct HD2CT_AdapterBase {
+    uint32_t family;
+    int model_required;
+    int api_key_required;
+    int ai_v1_completion_path;
+} HD2CT_AdapterBase;
+
+typedef struct HD2CT_Adapter {
+    uint32_t id;
+    const HD2CT_AdapterBase *base;
+    int app_id_required;
+    const char *default_path;
+    int (*build_request)(const HD2CT_WorkerJob *job, HD2CT_BuiltRequest *request);
+    int (*parse_response)(const HD2CT_WorkerJob *job, char *body, size_t body_bytes,
+                          char *translation, uint32_t *translation_bytes,
+                          const char **failure_code);
+} HD2CT_Adapter;
+
+static const HD2CT_AdapterBase g_ai_translation_base = {
+    HD2CT_FAMILY_AI, 1, 1, 1
+};
+static const HD2CT_AdapterBase g_machine_translation_base = {
+    HD2CT_FAMILY_MACHINE, 0, 1, 0
+};
+
 typedef struct HD2CT_JobSlot {
     uint32_t state;
     uint32_t cancelled;
@@ -59,7 +109,7 @@ typedef struct HD2CT_JobSlot {
     uint32_t result_bytes;
 } HD2CT_JobSlot;
 
-typedef struct HD2CT_WorkerJob {
+struct HD2CT_WorkerJob {
     uint32_t slot_index;
     uint64_t serial;
     uint64_t submitted_ms;
@@ -69,8 +119,10 @@ typedef struct HD2CT_WorkerJob {
     char url[HD2CT_MAX_URL + 1u];
     char model[HD2CT_MAX_MODEL + 1u];
     char api_key[HD2CT_MAX_KEY + 1u];
+    char app_id[HD2CT_MAX_KEY + 1u];
+    uint32_t adapter_id;
     uint32_t timeout_seconds;
-} HD2CT_WorkerJob;
+};
 
 typedef struct HD2CT_CacheEntry {
     uint64_t age;
@@ -102,6 +154,8 @@ static uint32_t g_timeout_seconds = 20;
 static char g_url[HD2CT_MAX_URL + 1u];
 static char g_model[HD2CT_MAX_MODEL + 1u];
 static char g_api_key[HD2CT_MAX_KEY + 1u];
+static char g_app_id[HD2CT_MAX_KEY + 1u];
+static volatile LONG g_adapter_id = HD2CT_ADAPTER_UNKNOWN;
 static volatile LONG g_enabled;
 static volatile LONG g_status = HD2CT_STATUS_MISSING_CONFIG;
 static volatile LONG g_initialized;
@@ -127,10 +181,12 @@ static const char HD2CT_SYSTEM_PROMPT[] =
     "尽量保留昵称、坐标、数字。仅输出JSON对象，且只能有is_chinese(bool)、translation(string)。";
 
 static int hd2ct_is_only_space(const char *text, size_t length);
+static const HD2CT_Adapter *hd2ct_adapter_for_id(uint32_t adapter_id);
 
 static void hd2ct_clear_key_locked(void)
 {
     SecureZeroMemory(g_api_key, sizeof(g_api_key));
+    SecureZeroMemory(g_app_id, sizeof(g_app_id));
     InterlockedExchange(&g_clear_key_pending, 0);
 }
 
@@ -167,7 +223,8 @@ static uint32_t hd2ct_status_from_result(const char *result, uint32_t bytes)
         }
         return 1000u;
     }
-    if (bytes >= 3u && memcmp(result, "OK\n", 3u) == 0) {
+    if (bytes >= 3u && (memcmp(result, "OK\n", 3u) == 0 ||
+                        memcmp(result, "MT\n", 3u) == 0)) {
         return 0u;
     }
     if (hd2ct_error_is(result, bytes, "TIMEOUT")) {
@@ -353,7 +410,46 @@ static int hd2ct_local_http_host(const wchar_t *host)
            hd2ct_ascii_equal_wide(host, L"[::1]");
 }
 
-static int hd2ct_normalize_url(const char *input, char *normalized, size_t normalized_capacity)
+static int hd2ct_ascii_contains_ci(const char *text, const char *needle)
+{
+    size_t text_length = strlen(text);
+    size_t needle_length = strlen(needle);
+    size_t i;
+    if (needle_length == 0 || needle_length > text_length) {
+        return 0;
+    }
+    for (i = 0; i + needle_length <= text_length; ++i) {
+        size_t j;
+        for (j = 0; j < needle_length; ++j) {
+            unsigned char left = (unsigned char)text[i + j];
+            unsigned char right = (unsigned char)needle[j];
+            if (left >= 'A' && left <= 'Z') left = (unsigned char)(left + ('a' - 'A'));
+            if (right >= 'A' && right <= 'Z') right = (unsigned char)(right + ('a' - 'A'));
+            if (left != right) break;
+        }
+        if (j == needle_length) return 1;
+    }
+    return 0;
+}
+
+static uint32_t hd2ct_select_adapter(const char *url, const char *model)
+{
+    size_t model_length = hd2ct_bounded_length(model, HD2CT_MAX_MODEL);
+    if (g_ai_translation_base.model_required &&
+        model_length <= HD2CT_MAX_MODEL && model_length != 0 &&
+        !hd2ct_is_only_space(model, model_length)) {
+        return HD2CT_ADAPTER_AI;
+    }
+    if (g_machine_translation_base.family == HD2CT_FAMILY_MACHINE) {
+        if (hd2ct_ascii_contains_ci(url, "google")) return HD2CT_ADAPTER_GOOGLE;
+        if (hd2ct_ascii_contains_ci(url, "baidu")) return HD2CT_ADAPTER_BAIDU;
+        if (hd2ct_ascii_contains_ci(url, "youdao")) return HD2CT_ADAPTER_YOUDAO;
+    }
+    return HD2CT_ADAPTER_UNKNOWN;
+}
+
+static int hd2ct_normalize_url(const char *input, uint32_t adapter_id,
+                               char *normalized, size_t normalized_capacity)
 {
     wchar_t wide_url[HD2CT_MAX_URL + 1u];
     wchar_t host[512];
@@ -367,7 +463,15 @@ static int hd2ct_normalize_url(const char *input, char *normalized, size_t norma
     size_t prefix_length;
     size_t i;
     int wide_length;
-    if (input_length == 0 || input_length > HD2CT_MAX_URL ||
+    if (input_length > HD2CT_MAX_URL ||
+        normalized_capacity <= input_length) {
+        return 0;
+    }
+    if (adapter_id == HD2CT_ADAPTER_UNKNOWN) {
+        memcpy(normalized, input, input_length + 1u);
+        return 1;
+    }
+    if (input_length == 0 ||
         !hd2ct_valid_utf8((const unsigned char *)input, input_length, 1)) {
         return 0;
     }
@@ -419,10 +523,14 @@ static int hd2ct_normalize_url(const char *input, char *normalized, size_t norma
         return 0;
     }
     if (path_length == 0 || (path_length == 1u && path_start[0] == '/')) {
-        path_start = "/chat/completions";
-        path_length = sizeof("/chat/completions") - 1u;
-    } else if ((path_length == 3u && memcmp(path_start, "/v1", 3u) == 0) ||
-               (path_length == 4u && memcmp(path_start, "/v1/", 4u) == 0)) {
+        const HD2CT_Adapter *adapter = hd2ct_adapter_for_id(adapter_id);
+        if (adapter == NULL || adapter->default_path == NULL) return 0;
+        path_start = adapter->default_path;
+        path_length = strlen(path_start);
+    } else if (hd2ct_adapter_for_id(adapter_id) != NULL &&
+               hd2ct_adapter_for_id(adapter_id)->base->ai_v1_completion_path &&
+               ((path_length == 3u && memcmp(path_start, "/v1", 3u) == 0) ||
+                (path_length == 4u && memcmp(path_start, "/v1/", 4u) == 0))) {
         path_start = "/v1/chat/completions";
         path_length = sizeof("/v1/chat/completions") - 1u;
     }
@@ -435,34 +543,31 @@ static int hd2ct_normalize_url(const char *input, char *normalized, size_t norma
     return 1;
 }
 
+static int hd2ct_valid_secret(const char *value, size_t maximum)
+{
+    size_t length = hd2ct_bounded_length(value, maximum);
+    size_t i;
+    if (length == 0 || length > maximum ||
+        !hd2ct_valid_utf8((const unsigned char *)value, length, 1)) {
+        return 0;
+    }
+    for (i = 0; i < length; ++i) {
+        unsigned char c = (unsigned char)value[i];
+        if (c <= 0x20u || c == 0x7fu) return 0;
+    }
+    return 1;
+}
+
 static int hd2ct_valid_model_key(const char *model, const char *api_key)
 {
     size_t model_length = hd2ct_bounded_length(model, HD2CT_MAX_MODEL);
-    size_t key_length = hd2ct_bounded_length(api_key, HD2CT_MAX_KEY);
-    size_t i;
-    int model_nonspace = 0;
-    int key_nonspace = 0;
     if (model_length == 0 || model_length > HD2CT_MAX_MODEL ||
-        key_length == 0 || key_length > HD2CT_MAX_KEY ||
         !hd2ct_valid_utf8((const unsigned char *)model, model_length, 1) ||
-        !hd2ct_valid_utf8((const unsigned char *)api_key, key_length, 1) ||
-        hd2ct_is_only_space(model, model_length)) {
+        hd2ct_is_only_space(model, model_length) ||
+        !hd2ct_valid_secret(api_key, HD2CT_MAX_KEY)) {
         return 0;
     }
-    for (i = 0; i < model_length; ++i) {
-        if ((unsigned char)model[i] > 0x20u) {
-            model_nonspace = 1;
-        }
-    }
-    for (i = 0; i < key_length; ++i) {
-        if ((unsigned char)api_key[i] <= 0x20u || (unsigned char)api_key[i] == 0x7fu) {
-            return 0;
-        }
-        if ((unsigned char)api_key[i] > 0x20u) {
-            key_nonspace = 1;
-        }
-    }
-    return model_nonspace && key_nonspace;
+    return 1;
 }
 
 static int hd2ct_pin_module(void)
@@ -477,6 +582,7 @@ static int hd2ct_pin_module(void)
 static void hd2ct_zero_key(void)
 {
     SecureZeroMemory(g_api_key, sizeof(g_api_key));
+    SecureZeroMemory(g_app_id, sizeof(g_app_id));
 }
 
 static void hd2ct_cancel_active_locked(void)
@@ -699,7 +805,13 @@ static int hd2ct_is_only_space(const char *text, size_t length)
         return length == 0;
     }
     for (i = 0; i < count; ++i) {
-        if (!iswspace(wide[i])) {
+        wchar_t code = wide[i];
+        int unicode_space = iswspace(code) != 0 || code == 0x0085 ||
+            code == 0x00a0 || code == 0x1680 ||
+            (code >= 0x2000 && code <= 0x200a) ||
+            code == 0x2028 || code == 0x2029 || code == 0x202f ||
+            code == 0x205f || code == 0x3000;
+        if (!unicode_space) {
             return 0;
         }
     }
@@ -934,6 +1046,729 @@ cleanup:
     return ok;
 }
 
+static int hd2ct_build_ai_request(const HD2CT_WorkerJob *job,
+                                  HD2CT_BuiltRequest *request)
+{
+    if (!hd2ct_make_request_json(job, &request->body, &request->body_bytes)) return 0;
+    request->content_type = "application/json";
+    request->header_name = "Authorization";
+    request->header_prefix = "Bearer ";
+    request->header_value = job->api_key;
+    return 1;
+}
+
+static int hd2ct_build_google_request(const HD2CT_WorkerJob *job,
+                                      HD2CT_BuiltRequest *request)
+{
+    cJSON *root = cJSON_CreateObject();
+    char *printed = NULL;
+    size_t length;
+    int ok = 0;
+    if (root == NULL ||
+        cJSON_AddStringToObject(root, "q", job->source) == NULL ||
+        cJSON_AddStringToObject(root, "target", "zh-CN") == NULL ||
+        cJSON_AddStringToObject(root, "format", "text") == NULL) {
+        goto cleanup;
+    }
+    printed = cJSON_PrintUnformatted(root);
+    if (printed == NULL) goto cleanup;
+    length = strlen(printed);
+    if (length == 0 || length > 32768u || length > MAXDWORD) goto cleanup;
+    request->body = printed;
+    request->body_bytes = (DWORD)length;
+    request->content_type = "application/json";
+    request->header_name = "x-goog-api-key";
+    request->header_prefix = "";
+    request->header_value = job->api_key;
+    printed = NULL;
+    ok = 1;
+
+cleanup:
+    if (printed != NULL) cJSON_free(printed);
+    cJSON_Delete(root);
+    return ok;
+}
+
+typedef struct HD2CT_FormBuffer {
+    char *data;
+    size_t used;
+    size_t capacity;
+} HD2CT_FormBuffer;
+
+static int hd2ct_form_append(HD2CT_FormBuffer *form, const char *value, size_t length)
+{
+    if (length > form->capacity - form->used - 1u) return 0;
+    memcpy(form->data + form->used, value, length);
+    form->used += length;
+    form->data[form->used] = '\0';
+    return 1;
+}
+
+static int hd2ct_form_append_encoded(HD2CT_FormBuffer *form,
+                                     const unsigned char *value, size_t length)
+{
+    static const char hex[] = "0123456789ABCDEF";
+    size_t i;
+    for (i = 0; i < length; ++i) {
+        unsigned char c = value[i];
+        if ((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
+            (c >= '0' && c <= '9') || c == '-' || c == '.' || c == '_' || c == '*') {
+            char plain = (char)c;
+            if (!hd2ct_form_append(form, &plain, 1u)) return 0;
+        } else if (c == ' ') {
+            if (!hd2ct_form_append(form, "+", 1u)) return 0;
+        } else {
+            char escaped[3] = {'%', hex[c >> 4], hex[c & 0x0fu]};
+            if (!hd2ct_form_append(form, escaped, sizeof(escaped))) return 0;
+        }
+    }
+    return 1;
+}
+
+static int hd2ct_form_add(HD2CT_FormBuffer *form, const char *name,
+                          const char *value, size_t value_length)
+{
+    static const char equal[] = "=";
+    if (form->used != 0 && !hd2ct_form_append(form, "&", 1u)) return 0;
+    return hd2ct_form_append(form, name, strlen(name)) &&
+           hd2ct_form_append(form, equal, sizeof(equal) - 1u) &&
+           hd2ct_form_append_encoded(form, (const unsigned char *)value, value_length);
+}
+
+static int hd2ct_random_salt(char salt[33])
+{
+    unsigned char random[16];
+    static const char hex[] = "0123456789abcdef";
+    size_t i;
+    if (BCryptGenRandom(NULL, random, (ULONG)sizeof(random),
+                        BCRYPT_USE_SYSTEM_PREFERRED_RNG) < 0) {
+        SecureZeroMemory(random, sizeof(random));
+        return 0;
+    }
+    for (i = 0; i < sizeof(random); ++i) {
+        salt[i * 2u] = hex[random[i] >> 4];
+        salt[i * 2u + 1u] = hex[random[i] & 0x0fu];
+    }
+    salt[32] = '\0';
+    SecureZeroMemory(random, sizeof(random));
+    return 1;
+}
+
+static int hd2ct_digest_hex(LPCWSTR algorithm, const char *const *parts,
+                            const size_t *part_lengths, size_t part_count,
+                            char *hex_output, size_t hex_capacity)
+{
+    BCRYPT_ALG_HANDLE algorithm_handle = NULL;
+    BCRYPT_HASH_HANDLE hash_handle = NULL;
+    PUCHAR hash_object = NULL;
+    DWORD object_bytes = 0;
+    DWORD hash_bytes = 0;
+    DWORD returned = 0;
+    UCHAR digest[64];
+    static const char hex[] = "0123456789abcdef";
+    NTSTATUS status;
+    size_t i;
+    int ok = 0;
+    memset(digest, 0, sizeof(digest));
+    status = BCryptOpenAlgorithmProvider(&algorithm_handle, algorithm, NULL, 0);
+    if (status < 0) goto cleanup;
+    status = BCryptGetProperty(algorithm_handle, BCRYPT_OBJECT_LENGTH,
+                               (PUCHAR)&object_bytes, sizeof(object_bytes),
+                               &returned, 0);
+    if (status < 0 || object_bytes == 0) goto cleanup;
+    status = BCryptGetProperty(algorithm_handle, BCRYPT_HASH_LENGTH,
+                               (PUCHAR)&hash_bytes, sizeof(hash_bytes),
+                               &returned, 0);
+    if (status < 0 || hash_bytes == 0 || hash_bytes > sizeof(digest) ||
+        (size_t)hash_bytes * 2u + 1u > hex_capacity) goto cleanup;
+    hash_object = (PUCHAR)malloc(object_bytes);
+    if (hash_object == NULL) goto cleanup;
+    status = BCryptCreateHash(algorithm_handle, &hash_handle, hash_object,
+                              object_bytes, NULL, 0, 0);
+    if (status < 0) goto cleanup;
+    for (i = 0; i < part_count; ++i) {
+        if (part_lengths[i] > 0xffffffffu) goto cleanup;
+        status = BCryptHashData(hash_handle, (PUCHAR)(const void *)parts[i],
+                                (ULONG)part_lengths[i], 0);
+        if (status < 0) goto cleanup;
+    }
+    status = BCryptFinishHash(hash_handle, digest, hash_bytes, 0);
+    if (status < 0) goto cleanup;
+    for (i = 0; i < hash_bytes; ++i) {
+        hex_output[i * 2u] = hex[digest[i] >> 4];
+        hex_output[i * 2u + 1u] = hex[digest[i] & 0x0fu];
+    }
+    hex_output[(size_t)hash_bytes * 2u] = '\0';
+    ok = 1;
+
+cleanup:
+    if (hash_handle != NULL) BCryptDestroyHash(hash_handle);
+    if (hash_object != NULL) {
+        SecureZeroMemory(hash_object, object_bytes);
+        free(hash_object);
+    }
+    if (algorithm_handle != NULL) BCryptCloseAlgorithmProvider(algorithm_handle, 0);
+    SecureZeroMemory(digest, sizeof(digest));
+    return ok;
+}
+
+static int hd2ct_build_baidu_request(const HD2CT_WorkerJob *job,
+                                     HD2CT_BuiltRequest *request)
+{
+    char salt[33] = {0};
+    char sign[33] = {0};
+    const char *parts[4];
+    size_t lengths[4];
+    size_t q_length = job->source_bytes;
+    HD2CT_FormBuffer form;
+    size_t app_id_length = strlen(job->app_id);
+    size_t secret_length = strlen(job->api_key);
+    int ok = 0;
+    memset(request, 0, sizeof(*request));
+    if (!hd2ct_random_salt(salt)) goto cleanup;
+    parts[0] = job->app_id;
+    parts[1] = job->source;
+    parts[2] = salt;
+    parts[3] = job->api_key;
+    lengths[0] = app_id_length;
+    lengths[1] = q_length;
+    lengths[2] = strlen(salt);
+    lengths[3] = secret_length;
+    if (!hd2ct_digest_hex(BCRYPT_MD5_ALGORITHM, parts, lengths, 4u,
+                          sign, sizeof(sign))) goto cleanup;
+    form.capacity = 32768u;
+    form.data = (char *)malloc(form.capacity);
+    form.used = 0;
+    if (form.data == NULL) goto cleanup;
+    form.data[0] = '\0';
+    if (!hd2ct_form_add(&form, "q", job->source, q_length) ||
+        !hd2ct_form_add(&form, "from", "auto", 4u) ||
+        !hd2ct_form_add(&form, "to", "zh", 2u) ||
+        !hd2ct_form_add(&form, "appid", job->app_id, app_id_length) ||
+        !hd2ct_form_add(&form, "salt", salt, strlen(salt)) ||
+        !hd2ct_form_add(&form, "sign", sign, strlen(sign)) ||
+        form.used > MAXDWORD) {
+        SecureZeroMemory(form.data, form.capacity);
+        free(form.data);
+        goto cleanup;
+    }
+    request->body = form.data;
+    request->body_bytes = (DWORD)form.used;
+    request->content_type = "application/x-www-form-urlencoded; charset=utf-8";
+    ok = 1;
+
+cleanup:
+    SecureZeroMemory(salt, sizeof(salt));
+    SecureZeroMemory(sign, sizeof(sign));
+    return ok;
+}
+
+static size_t hd2ct_utf8_character_bytes(unsigned char first)
+{
+    if (first < 0x80u) return 1u;
+    if (first < 0xe0u) return 2u;
+    if (first < 0xf0u) return 3u;
+    return 4u;
+}
+
+static int hd2ct_youdao_input(const char *source, size_t source_bytes,
+                              char *input, size_t input_capacity,
+                              size_t *input_bytes, size_t *codepoint_count)
+{
+    size_t offsets[HD2CT_MAX_SOURCE + 1u];
+    size_t count = 0;
+    size_t cursor = 0;
+    size_t first_end;
+    size_t last_start;
+    char decimal_count[16];
+    int decimal_bytes;
+    size_t used = 0;
+    while (cursor < source_bytes && count < HD2CT_MAX_SOURCE) {
+        offsets[count++] = cursor;
+        cursor += hd2ct_utf8_character_bytes((unsigned char)source[cursor]);
+    }
+    offsets[count] = source_bytes;
+    *codepoint_count = count;
+    if (count <= 20u) {
+        if (source_bytes + 1u > input_capacity) return 0;
+        memcpy(input, source, source_bytes);
+        input[source_bytes] = '\0';
+        *input_bytes = source_bytes;
+        return 1;
+    }
+    first_end = offsets[10u];
+    last_start = offsets[count - 10u];
+    decimal_bytes = snprintf(decimal_count, sizeof(decimal_count), "%lu",
+                             (unsigned long)count);
+    if (decimal_bytes <= 0 || (size_t)decimal_bytes >= sizeof(decimal_count)) return 0;
+    if (first_end + (size_t)decimal_bytes + source_bytes - last_start + 1u > input_capacity) {
+        return 0;
+    }
+    memcpy(input + used, source, first_end);
+    used += first_end;
+    memcpy(input + used, decimal_count, (size_t)decimal_bytes);
+    used += (size_t)decimal_bytes;
+    memcpy(input + used, source + last_start, source_bytes - last_start);
+    used += source_bytes - last_start;
+    input[used] = '\0';
+    *input_bytes = used;
+    return 1;
+}
+
+static int hd2ct_build_youdao_request(const HD2CT_WorkerJob *job,
+                                      HD2CT_BuiltRequest *request)
+{
+    char salt[33] = {0};
+    char sign[65] = {0};
+    char curtime[24] = {0};
+    char input[HD2CT_MAX_SOURCE + 32u] = {0};
+    const char *parts[5];
+    size_t lengths[5];
+    size_t input_bytes = 0;
+    size_t codepoints = 0;
+    size_t app_id_length = strlen(job->app_id);
+    size_t secret_length = strlen(job->api_key);
+    FILETIME file_time;
+    ULARGE_INTEGER windows_ticks;
+    uint64_t unix_seconds;
+    HD2CT_FormBuffer form;
+    int curtime_bytes;
+    int ok = 0;
+    memset(request, 0, sizeof(*request));
+    if (!hd2ct_random_salt(salt) ||
+        !hd2ct_youdao_input(job->source, job->source_bytes, input, sizeof(input),
+                            &input_bytes, &codepoints)) goto cleanup;
+    (void)codepoints;
+    GetSystemTimeAsFileTime(&file_time);
+    windows_ticks.LowPart = file_time.dwLowDateTime;
+    windows_ticks.HighPart = file_time.dwHighDateTime;
+    if (windows_ticks.QuadPart < 116444736000000000ull) goto cleanup;
+    unix_seconds = (windows_ticks.QuadPart - 116444736000000000ull) / 10000000ull;
+    curtime_bytes = snprintf(curtime, sizeof(curtime), "%llu",
+                             (unsigned long long)unix_seconds);
+    if (curtime_bytes <= 0 || (size_t)curtime_bytes >= sizeof(curtime)) goto cleanup;
+    parts[0] = job->app_id;
+    parts[1] = input;
+    parts[2] = salt;
+    parts[3] = curtime;
+    parts[4] = job->api_key;
+    lengths[0] = app_id_length;
+    lengths[1] = input_bytes;
+    lengths[2] = strlen(salt);
+    lengths[3] = (size_t)curtime_bytes;
+    lengths[4] = secret_length;
+    if (!hd2ct_digest_hex(BCRYPT_SHA256_ALGORITHM, parts, lengths, 5u,
+                          sign, sizeof(sign))) goto cleanup;
+    form.capacity = 32768u;
+    form.data = (char *)malloc(form.capacity);
+    form.used = 0;
+    if (form.data == NULL) goto cleanup;
+    form.data[0] = '\0';
+    if (!hd2ct_form_add(&form, "q", job->source, job->source_bytes) ||
+        !hd2ct_form_add(&form, "from", "auto", 4u) ||
+        !hd2ct_form_add(&form, "to", "zh-CHS", 6u) ||
+        !hd2ct_form_add(&form, "appKey", job->app_id, app_id_length) ||
+        !hd2ct_form_add(&form, "salt", salt, strlen(salt)) ||
+        !hd2ct_form_add(&form, "curtime", curtime, (size_t)curtime_bytes) ||
+        !hd2ct_form_add(&form, "signType", "v3", 2u) ||
+        !hd2ct_form_add(&form, "sign", sign, strlen(sign)) ||
+        !hd2ct_form_add(&form, "strict", "true", 4u) ||
+        form.used > MAXDWORD) {
+        SecureZeroMemory(form.data, form.capacity);
+        free(form.data);
+        goto cleanup;
+    }
+    request->body = form.data;
+    request->body_bytes = (DWORD)form.used;
+    request->content_type = "application/x-www-form-urlencoded; charset=utf-8";
+    ok = 1;
+
+cleanup:
+    SecureZeroMemory(salt, sizeof(salt));
+    SecureZeroMemory(sign, sizeof(sign));
+    SecureZeroMemory(input, sizeof(input));
+    SecureZeroMemory(curtime, sizeof(curtime));
+    return ok;
+}
+
+static int hd2ct_parse_complete_json(char *body, size_t body_bytes, cJSON **root_out)
+{
+    cJSON *root;
+    const char *parse_end = NULL;
+    body[body_bytes] = '\0';
+    if (body_bytes == 0 || body_bytes > HD2CT_MAX_RESPONSE ||
+        !hd2ct_valid_utf8((const unsigned char *)body, body_bytes, 0) ||
+        hd2ct_has_escaped_nul(body, body_bytes)) return 0;
+    root = cJSON_ParseWithLengthOpts(body, body_bytes, &parse_end, 0);
+    if (root == NULL || parse_end == NULL) {
+        cJSON_Delete(root);
+        return 0;
+    }
+    while ((size_t)(parse_end - body) < body_bytes &&
+           (*parse_end == ' ' || *parse_end == '\t' ||
+            *parse_end == '\r' || *parse_end == '\n')) ++parse_end;
+    if ((size_t)(parse_end - body) != body_bytes || !cJSON_IsObject(root)) {
+        cJSON_Delete(root);
+        return 0;
+    }
+    *root_out = root;
+    return 1;
+}
+
+static int hd2ct_copy_valid_translation(const char *text, char *translation,
+                                        uint32_t *translation_bytes)
+{
+    size_t length;
+    if (text == NULL) return 0;
+    length = strlen(text);
+    if (length == 0 || length > HD2CT_MAX_TRANSLATION ||
+        hd2ct_is_only_space(text, length) ||
+        !hd2ct_valid_utf8((const unsigned char *)text, length, 1)) return 0;
+    memcpy(translation, text, length);
+    translation[length] = '\0';
+    *translation_bytes = (uint32_t)length;
+    return 1;
+}
+
+static const char *hd2ct_provider_error_code(uint32_t adapter_id, const char *code)
+{
+    if (adapter_id == HD2CT_ADAPTER_BAIDU) {
+        if (strcmp(code, "52003") == 0 || strcmp(code, "54001") == 0) return "AUTH_INVALID";
+        if (strcmp(code, "58000") == 0 || strcmp(code, "58002") == 0 ||
+            strcmp(code, "90107") == 0) return "ACCESS_DENIED";
+        if (strcmp(code, "54004") == 0) return "QUOTA_EXCEEDED";
+        if (strcmp(code, "58001") == 0) return "UNSUPPORTED_LANGUAGE";
+        if (strcmp(code, "54003") == 0 || strcmp(code, "54005") == 0) return "RATE_LIMITED";
+        if (strcmp(code, "52001") == 0) return "TIMEOUT";
+        if (strcmp(code, "54000") == 0) return "REQUEST_INVALID";
+    } else if (adapter_id == HD2CT_ADAPTER_YOUDAO) {
+        if (strcmp(code, "108") == 0 || strcmp(code, "111") == 0 ||
+            strcmp(code, "202") == 0 || strcmp(code, "206") == 0 ||
+            strcmp(code, "207") == 0) return "AUTH_INVALID";
+        if (strcmp(code, "110") == 0 || strcmp(code, "112") == 0 ||
+            strcmp(code, "203") == 0 || strcmp(code, "205") == 0) return "ACCESS_DENIED";
+        if (strcmp(code, "401") == 0) return "QUOTA_EXCEEDED";
+        if (strcmp(code, "102") == 0) return "UNSUPPORTED_LANGUAGE";
+        if (strcmp(code, "411") == 0 || strcmp(code, "412") == 0) return "RATE_LIMITED";
+        if (strcmp(code, "101") == 0 || strcmp(code, "103") == 0 ||
+            strcmp(code, "105") == 0 || strcmp(code, "113") == 0 ||
+            strcmp(code, "116") == 0) return "REQUEST_INVALID";
+    }
+    return "SERVICE_ERROR";
+}
+
+static int hd2ct_json_error_code(const cJSON *item, char *code, size_t capacity)
+{
+    if (item == NULL || capacity < 2u) return 0;
+    if (cJSON_IsString(item) && item->valuestring != NULL) {
+        size_t length = strlen(item->valuestring);
+        size_t i;
+        if (length == 0 || length >= capacity) return 0;
+        for (i = 0; i < length; ++i) {
+            if (item->valuestring[i] < '0' || item->valuestring[i] > '9') return 0;
+        }
+        memcpy(code, item->valuestring, length + 1u);
+        return 1;
+    }
+    if (cJSON_IsNumber(item) && item->valuedouble >= 0.0 &&
+        item->valuedouble <= 99999999.0 &&
+        item->valuedouble == (double)(uint32_t)item->valuedouble) {
+        int written = snprintf(code, capacity, "%lu",
+                               (unsigned long)(uint32_t)item->valuedouble);
+        return written > 0 && (size_t)written < capacity;
+    }
+    return 0;
+}
+
+static int hd2ct_html_entity(const char *entity, size_t length, uint32_t *codepoint)
+{
+    struct HD2CT_Entity { const char *name; uint32_t value; };
+    static const struct HD2CT_Entity named[] = {
+        {"amp", '&'}, {"lt", '<'}, {"gt", '>'}, {"quot", '"'},
+        {"apos", '\''}, {"nbsp", 0x00a0u}, {"copy", 0x00a9u},
+        {"reg", 0x00aeu}, {"hellip", 0x2026u}, {"ndash", 0x2013u},
+        {"mdash", 0x2014u}, {"lsquo", 0x2018u}, {"rsquo", 0x2019u},
+        {"ldquo", 0x201cu}, {"rdquo", 0x201du}, {"bull", 0x2022u},
+        {"trade", 0x2122u}
+    };
+    size_t i;
+    if (length >= 2u && entity[0] == '#') {
+        size_t cursor = 1u;
+        uint32_t value = 0;
+        unsigned base = 10u;
+        size_t digits = 0;
+        if (cursor < length && (entity[cursor] == 'x' || entity[cursor] == 'X')) {
+            base = 16u;
+            ++cursor;
+        }
+        for (; cursor < length; ++cursor) {
+            unsigned digit;
+            unsigned char c = (unsigned char)entity[cursor];
+            if (c >= '0' && c <= '9') digit = c - '0';
+            else if (base == 16u && c >= 'a' && c <= 'f') digit = c - 'a' + 10u;
+            else if (base == 16u && c >= 'A' && c <= 'F') digit = c - 'A' + 10u;
+            else return 0;
+            if (digit >= base || value > (0x10ffffu - digit) / base) return 0;
+            value = value * base + digit;
+            ++digits;
+        }
+        if (digits == 0 || value == 0 || value > 0x10ffffu ||
+            (value >= 0xd800u && value <= 0xdfffu)) return 0;
+        *codepoint = value;
+        return 1;
+    }
+    for (i = 0; i < sizeof(named) / sizeof(named[0]); ++i) {
+        if (strlen(named[i].name) == length &&
+            memcmp(entity, named[i].name, length) == 0) {
+            *codepoint = named[i].value;
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static size_t hd2ct_encode_codepoint(uint32_t codepoint, char output[4])
+{
+    if (codepoint < 0x80u) {
+        output[0] = (char)codepoint;
+        return 1u;
+    }
+    if (codepoint < 0x800u) {
+        output[0] = (char)(0xc0u | (codepoint >> 6));
+        output[1] = (char)(0x80u | (codepoint & 0x3fu));
+        return 2u;
+    }
+    if (codepoint < 0x10000u) {
+        output[0] = (char)(0xe0u | (codepoint >> 12));
+        output[1] = (char)(0x80u | ((codepoint >> 6) & 0x3fu));
+        output[2] = (char)(0x80u | (codepoint & 0x3fu));
+        return 3u;
+    }
+    output[0] = (char)(0xf0u | (codepoint >> 18));
+    output[1] = (char)(0x80u | ((codepoint >> 12) & 0x3fu));
+    output[2] = (char)(0x80u | ((codepoint >> 6) & 0x3fu));
+    output[3] = (char)(0x80u | (codepoint & 0x3fu));
+    return 4u;
+}
+
+static int hd2ct_google_decode_entities(const char *input, char *output,
+                                        size_t output_capacity, size_t *output_bytes)
+{
+    size_t input_bytes = strlen(input);
+    size_t i = 0;
+    size_t used = 0;
+    while (i < input_bytes) {
+        if (input[i] == '&') {
+            size_t end = i + 1u;
+            uint32_t codepoint;
+            while (end < input_bytes && end - i <= 12u && input[end] != ';') ++end;
+            if (end < input_bytes && input[end] == ';' &&
+                hd2ct_html_entity(input + i + 1u, end - i - 1u, &codepoint)) {
+                char encoded[4];
+                size_t encoded_bytes = hd2ct_encode_codepoint(codepoint, encoded);
+                if (encoded_bytes > output_capacity - used - 1u) return 0;
+                memcpy(output + used, encoded, encoded_bytes);
+                used += encoded_bytes;
+                i = end + 1u;
+                continue;
+            }
+        }
+        if (used + 1u >= output_capacity) return 0;
+        output[used++] = input[i++];
+    }
+    output[used] = '\0';
+    *output_bytes = used;
+    return 1;
+}
+
+static int hd2ct_parse_ai_response(const HD2CT_WorkerJob *job, char *body,
+                                   size_t body_bytes, char *translation,
+                                   uint32_t *translation_bytes,
+                                   const char **failure_code)
+{
+    *failure_code = "BAD_RESPONSE";
+    return hd2ct_parse_translation(job->source, job->source_bytes, body,
+                                   body_bytes, translation, translation_bytes);
+}
+
+static int hd2ct_parse_google_response(const HD2CT_WorkerJob *job, char *body,
+                                      size_t body_bytes, char *translation,
+                                      uint32_t *translation_bytes,
+                                      const char **failure_code)
+{
+    cJSON *root = NULL;
+    cJSON *data;
+    cJSON *translations;
+    cJSON *item;
+    cJSON *translated;
+    cJSON *detected;
+    char decoded[HD2CT_MAX_TRANSLATION + 1u];
+    size_t decoded_bytes = 0;
+    int array_size;
+    int i;
+    int ok = 0;
+    *failure_code = "BAD_RESPONSE";
+    if (!hd2ct_parse_complete_json(body, body_bytes, &root)) return 0;
+    data = cJSON_GetObjectItemCaseSensitive(root, "data");
+    translations = cJSON_IsObject(data) ?
+        cJSON_GetObjectItemCaseSensitive(data, "translations") : NULL;
+    array_size = cJSON_GetArraySize(translations);
+    if (!cJSON_IsArray(translations) || array_size == 0) goto cleanup;
+    for (i = 0; i < array_size; ++i) {
+        item = cJSON_GetArrayItem(translations, i);
+        if (!cJSON_IsObject(item)) goto cleanup;
+        translated = cJSON_GetObjectItemCaseSensitive(item, "translatedText");
+        if (!cJSON_IsString(translated) || translated->valuestring == NULL) goto cleanup;
+        detected = cJSON_GetObjectItemCaseSensitive(item, "detectedSourceLanguage");
+        if (detected != NULL &&
+            (!cJSON_IsString(detected) || detected->valuestring == NULL)) goto cleanup;
+    }
+    item = cJSON_GetArrayItem(translations, 0);
+    translated = cJSON_GetObjectItemCaseSensitive(item, "translatedText");
+    if (!hd2ct_google_decode_entities(translated->valuestring, decoded,
+                                     sizeof(decoded), &decoded_bytes) ||
+        decoded_bytes == 0 || decoded_bytes > HD2CT_MAX_TRANSLATION ||
+        hd2ct_is_only_space(decoded, decoded_bytes) ||
+        !hd2ct_valid_utf8((const unsigned char *)decoded, decoded_bytes, 1)) goto cleanup;
+    detected = cJSON_GetObjectItemCaseSensitive(item, "detectedSourceLanguage");
+    ok = hd2ct_copy_valid_translation(decoded, translation, translation_bytes);
+
+cleanup:
+    SecureZeroMemory(decoded, sizeof(decoded));
+    cJSON_Delete(root);
+    return ok;
+}
+
+static int hd2ct_parse_baidu_response(const HD2CT_WorkerJob *job, char *body,
+                                     size_t body_bytes, char *translation,
+                                     uint32_t *translation_bytes,
+                                     const char **failure_code)
+{
+    cJSON *root = NULL;
+    cJSON *error_item;
+    cJSON *from;
+    cJSON *array;
+    cJSON *item;
+    cJSON *dst;
+    char code[32];
+    char joined[HD2CT_MAX_TRANSLATION + 1u];
+    size_t used = 0;
+    int array_size;
+    int i;
+    int ok = 0;
+    *failure_code = "BAD_RESPONSE";
+    if (!hd2ct_parse_complete_json(body, body_bytes, &root)) return 0;
+    error_item = cJSON_GetObjectItemCaseSensitive(root, "error_code");
+    if (error_item != NULL) {
+        if (!hd2ct_json_error_code(error_item, code, sizeof(code))) goto cleanup;
+        if (strcmp(code, "52000") != 0) {
+            *failure_code = hd2ct_provider_error_code(HD2CT_ADAPTER_BAIDU, code);
+            goto cleanup;
+        }
+    }
+    from = cJSON_GetObjectItemCaseSensitive(root, "from");
+    array = cJSON_GetObjectItemCaseSensitive(root, "trans_result");
+    array_size = cJSON_GetArraySize(array);
+    if ((from != NULL && (!cJSON_IsString(from) || from->valuestring == NULL)) ||
+        !cJSON_IsArray(array) || array_size == 0) goto cleanup;
+    joined[0] = '\0';
+    for (i = 0; i < array_size; ++i) {
+        size_t dst_bytes;
+        item = cJSON_GetArrayItem(array, i);
+        dst = cJSON_IsObject(item) ? cJSON_GetObjectItemCaseSensitive(item, "dst") : NULL;
+        if (!cJSON_IsString(dst) || dst->valuestring == NULL) goto cleanup;
+        dst_bytes = strlen(dst->valuestring);
+        if (dst_bytes == 0 || dst_bytes > HD2CT_MAX_TRANSLATION ||
+            used + dst_bytes + (i != 0 ? 1u : 0u) > HD2CT_MAX_TRANSLATION) goto cleanup;
+        if (i != 0) joined[used++] = '\n';
+        memcpy(joined + used, dst->valuestring, dst_bytes);
+        used += dst_bytes;
+    }
+    joined[used] = '\0';
+    if (!hd2ct_valid_utf8((const unsigned char *)joined, used, 1) ||
+        hd2ct_is_only_space(joined, used)) goto cleanup;
+    ok = hd2ct_copy_valid_translation(joined, translation, translation_bytes);
+
+cleanup:
+    SecureZeroMemory(joined, sizeof(joined));
+    cJSON_Delete(root);
+    return ok;
+}
+
+static int hd2ct_parse_youdao_response(const HD2CT_WorkerJob *job, char *body,
+                                      size_t body_bytes, char *translation,
+                                      uint32_t *translation_bytes,
+                                      const char **failure_code)
+{
+    cJSON *root = NULL;
+    cJSON *error_item;
+    cJSON *array;
+    cJSON *language;
+    cJSON *item;
+    char code[32];
+    size_t first_length;
+    const char *first = NULL;
+    int array_size;
+    int i;
+    int ok = 0;
+    *failure_code = "BAD_RESPONSE";
+    if (!hd2ct_parse_complete_json(body, body_bytes, &root)) return 0;
+    error_item = cJSON_GetObjectItemCaseSensitive(root, "errorCode");
+    if (!hd2ct_json_error_code(error_item, code, sizeof(code))) goto cleanup;
+    if (strcmp(code, "0") != 0) {
+        *failure_code = hd2ct_provider_error_code(HD2CT_ADAPTER_YOUDAO, code);
+        goto cleanup;
+    }
+    array = cJSON_GetObjectItemCaseSensitive(root, "translation");
+    array_size = cJSON_GetArraySize(array);
+    if (!cJSON_IsArray(array) || array_size == 0) goto cleanup;
+    for (i = 0; i < array_size; ++i) {
+        item = cJSON_GetArrayItem(array, i);
+        if (!cJSON_IsString(item) || item->valuestring == NULL) goto cleanup;
+        if (i == 0) first = item->valuestring;
+    }
+    first_length = strlen(first);
+    if (first_length == 0 || first_length > HD2CT_MAX_TRANSLATION ||
+        hd2ct_is_only_space(first, first_length) ||
+        !hd2ct_valid_utf8((const unsigned char *)first, first_length, 1)) goto cleanup;
+    language = cJSON_GetObjectItemCaseSensitive(root, "l");
+    if (language != NULL && !cJSON_IsString(language)) goto cleanup;
+    ok = hd2ct_copy_valid_translation(first, translation, translation_bytes);
+
+cleanup:
+    cJSON_Delete(root);
+    return ok;
+}
+
+static const HD2CT_Adapter g_adapters[] = {
+    {HD2CT_ADAPTER_AI, &g_ai_translation_base, 0, "/chat/completions",
+     hd2ct_build_ai_request, hd2ct_parse_ai_response},
+    {HD2CT_ADAPTER_GOOGLE, &g_machine_translation_base, 0, "/language/translate/v2",
+     hd2ct_build_google_request, hd2ct_parse_google_response},
+    {HD2CT_ADAPTER_BAIDU, &g_machine_translation_base, 1, "/api/trans/vip/translate",
+     hd2ct_build_baidu_request, hd2ct_parse_baidu_response},
+    {HD2CT_ADAPTER_YOUDAO, &g_machine_translation_base, 1, "/api",
+     hd2ct_build_youdao_request, hd2ct_parse_youdao_response},
+    {HD2CT_ADAPTER_UNKNOWN, &g_machine_translation_base, 0, NULL, NULL, NULL}
+};
+
+static const HD2CT_Adapter *hd2ct_adapter_for_id(uint32_t adapter_id)
+{
+    size_t i;
+    for (i = 0; i < sizeof(g_adapters) / sizeof(g_adapters[0]); ++i) {
+        if (g_adapters[i].id == adapter_id) return &g_adapters[i];
+    }
+    return NULL;
+}
+
+static const char *hd2ct_success_prefix(uint32_t adapter_id)
+{
+    const HD2CT_Adapter *adapter = hd2ct_adapter_for_id(adapter_id);
+    if (adapter != NULL && adapter->base != NULL &&
+        adapter->base->family == HD2CT_FAMILY_AI) return "OK\n";
+    return "MT\n";
+}
+
 static int hd2ct_prepare_url_parts(const char *url, HD2CT_UrlParts *out)
 {
     size_t length = strlen(url);
@@ -1102,7 +1937,8 @@ static void hd2ct_complete_job(const HD2CT_WorkerJob *job, const char *result,
         remember_success = 0;
     }
     if (successful && remember_success && result_bytes >= 3u &&
-        memcmp(result, "OK\n", 3u) == 0) {
+        (memcmp(result, "OK\n", 3u) == 0 ||
+         memcmp(result, "MT\n", 3u) == 0)) {
         hd2ct_put_cache_locked(job, result + 3u, result_bytes - 3u);
     }
     memcpy(slot->result, result, result_bytes);
@@ -1132,16 +1968,13 @@ static void hd2ct_http_worker_request(HINTERNET session, const HD2CT_WorkerJob *
                                       int *successful, int *request_attempted,
                                       uint64_t request_deadline)
 {
-    static const wchar_t header_prefix[] =
-        L"Content-Type: application/json\r\nAccept: application/json\r\nAuthorization: Bearer ";
-    static const wchar_t header_suffix[] = L"\r\n";
     HD2CT_UrlParts url_parts;
+    HD2CT_BuiltRequest built_request;
+    const HD2CT_Adapter *adapter = hd2ct_adapter_for_id(job->adapter_id);
     HINTERNET connection = NULL;
     HINTERNET request = NULL;
-    wchar_t headers_wide[HD2CT_MAX_KEY + 128u];
-    wchar_t wide_key[HD2CT_MAX_KEY + 1u];
-    char *request_json = NULL;
-    DWORD request_json_bytes = 0;
+    wchar_t headers_wide[HD2CT_MAX_KEY + 256u];
+    char headers_utf8[HD2CT_MAX_KEY + 256u];
     char *response_body = NULL;
     size_t response_used = 0;
     DWORD status_code = 0;
@@ -1149,14 +1982,12 @@ static void hd2ct_http_worker_request(HINTERNET session, const HD2CT_WorkerJob *
     DWORD disable_features = WINHTTP_DISABLE_COOKIES |
                              WINHTTP_DISABLE_AUTHENTICATION |
                              WINHTTP_DISABLE_REDIRECTS;
-    size_t key_bytes = strlen(job->api_key);
-    size_t header_prefix_length = sizeof(header_prefix) / sizeof(header_prefix[0]) - 1u;
-    size_t header_suffix_length = sizeof(header_suffix) / sizeof(header_suffix[0]) - 1u;
-    int key_chars;
-    size_t header_length;
+    size_t headers_utf8_bytes = 0;
+    int header_chars;
     int ok = 0;
     const char *failure_code = "NETWORK";
     memset(&url_parts, 0, sizeof(url_parts));
+    memset(&built_request, 0, sizeof(built_request));
     *successful = 0;
     *request_attempted = 0;
     if (hd2ct_job_cancelled(job->slot_index, job->serial)) {
@@ -1167,8 +1998,40 @@ static void hd2ct_http_worker_request(HINTERNET session, const HD2CT_WorkerJob *
         failure_code = "INVALID_URL";
         goto cleanup;
     }
-    if (!hd2ct_make_request_json(job, &request_json, &request_json_bytes)) {
+    if (adapter == NULL || adapter->build_request == NULL ||
+        adapter->parse_response == NULL ||
+        !adapter->build_request(job, &built_request) ||
+        built_request.body == NULL || built_request.body_bytes == 0 ||
+        built_request.content_type == NULL) {
         failure_code = "INTERNAL";
+        goto cleanup;
+    }
+    if (built_request.header_name != NULL && built_request.header_value != NULL) {
+        int written = snprintf(headers_utf8, sizeof(headers_utf8),
+                               "Content-Type: %s\r\nAccept: application/json\r\n%s: %s%s\r\n",
+                               built_request.content_type, built_request.header_name,
+                               built_request.header_prefix != NULL ? built_request.header_prefix : "",
+                               built_request.header_value);
+        if (written <= 0 || (size_t)written >= sizeof(headers_utf8)) {
+            failure_code = "INTERNAL";
+            goto cleanup;
+        }
+        headers_utf8_bytes = (size_t)written;
+    } else {
+        int written = snprintf(headers_utf8, sizeof(headers_utf8),
+                               "Content-Type: %s\r\nAccept: application/json\r\n",
+                               built_request.content_type);
+        if (written <= 0 || (size_t)written >= sizeof(headers_utf8)) {
+            failure_code = "INTERNAL";
+            goto cleanup;
+        }
+        headers_utf8_bytes = (size_t)written;
+    }
+    header_chars = hd2ct_utf8_to_wide(headers_utf8, headers_utf8_bytes,
+                                      headers_wide,
+                                      (int)(sizeof(headers_wide) / sizeof(headers_wide[0])));
+    if (header_chars <= 0) {
+        failure_code = "INVALID_CONFIG";
         goto cleanup;
     }
     if (!hd2ct_set_remaining_timeouts(session, request_deadline)) {
@@ -1194,21 +2057,6 @@ static void hd2ct_http_worker_request(HINTERNET session, const HD2CT_WorkerJob *
         failure_code = "NETWORK";
         goto cleanup;
     }
-    key_chars = hd2ct_utf8_to_wide(job->api_key, key_bytes, wide_key,
-                                   (int)(sizeof(wide_key) / sizeof(wide_key[0])));
-    if (key_chars <= 0) {
-        failure_code = "INVALID_CONFIG";
-        goto cleanup;
-    }
-    header_length = header_prefix_length + (size_t)key_chars + header_suffix_length;
-    if (header_length + 1u > sizeof(headers_wide) / sizeof(headers_wide[0])) {
-        failure_code = "INVALID_CONFIG";
-        goto cleanup;
-    }
-    memcpy(headers_wide, header_prefix, header_prefix_length * sizeof(wchar_t));
-    memcpy(headers_wide + header_prefix_length, wide_key, (size_t)key_chars * sizeof(wchar_t));
-    memcpy(headers_wide + header_prefix_length + (size_t)key_chars,
-           header_suffix, (header_suffix_length + 1u) * sizeof(wchar_t));
     if (!hd2ct_set_remaining_timeouts(request, request_deadline)) {
         failure_code = hd2ct_remaining_ms(request_deadline) == 0 ? "TIMEOUT" : "NETWORK";
         goto cleanup;
@@ -1226,9 +2074,9 @@ static void hd2ct_http_worker_request(HINTERNET session, const HD2CT_WorkerJob *
         failure_code = hd2ct_remaining_ms(request_deadline) == 0 ? "TIMEOUT" : "NETWORK";
         goto cleanup;
     }
-    if (!WinHttpSendRequest(request, headers_wide, (DWORD)header_length,
-                            request_json, request_json_bytes,
-                            request_json_bytes, 0)) {
+    if (!WinHttpSendRequest(request, headers_wide, (DWORD)header_chars,
+                            built_request.body, built_request.body_bytes,
+                            built_request.body_bytes, 0)) {
         DWORD error = GetLastError();
         failure_code = hd2ct_winhttp_failure(request_deadline, error);
         goto cleanup;
@@ -1308,13 +2156,11 @@ static void hd2ct_http_worker_request(HINTERNET session, const HD2CT_WorkerJob *
         response_used += read_count;
     }
     response_body[response_used] = '\0';
-    if (!hd2ct_parse_translation(job->source, job->source_bytes,
-                                 response_body, response_used,
-                                 result + 3u, result_bytes)) {
-        failure_code = "BAD_RESPONSE";
+    if (!adapter->parse_response(job, response_body, response_used,
+                                 result + 3u, result_bytes, &failure_code)) {
         goto cleanup;
     }
-    memmove(result, "OK\n", 3u);
+    memcpy(result, hd2ct_success_prefix(job->adapter_id), 3u);
     *result_bytes += 3u;
     result[*result_bytes] = '\0';
     *successful = 1;
@@ -1328,16 +2174,16 @@ cleanup:
         WinHttpCloseHandle(connection);
     }
     hd2ct_free_url_parts(&url_parts);
-    if (request_json != NULL) {
-        SecureZeroMemory(request_json, request_json_bytes);
-        cJSON_free(request_json);
+    if (built_request.body != NULL) {
+        SecureZeroMemory(built_request.body, built_request.body_bytes);
+        cJSON_free(built_request.body);
     }
     if (response_body != NULL) {
         SecureZeroMemory(response_body, HD2CT_MAX_RESPONSE + 1u);
         free(response_body);
     }
-    SecureZeroMemory(wide_key, sizeof(wide_key));
     SecureZeroMemory(headers_wide, sizeof(headers_wide));
+    SecureZeroMemory(headers_utf8, sizeof(headers_utf8));
     if (!ok) {
         hd2ct_build_error(result, HD2CT_MAX_RESULT + 1u, result_bytes, failure_code);
     }
@@ -1369,6 +2215,8 @@ static int hd2ct_take_next_job_locked(HD2CT_WorkerJob *copy)
     memcpy(copy->url, g_url, sizeof(copy->url));
     memcpy(copy->model, g_model, sizeof(copy->model));
     memcpy(copy->api_key, g_api_key, sizeof(copy->api_key));
+    memcpy(copy->app_id, g_app_id, sizeof(copy->app_id));
+    copy->adapter_id = (uint32_t)InterlockedCompareExchange(&g_adapter_id, 0, 0);
     copy->timeout_seconds = g_timeout_seconds;
     return 1;
 }
@@ -1388,6 +2236,13 @@ static void hd2ct_process_job(HINTERNET session, const HD2CT_WorkerJob *job)
         hd2ct_complete_job(job, "", 0, 0, 0);
         return;
     }
+    if (job->adapter_id == HD2CT_ADAPTER_UNKNOWN) {
+        hd2ct_build_error(result, sizeof(result), &result_bytes, "UNSUPPORTED_SERVICE");
+        hd2ct_set_request_status(1000u);
+        hd2ct_complete_job(job, result, result_bytes, 0, 0);
+        SecureZeroMemory(result, sizeof(result));
+        return;
+    }
     if (hd2ct_remaining_ms(deadline) == 0) {
         hd2ct_build_error(result, sizeof(result), &result_bytes, "EXPIRED");
         hd2ct_set_request_status(1005u);
@@ -1398,8 +2253,9 @@ static void hd2ct_process_job(HINTERNET session, const HD2CT_WorkerJob *job)
     cache_hit = hd2ct_find_cache_locked(job, result, &result_bytes);
     ReleaseSRWLockExclusive(&g_lock);
     if (cache_hit) {
+        const char *prefix = hd2ct_success_prefix(job->adapter_id);
         memmove(result + 3u, result, result_bytes);
-        memmove(result, "OK\n", 3u);
+        memcpy(result, prefix, 3u);
         result_bytes += 3u;
         result[result_bytes] = '\0';
         hd2ct_complete_job(job, result, result_bytes, 1, 0);
@@ -1450,20 +2306,24 @@ static void hd2ct_process_job(HINTERNET session, const HD2CT_WorkerJob *job)
 
 static unsigned __stdcall hd2ct_worker_main(void *parameter)
 {
-    HINTERNET session;
+    HINTERNET session = NULL;
+    uint32_t adapter_id;
     (void)parameter;
-    session = WinHttpOpen(L"HD2 Chat Translate/1", WINHTTP_ACCESS_TYPE_DEFAULT_PROXY,
-                          WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
-    if (session == NULL) {
-        InterlockedExchange(&g_enabled, 0);
-        InterlockedExchange(&g_status, HD2CT_STATUS_WORKER_FAILURE);
-        InterlockedExchange(&g_stop_workers, 1);
-        AcquireSRWLockExclusive(&g_lock);
-        hd2ct_clear_key_locked();
-        hd2ct_cancel_active_locked();
-        ReleaseSRWLockExclusive(&g_lock);
-        WakeAllConditionVariable(&g_work_available);
-        return 0;
+    adapter_id = (uint32_t)InterlockedCompareExchange(&g_adapter_id, 0, 0);
+    if (adapter_id != HD2CT_ADAPTER_UNKNOWN) {
+        session = WinHttpOpen(L"HD2 Chat Translate/1", WINHTTP_ACCESS_TYPE_DEFAULT_PROXY,
+                              WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
+        if (session == NULL) {
+            InterlockedExchange(&g_enabled, 0);
+            InterlockedExchange(&g_status, HD2CT_STATUS_WORKER_FAILURE);
+            InterlockedExchange(&g_stop_workers, 1);
+            AcquireSRWLockExclusive(&g_lock);
+            hd2ct_clear_key_locked();
+            hd2ct_cancel_active_locked();
+            ReleaseSRWLockExclusive(&g_lock);
+            WakeAllConditionVariable(&g_work_available);
+            return 0;
+        }
     }
     for (;;) {
         HD2CT_WorkerJob job;
@@ -1507,7 +2367,7 @@ static unsigned __stdcall hd2ct_worker_main(void *parameter)
             SecureZeroMemory(&job, sizeof(job));
         }
     }
-    WinHttpCloseHandle(session);
+    if (session != NULL) WinHttpCloseHandle(session);
     return 0;
 }
 
@@ -1534,32 +2394,72 @@ static int hd2ct_start_workers(void)
 }
 
 static int hd2ct_commit_config(const char *url, const char *model,
-                               const char *api_key, uint32_t timeout_seconds)
+                               const char *api_key, const char *app_id,
+                               uint32_t timeout_seconds, uint32_t *failure_status)
 {
     char normalized[HD2CT_MAX_URL + 1u];
-    if (InterlockedCompareExchange(&g_disabled_terminal, 0, 0) != 0 ||
-        timeout_seconds < 1u || timeout_seconds > 120u ||
-        !hd2ct_normalize_url(url, normalized, sizeof(normalized)) ||
-        !hd2ct_valid_model_key(model, api_key)) {
-        if (InterlockedCompareExchange(&g_disabled_terminal, 0, 0) != 0) {
-            InterlockedExchange(&g_status, HD2CT_STATUS_DISABLED);
-            return 0;
-        }
+    uint32_t adapter_id = hd2ct_select_adapter(url, model);
+    const HD2CT_Adapter *adapter = hd2ct_adapter_for_id(adapter_id);
+    size_t url_length = hd2ct_bounded_length(url, HD2CT_MAX_URL);
+    size_t model_length = hd2ct_bounded_length(model, HD2CT_MAX_MODEL);
+    size_t key_length = hd2ct_bounded_length(api_key, HD2CT_MAX_KEY);
+    size_t app_id_length = hd2ct_bounded_length(app_id, HD2CT_MAX_KEY);
+    int signed_machine = adapter != NULL && adapter->app_id_required;
+    *failure_status = HD2CT_STATUS_INVALID_CONFIG;
+    if (InterlockedCompareExchange(&g_disabled_terminal, 0, 0) != 0) {
+        *failure_status = HD2CT_STATUS_DISABLED;
+        InterlockedExchange(&g_status, HD2CT_STATUS_DISABLED);
         return 0;
     }
+    if (timeout_seconds < 1u || timeout_seconds > 120u ||
+        url_length > HD2CT_MAX_URL || model_length > HD2CT_MAX_MODEL ||
+        key_length > HD2CT_MAX_KEY || app_id_length > HD2CT_MAX_KEY) {
+        return 0;
+    }
+    if (adapter_id != HD2CT_ADAPTER_UNKNOWN) {
+        if (adapter == NULL || adapter->base == NULL) return 0;
+        if (url_length == 0 ||
+            (adapter->base->api_key_required && key_length == 0) ||
+            (adapter->base->family == HD2CT_FAMILY_AI &&
+             adapter->base->model_required && model_length == 0) ||
+            (signed_machine && app_id_length == 0)) {
+            *failure_status = HD2CT_STATUS_MISSING_CONFIG;
+            return 0;
+        }
+        if (!hd2ct_normalize_url(url, adapter_id, normalized, sizeof(normalized))) return 0;
+        if (adapter->base->family == HD2CT_FAMILY_AI) {
+            if (!hd2ct_valid_model_key(model, api_key)) return 0;
+        } else if ((adapter->base->api_key_required &&
+                    !hd2ct_valid_secret(api_key, HD2CT_MAX_KEY)) ||
+                   (signed_machine && !hd2ct_valid_secret(app_id, HD2CT_MAX_KEY))) {
+            return 0;
+        }
+    } else {
+        if (!hd2ct_normalize_url(url, adapter_id, normalized, sizeof(normalized))) return 0;
+    }
     memcpy(g_url, normalized, strlen(normalized) + 1u);
-    memcpy(g_model, model, strlen(model) + 1u);
-    memcpy(g_api_key, api_key, strlen(api_key) + 1u);
+    memcpy(g_model, model, model_length + 1u);
+    if (adapter_id != HD2CT_ADAPTER_UNKNOWN) {
+        memcpy(g_api_key, api_key, key_length + 1u);
+        if (signed_machine) memcpy(g_app_id, app_id, app_id_length + 1u);
+    } else {
+        SecureZeroMemory(g_api_key, sizeof(g_api_key));
+        SecureZeroMemory(g_app_id, sizeof(g_app_id));
+    }
+    InterlockedExchange(&g_adapter_id, (LONG)adapter_id);
     g_timeout_seconds = timeout_seconds;
     if (!hd2ct_pin_module()) {
         hd2ct_zero_key();
-        return -1;
+        *failure_status = HD2CT_STATUS_WORKER_FAILURE;
+        return 0;
     }
     InterlockedExchange(&g_status, HD2CT_STATUS_READY);
     InterlockedExchange(&g_enabled, 1);
     if (!hd2ct_start_workers()) {
-        return -1;
+        *failure_status = HD2CT_STATUS_WORKER_FAILURE;
+        return 0;
     }
+    *failure_status = HD2CT_STATUS_READY;
     return 1;
 }
 
@@ -1574,15 +2474,18 @@ uint32_t HD2CT_InitializeEnvironment(void)
     char url[HD2CT_MAX_URL + 1u] = {0};
     char model[HD2CT_MAX_MODEL + 1u] = {0};
     char api_key[HD2CT_MAX_KEY + 1u] = {0};
+    char app_id[HD2CT_MAX_KEY + 1u] = {0};
     char timeout_text[4] = {0};
     char enabled_text[8] = {0};
     int url_present = 0;
     int model_present = 0;
     int key_present = 0;
+    int app_id_present = 0;
     int timeout_present = 0;
     int enabled_present = 0;
     uint32_t timeout = 20u;
     int committed;
+    uint32_t failure_status = HD2CT_STATUS_INVALID_CONFIG;
     if (InterlockedCompareExchange(&g_disabled_terminal, 0, 0) != 0) {
         return hd2ct_init_return();
     }
@@ -1590,12 +2493,7 @@ uint32_t HD2CT_InitializeEnvironment(void)
         return hd2ct_init_return();
     }
     if (!hd2ct_read_environment_value(L"HD2CT_ENABLED", enabled_text,
-                                      sizeof(enabled_text), &enabled_present) ||
-        !hd2ct_read_environment_value(L"HD2CT_API_URL", url, sizeof(url), &url_present) ||
-        !hd2ct_read_environment_value(L"HD2CT_MODEL", model, sizeof(model), &model_present) ||
-        !hd2ct_read_environment_value(L"HD2CT_API_KEY", api_key, sizeof(api_key), &key_present) ||
-        !hd2ct_read_environment_value(L"HD2CT_TIMEOUT_SECONDS", timeout_text,
-                                      sizeof(timeout_text), &timeout_present)) {
+                                      sizeof(enabled_text), &enabled_present)) {
         hd2ct_fail_init(HD2CT_STATUS_INVALID_CONFIG);
         goto done;
     }
@@ -1607,24 +2505,41 @@ uint32_t HD2CT_InitializeEnvironment(void)
         hd2ct_fail_init(HD2CT_STATUS_INVALID_CONFIG);
         goto done;
     }
-    if (!url_present || !model_present || !key_present ||
-        url[0] == '\0' || model[0] == '\0' || api_key[0] == '\0') {
-        hd2ct_fail_init(HD2CT_STATUS_MISSING_CONFIG);
+    if (!hd2ct_read_environment_value(L"HD2CT_API_URL", url, sizeof(url), &url_present) ||
+        !hd2ct_read_environment_value(L"HD2CT_MODEL", model, sizeof(model), &model_present) ||
+        !hd2ct_read_environment_value(L"HD2CT_TIMEOUT_SECONDS", timeout_text,
+                                      sizeof(timeout_text), &timeout_present)) {
+        hd2ct_fail_init(HD2CT_STATUS_INVALID_CONFIG);
         goto done;
     }
     if (timeout_present && !hd2ct_parse_timeout(timeout_text, &timeout)) {
         hd2ct_fail_init(HD2CT_STATUS_INVALID_CONFIG);
         goto done;
     }
-    committed = hd2ct_commit_config(url, model, api_key, timeout);
-    if (committed == 0) {
-        hd2ct_fail_init(HD2CT_STATUS_INVALID_CONFIG);
-    } else if (committed < 0) {
-        hd2ct_fail_init(HD2CT_STATUS_WORKER_FAILURE);
+    if (hd2ct_select_adapter(url, model) != HD2CT_ADAPTER_UNKNOWN) {
+        if (!hd2ct_read_environment_value(L"HD2CT_API_KEY", api_key,
+                                         sizeof(api_key), &key_present)) {
+            hd2ct_fail_init(HD2CT_STATUS_INVALID_CONFIG);
+            goto done;
+        }
+        if (hd2ct_select_adapter(url, model) == HD2CT_ADAPTER_BAIDU ||
+            hd2ct_select_adapter(url, model) == HD2CT_ADAPTER_YOUDAO) {
+            if (!hd2ct_read_environment_value(L"HD2CT_APP_ID", app_id,
+                                              sizeof(app_id), &app_id_present)) {
+                hd2ct_fail_init(HD2CT_STATUS_INVALID_CONFIG);
+                goto done;
+            }
+        }
+    }
+    committed = hd2ct_commit_config(url, model, api_key, app_id, timeout,
+                                    &failure_status);
+    if (!committed) {
+        hd2ct_fail_init(failure_status);
     }
 
 done:
     SecureZeroMemory(api_key, sizeof(api_key));
+    SecureZeroMemory(app_id, sizeof(app_id));
     SecureZeroMemory(timeout_text, sizeof(timeout_text));
     SecureZeroMemory(enabled_text, sizeof(enabled_text));
     return hd2ct_init_return();
@@ -1635,6 +2550,7 @@ uint32_t HD2CT_InitializeConfig(const char *url, const char *model,
 {
     LONG expected = 0;
     int committed;
+    uint32_t failure_status = HD2CT_STATUS_INVALID_CONFIG;
     if (InterlockedCompareExchange(&g_disabled_terminal, 0, 0) != 0) {
         return hd2ct_init_return();
     }
@@ -1647,12 +2563,9 @@ uint32_t HD2CT_InitializeConfig(const char *url, const char *model,
         hd2ct_fail_init(HD2CT_STATUS_INVALID_CONFIG);
         return hd2ct_init_return();
     }
-    committed = hd2ct_commit_config(url, model, api_key, timeout_seconds);
-    if (committed == 0) {
-        hd2ct_fail_init(HD2CT_STATUS_INVALID_CONFIG);
-    } else if (committed < 0) {
-        hd2ct_fail_init(HD2CT_STATUS_WORKER_FAILURE);
-    }
+    committed = hd2ct_commit_config(url, model, api_key, "", timeout_seconds,
+                                    &failure_status);
+    if (!committed) hd2ct_fail_init(failure_status);
     return hd2ct_init_return();
 }
 

@@ -44,7 +44,7 @@ if ($LASTEXITCODE -ne 0) { throw '原生模块构建失败' }
 python tools/build_native_http.py --cc 'C:\tools\mingw64\bin\gcc.exe' --objdump 'C:\tools\mingw64\bin\objdump.exe'
 ~~~
 
-生成 artifacts/native/hd2ct_http.dll 和 artifacts/native/hd2ct_http.meta.json。脚本校验 Win64 PE 格式、九个 ABI 导出及 WinHTTP、注册表和 Windows CRT 系统依赖，并记录长度、SHA-256 与编译器版本。不接受额外的 MinGW 动态运行库依赖。
+生成 artifacts/native/hd2ct_http.dll 和 artifacts/native/hd2ct_http.meta.json。脚本校验 Win64 PE 格式、九个 ABI 导出及 WinHTTP、注册表、BCrypt 和 Windows CRT 系统依赖，并记录长度、SHA-256 与编译器版本。机器翻译的签名和随机数使用 Windows 自带 BCrypt，构建脚本会链接对应系统库。不接受额外的 MinGW 动态运行库依赖。
 
 可用 --output 和 --meta 指定中间产物路径；两者必须成对交给下一步，不可混用旧 DLL 与新 metadata。更换编译器时二进制摘要可能改变，包构建器会嵌入本次实际模块及其摘要。
 
@@ -74,7 +74,7 @@ python tools/build_package.py --loader-zip 'C:\dependencies\Bingus-Shared-Loader
 | 翻译、中文保持、正文校验、错误提示与通知过滤 | 5 |
 | 控件回写与多行布局 | 3 |
 | 1 秒扫描计划、200ms 响应轮询与状态报告 | 3 |
-| 持久配置与 URL、模型响应、后台 HTTP 请求 | 4 |
+| 持久配置、AI/机器翻译适配器与后台 HTTP 请求 | 4 |
 | Arsenal 包、原生模块加载与文件信息结构 | 4 |
 | 启动签名扫描与内存读取门禁 | 1 |
 | 合计 | 20 |

@@ -21,7 +21,8 @@ __declspec(dllexport) uint32_t __cdecl HD2CT_Submit(
     const char *token,
     const char *body,
     uint32_t bytes);
-/* 成功时写入以 NUL 结尾的 OK\n... 或 ERR\n...；written 不含末尾 NUL。 */
+/* 成功时以 OK\n 表示 AI、MT\n 表示机器翻译；ERR\n 表示固定错误码。 */
+/* 结果均以 NUL 结尾，written 不含末尾 NUL。 */
 __declspec(dllexport) uint32_t __cdecl HD2CT_Poll(
     const char *token,
     char *out,

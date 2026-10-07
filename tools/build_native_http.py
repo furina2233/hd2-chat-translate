@@ -18,6 +18,7 @@ SOURCE = ROOT / "native" / "hd2ct_http.c"
 CJSON_SOURCE = ROOT / "native" / "vendor" / "cjson" / "cJSON.c"
 ALLOWED_IMPORTS = {
     "ADVAPI32.DLL",
+    "BCRYPT.DLL",
     "KERNEL32.DLL",
     "MSVCRT.DLL",
     "UCRTBASE.DLL",
@@ -137,6 +138,7 @@ def main() -> int:
         str(output),
         "-lwinhttp",
         "-ladvapi32",
+        "-lbcrypt",
     ]
     compile_output = run(command)
     if compile_output.strip():
@@ -152,12 +154,12 @@ def main() -> int:
     }
     if unexpected:
         raise RuntimeError(f"DLL 含未批准的动态依赖：{', '.join(sorted(unexpected))}")
-    required_imports = {"ADVAPI32.DLL", "KERNEL32.DLL", "WINHTTP.DLL"}
+    required_imports = {"ADVAPI32.DLL", "BCRYPT.DLL", "KERNEL32.DLL", "WINHTTP.DLL"}
     if not required_imports.issubset(imports) or not any(
         name in {"MSVCRT.DLL", "UCRTBASE.DLL"} or name.startswith("API-MS-WIN-CRT-")
         for name in imports
     ):
-        raise RuntimeError("DLL 缺少预期的 WinHTTP、注册表或 Windows CRT 系统导入")
+        raise RuntimeError("DLL 缺少预期的 WinHTTP、注册表、BCrypt 或 Windows CRT 系统导入")
     exports = exported_names(output, objdump)
     missing = REQUIRED_EXPORTS - exports
     if missing:

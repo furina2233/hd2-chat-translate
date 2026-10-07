@@ -206,14 +206,14 @@ local function one_filtered_event_case()
     }
 end
 
-local function run_response_case(text, source)
+local function run_response_case(text, source, wire_prefix)
     local env = new_env()
     finish_baseline(env)
     source = source or "source"
     env.messages[0] = make_message(0, source, 0, 6)
     step(env)
     local token = env.submit_calls[1].token
-    env.responses[token] = "OK\n" .. text
+    env.responses[token] = (wire_prefix or "OK\n") .. text
     step(env)
     local manifest = core.manifest(env.state)
     return {
@@ -301,8 +301,16 @@ local function one_response_bounds_case()
     local too_long = run_response_case(string.rep("T", 16385))
     local nul = run_response_case("first" .. string.char(0) .. "last")
     local malformed = run_response_case(string.char(0xf0, 0x80, 0x80, 0x80))
+    local machine_same = run_response_case("same source", "same source", "MT\n")
+    local machine_different = run_response_case("machine translation", "source", "MT\n")
+    local machine_invalid = run_response_case(string.char(0xf0, 0x80, 0x80, 0x80), "source", "MT\n")
+    local machine_empty = run_response_case("", "source", "MT\n")
+    local machine_maximum = run_response_case(string.rep("M", 16384), "source", "MT\n")
     return {valid_max = valid_max, maximum_display = maximum_display,
-        too_long = too_long, nul = nul, malformed = malformed}
+        too_long = too_long, nul = nul, malformed = malformed,
+        machine_same = machine_same, machine_different = machine_different,
+        machine_invalid = machine_invalid, machine_empty = machine_empty,
+        machine_maximum = machine_maximum}
 end
 
 
@@ -311,6 +319,13 @@ local function one_error_message_case()
         http401 = run_error_response_case("HTTP_401"),
         network = run_error_response_case("NETWORK"),
         bad_response = run_error_response_case("BAD_RESPONSE"),
+        unsupported_service = run_error_response_case("UNSUPPORTED_SERVICE"),
+        auth_invalid = run_error_response_case("AUTH_INVALID"),
+        access_denied = run_error_response_case("ACCESS_DENIED"),
+        quota_exceeded = run_error_response_case("QUOTA_EXCEEDED"),
+        unsupported_language = run_error_response_case("UNSUPPORTED_LANGUAGE"),
+        request_invalid = run_error_response_case("REQUEST_INVALID"),
+        service_error = run_error_response_case("SERVICE_ERROR"),
         same_as_source = run_error_response_case("NETWORK", "网络连接失败"),
         unknown_private = run_error_response_case("PRIVATE_SECRET_API_KEY"),
     }
@@ -388,6 +403,25 @@ class ChatTranslateCoreTests(unittest.TestCase):
                 self.assertEqual(responses[label]["error_displays"], 1)
                 self.assertEqual(responses[label]["applied_text"], "source\n译文：返回内容无效")
 
+        machine_same = responses["machine_same"]
+        self.assertEqual(machine_same["applied"], 1)
+        self.assertEqual(machine_same["applied_text"], "same source\n译文：same source")
+        self.assertEqual(machine_same["unchanged"], 0)
+        self.assertEqual(machine_same["translations_ready"], 1)
+        machine_different = responses["machine_different"]
+        self.assertEqual(machine_different["applied"], 1)
+        self.assertEqual(machine_different["applied_text"], "source\n译文：machine translation")
+        self.assertEqual(machine_different["invalid"], 0)
+        for label in ("machine_invalid", "machine_empty"):
+            with self.subTest(response=label):
+                self.assertEqual(responses[label]["invalid"], 1)
+                self.assertEqual(responses[label]["error_displays"], 1)
+                self.assertEqual(responses[label]["applied_text"], "source\n译文：返回内容无效")
+        machine_maximum = responses["machine_maximum"]
+        self.assertEqual(machine_maximum["applied"], 1)
+        self.assertEqual(machine_maximum["applied_bytes"], len("source\n译文：".encode("utf-8")) + 16384)
+        self.assertEqual(machine_maximum["invalid"], 0)
+
     def test_build_gate_baselines_old_chat_and_preserves_unchanged_chinese(self) -> None:
         result = self._scenarios()
         gated = result["unverified"]
@@ -439,6 +473,13 @@ class ChatTranslateCoreTests(unittest.TestCase):
             "http401": "API 密钥无效",
             "network": "网络连接失败",
             "bad_response": "返回内容无效",
+            "unsupported_service": "暂不支持此翻译服务",
+            "auth_invalid": "翻译凭据或签名无效",
+            "access_denied": "无权使用此翻译服务",
+            "quota_exceeded": "翻译额度不足",
+            "unsupported_language": "不支持此语言",
+            "request_invalid": "请求参数有误",
+            "service_error": "翻译服务异常",
         }
         for key, phrase in expected.items():
             with self.subTest(error=key):

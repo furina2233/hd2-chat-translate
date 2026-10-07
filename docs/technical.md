@@ -31,13 +31,31 @@
 
 原生模块在初始化时读取 Windows 持久环境变量：先读 HKCU\Environment，再读 HKLM\SYSTEM\CurrentControlSet\Control\Session Manager\Environment。若用户变量存在，即使值为空或无效，也不回退到系统变量；不读取进程继承值。每次游戏启动只初始化一次。
 
-HD2CT_API_URL、HD2CT_MODEL、HD2CT_API_KEY 为必填；HD2CT_TIMEOUT_SECONDS 可选，默认为 20 秒、有效范围 1–120；HD2CT_ENABLED 可选，默认为 1，允许值为 0 或 1。模型名最多 256 字节，密钥最多 4096 字节，URL 最多 2048 字节。API key 保存在进程内供请求使用，停用或初始化失败时会清零。
+HD2CT_MODEL 非空时选择 AI 翻译；缺失、为空或仅含空白时选择机器翻译，按 URL 中忽略大小写的 google、baidu、youdao 依次匹配。已支持服务需要 HD2CT_API_URL 与 HD2CT_API_KEY，百度、有道还需要 HD2CT_APP_ID。HD2CT_TIMEOUT_SECONDS 可选，默认为 20 秒、有效范围 1–120；HD2CT_ENABLED 可选，默认为 1，允许值为 0 或 1。模型名最多 256 字节，密钥与应用 ID 各最多 4096 字节，URL 最多 2048 字节。密钥保存在进程内供请求使用，停用或初始化失败时会清零。
 
-只把地址根路径补全为 /chat/completions，或把精确的 /v1、/v1/ 补全为 /v1/chat/completions；其他路径保持原样。要求 HTTPS，只有 localhost、127.0.0.0/8 和 ::1 可使用 HTTP。拒绝凭据、查询、片段、反斜杠、空白和控制字符；禁用重定向、cookies 和自动认证。
+AI 适配器把地址根路径补全为 /chat/completions，或把精确的 /v1、/v1/ 补全为 /v1/chat/completions。机器翻译适配器仅把根路径补全为各自接口；其他路径保持原样。已支持服务要求 HTTPS，只有 localhost、127.0.0.0/8 和 ::1 可使用 HTTP。拒绝 URL 凭据、查询、片段、反斜杠、空白和控制字符；禁用重定向、cookies 和自动认证。
 
-请求 JSON 含 model、temperature=0、reasoning_effort="none"、response_format.type=json_object 及 system/user 两条 messages。每次请求都显式指定思考强度为 none。聊天正文单独放在 user message；提示词常量 HD2CT_SYSTEM_PROMPT 位于 [native/hd2ct_http.c](../native/hd2ct_http.c)。它要求中文原样保留、其他语言翻为简短自然的简体中文，并要求 JSON 仅含 is_chinese 和 translation。当前规则包含常见缩写、游戏术语和敌名映射，例如 Charger=牛、Spore Charger=孢子牛；不对 gg 或 ggs 加特例。
+AI Chat Completions 请求 JSON 含 model、temperature=0、reasoning_effort="none"、response_format.type=json_object 及 system/user 两条 messages。每次请求都显式指定思考强度为 none。聊天正文单独放在 user message；提示词常量 HD2CT_SYSTEM_PROMPT 位于 [native/hd2ct_http.c](../native/hd2ct_http.c)。它要求中文原样保留、其他语言翻为简短自然的简体中文，并要求 JSON 仅含 is_chinese 和 translation。当前规则包含常见缩写、游戏术语和敌名映射，例如 Charger=牛、Spore Charger=孢子牛；不对 gg 或 ggs 加特例。
 
 响应读取 Chat Completions 的 choices[0].message.content，并要求其为只含 is_chinese(bool) 与 translation(string) 的 JSON 对象。若 is_chinese 为 true，原文直接作为结果；否则 translation 必须是合法 UTF-8、非空且不超过 16,384 字节。
+
+## 翻译适配器
+
+原生客户端用 AI、机器翻译两个基适配器组织具体适配器；基适配器负责共同的配置要求及路径规则，具体适配器负责请求构造、认证、接口路径与响应解析。WinHTTP 传输、工作线程、缓存、限流、超时、取消和队列共用。AI 成功结果为 `OK\n...`，机器成功结果为 `MT\n...`，失败为 `ERR\n固定错误码`。ABI 仍为 1，保留原来的九个导出函数。游戏端使用 InitializeEnvironment 获取完整配置；四参数 InitializeConfig 支持 AI/Google，百度、有道缺少应用 ID 时返回缺少配置。
+
+| 适配器 | 协议与认证 | 成功响应 |
+| --- | --- | --- |
+| [Google Basic v2](https://docs.cloud.google.com/translate/docs/reference/rest/v2/translate) | POST /language/translate/v2；JSON q、target=zh-CN、format=text；[x-goog-api-key 请求头](https://docs.cloud.google.com/docs/authentication/api-keys-use)，不把密钥写入 URL | data.translations 的 translatedText、detectedSourceLanguage |
+| [百度通用翻译](https://fanyi-api.baidu.com/doc_bd/21) | POST /api/trans/vip/translate；UTF-8 表单 q、from=auto、to=zh、appid、salt、sign；sign=MD5(appid+原始 q+salt+密钥)，小写十六进制 | from、trans_result 中的 dst |
+| [有道文本翻译](https://ai.youdao.com/DOCSIRMA/html/trans/api/wbfy/index.html) | POST /api；UTF-8 表单 q、from=auto、to=zh-CHS、appKey、salt、curtime、signType=v3、sign、strict=true；sign=SHA256(appKey+input+salt+curtime+密钥) | errorCode=0、l、translation |
+
+有道 input 按 Unicode 码点计数：最多 20 个码点时为完整 q，否则为前 10 个码点、十进制码点总数、后 10 个码点。签名使用尚未 URL 编码的 UTF-8 文本，表单各字段随后编码；curtime 为 UTC Unix 秒。签名及随机 salt 使用 Windows BCrypt。
+
+机器翻译不发送 AI 提示词；Google 省略 source 参数启用自动检测，百度、有道使用 from=auto。有道 strict=true 保证按指定目标处理，避免默认自动中译英。成功结果保留服务实际返回的译文，不按源语言字段替换为原文。MT 前缀在 HTTP 成功和缓存命中时均保留，Lua 强制组合双语显示，即使译文与原文相同；OK 前缀仍按 AI 的原文相等规则跳过回写。
+
+三家文本接口的公开文档没有给出自动检测同语种时可用于确定源文本为中文的专用错误码。[Google 文档](https://docs.cloud.google.com/translate/docs/languages)的同语言限制位于 AutoML 自定义模型范围，不能用于断言 Basic v2 的自动检测行为；百度 58001、有道 102 都可能表示其他不支持的语言。因此按实际响应判断成功或失败，通用语言错误显示短提示，不据此吞掉消息。同语种服务端响应需用有效凭据另行实测，离线回环只验证适配器解析与显示规则。
+
+未知机器翻译服务保持初始化就绪，让新消息扫描与错误显示继续运行；收到消息后返回 UNSUPPORTED_SERVICE，不发 HTTP 请求，不占用限流或缓存错误。已支持服务的缺少配置、格式无效、显式禁用仍分别使用原有初始化状态。机器服务的错误码映射为固定短提示，响应原文、签名、密钥及堆栈不进入聊天或状态报告。
 
 ## 调度、队列与数据上限
 

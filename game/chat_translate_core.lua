@@ -536,6 +536,13 @@ local ERROR_MESSAGES = {
     INVALID_URL = "接口地址无效",
     INVALID_CONFIG = "模型配置无效",
     INTERNAL = "翻译服务异常",
+    UNSUPPORTED_SERVICE = "暂不支持此翻译服务",
+    AUTH_INVALID = "翻译凭据或签名无效",
+    ACCESS_DENIED = "无权使用此翻译服务",
+    QUOTA_EXCEEDED = "翻译额度不足",
+    UNSUPPORTED_LANGUAGE = "不支持此语言",
+    REQUEST_INVALID = "请求参数有误",
+    SERVICE_ERROR = "翻译服务异常",
     RESPONSE_EXCEPTION = "翻译服务异常",
     CANCELLED = "请求已取消",
     SUBMIT_FAILED = "翻译请求未能提交",
@@ -574,10 +581,11 @@ end
 
 local function parse_response(raw)
     if type(raw) ~= "string" or #raw > MAX_RESPONSE_BYTES then return "invalid" end
-    if raw:sub(1, 3) == "OK\n" then
+    local prefix = raw:sub(1, 3)
+    if prefix == "OK\n" or prefix == "MT\n" then
         local text = raw:sub(4)
         if not M.valid_text(text, M.MAX_TRANSLATION_BYTES) then return "invalid" end
-        return "ok", text
+        return prefix == "MT\n" and "machine" or "ok", text
     end
     if raw:sub(1, 4) == "ERR\n" and #raw > 4 then return "error", raw:sub(5) end
     return "invalid"
@@ -630,7 +638,7 @@ local function process_one_pending(state)
             elseif kind == "error" then
                 bump(state, "translation_errors")
                 set_error_display(state, item, text)
-            elseif text == item.source_body then
+            elseif kind == "ok" and text == item.source_body then
                 terminal_response_failure(state, item, "translation_unchanged")
                 return
             else

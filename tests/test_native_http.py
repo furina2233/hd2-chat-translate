@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -9,8 +10,10 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 import unittest
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from urllib.parse import parse_qs
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -26,6 +29,7 @@ import time
 dll_path, url = sys.argv[1], sys.argv[2]
 actions = json.loads(sys.argv[3])
 timeout_seconds = int(sys.argv[4]) if len(sys.argv) > 4 else 20
+model = sys.argv[5] if len(sys.argv) > 5 else "fake-model"
 lib = ctypes.CDLL(dll_path)
 lib.HD2CT_ABIVersion.argtypes = []
 lib.HD2CT_ABIVersion.restype = ctypes.c_uint32
@@ -51,7 +55,7 @@ lib.HD2CT_Disable.restype = None
 
 test_started = time.perf_counter()
 status = lib.HD2CT_InitializeConfig(
-    url.encode("utf-8"), b"fake-model", b"fake-api-key", timeout_seconds,
+    url.encode("utf-8"), model.encode("utf-8"), b"fake-api-key", timeout_seconds,
 )
 result = {
     "abi": lib.HD2CT_ABIVersion(),
@@ -130,9 +134,18 @@ import ctypes
 import json
 import os
 import sys
+import time
 
 dll_path, registry_json = sys.argv[1], sys.argv[2]
-expected_config = json.loads(sys.argv[3]) if len(sys.argv) == 4 else None
+arguments = sys.argv[3:]
+expected_config = None
+actions = []
+if arguments and arguments[0] != "--actions":
+    expected_config = json.loads(arguments.pop(0))
+if arguments:
+    if arguments[0] != "--actions" or len(arguments) != 2:
+        raise RuntimeError("invalid environment fixture arguments")
+    actions = json.loads(arguments[1])
 for name in tuple(os.environ):
     if name.upper().startswith("HD2CT_"):
         del os.environ[name]
@@ -140,6 +153,7 @@ os.environ.update({
     "HD2CT_API_URL": "http://127.0.0.1:1/process-fallback",
     "HD2CT_MODEL": "fake-process-model",
     "HD2CT_API_KEY": "fake-process-key",
+    "HD2CT_APP_ID": "fake-process-app-id",
     "HD2CT_ENABLED": "1",
     "HD2CT_TIMEOUT_SECONDS": "77",
 })
@@ -149,16 +163,31 @@ lib.fixture_ClearRegistry.argtypes = []
 lib.fixture_ClearRegistry.restype = None
 lib.fixture_SetRegistryValue.argtypes = [ctypes.c_uint32, ctypes.c_wchar_p, ctypes.c_wchar_p]
 lib.fixture_SetRegistryValue.restype = ctypes.c_int
-lib.fixture_ConfigMatches.argtypes = [ctypes.c_char_p, ctypes.c_char_p, ctypes.c_char_p]
+lib.fixture_ConfigMatches.argtypes = [
+    ctypes.c_char_p, ctypes.c_char_p, ctypes.c_char_p, ctypes.c_char_p,
+]
 lib.fixture_ConfigMatches.restype = ctypes.c_int
 lib.fixture_TimeoutSeconds.argtypes = []
 lib.fixture_TimeoutSeconds.restype = ctypes.c_uint32
+lib.fixture_NormalizeUrl.argtypes = [
+    ctypes.c_uint32, ctypes.c_char_p, ctypes.c_void_p, ctypes.c_uint32,
+]
+lib.fixture_NormalizeUrl.restype = ctypes.c_uint32
+lib.fixture_CacheCount.argtypes = []
+lib.fixture_CacheCount.restype = ctypes.c_uint32
+lib.fixture_RateCount.argtypes = []
+lib.fixture_RateCount.restype = ctypes.c_uint32
 lib.HD2CT_InitializeEnvironment.argtypes = []
 lib.HD2CT_InitializeEnvironment.restype = ctypes.c_uint32
 lib.HD2CT_IsEnabled.argtypes = []
 lib.HD2CT_IsEnabled.restype = ctypes.c_uint32
-lib.HD2CT_Submit.argtypes = [ctypes.c_char_p, ctypes.c_char_p, ctypes.c_uint32]
+lib.HD2CT_Submit.argtypes = [ctypes.c_char_p, ctypes.c_void_p, ctypes.c_uint32]
 lib.HD2CT_Submit.restype = ctypes.c_uint32
+lib.HD2CT_Poll.argtypes = [
+    ctypes.c_char_p, ctypes.c_void_p, ctypes.c_uint32,
+    ctypes.POINTER(ctypes.c_uint32),
+]
+lib.HD2CT_Poll.restype = ctypes.c_uint32
 
 lib.fixture_ClearRegistry()
 for hive_name, hive in (("user", 0), ("machine", 1)):
@@ -171,17 +200,62 @@ enabled = lib.HD2CT_IsEnabled()
 submit_result = None
 if not enabled:
     submit_result = lib.HD2CT_Submit(b"missing-config", b"safe", 4)
+action_results = []
+if enabled:
+    for action in actions:
+        if action["op"] == "submit":
+            body = bytes.fromhex(action.get("body_hex", ""))
+            backing = ctypes.create_string_buffer(body if body else b"\0", max(1, len(body)))
+            accepted = lib.HD2CT_Submit(
+                action["token"].encode("ascii"),
+                ctypes.cast(backing, ctypes.c_void_p), len(body),
+            )
+            action_results.append({"accepted": accepted})
+        elif action["op"] in ("poll", "wait"):
+            token = action["token"].encode("ascii")
+            value = None
+            deadline = time.monotonic() + action.get("timeout", 8.0)
+            while True:
+                buffer = ctypes.create_string_buffer(16388)
+                written = ctypes.c_uint32(0)
+                found = lib.HD2CT_Poll(
+                    token, ctypes.cast(buffer, ctypes.c_void_p), len(buffer),
+                    ctypes.byref(written),
+                )
+                if found:
+                    value = bytes(buffer.raw[:written.value]).decode("utf-8")
+                    break
+                if action["op"] == "poll" or time.monotonic() >= deadline:
+                    break
+                time.sleep(0.01)
+            action_results.append({"result": value})
+        elif action["op"] == "normalize":
+            output = ctypes.create_string_buffer(2049)
+            accepted = lib.fixture_NormalizeUrl(
+                action["adapter_id"], action["url"].encode("utf-8"),
+                ctypes.cast(output, ctypes.c_void_p), len(output),
+            )
+            action_results.append({
+                "accepted": accepted,
+                "url": output.value.decode("utf-8"),
+            })
+        else:
+            raise RuntimeError("unknown environment fixture action")
 result = {
     "status": status,
     "enabled": enabled,
     "submit": submit_result,
     "timeout": lib.fixture_TimeoutSeconds(),
+    "cache_count": lib.fixture_CacheCount(),
+    "rate_count": lib.fixture_RateCount(),
+    "actions": action_results,
 }
 if expected_config is not None:
     result["selected_config_matches"] = lib.fixture_ConfigMatches(
         expected_config["HD2CT_API_URL"].encode("utf-8"),
-        expected_config["HD2CT_MODEL"].encode("utf-8"),
-        expected_config["HD2CT_API_KEY"].encode("utf-8"),
+        expected_config.get("HD2CT_MODEL", "").encode("utf-8"),
+        expected_config.get("HD2CT_API_KEY", "").encode("utf-8"),
+        expected_config.get("HD2CT_APP_ID", "").encode("utf-8"),
     )
 print(json.dumps(result), flush=True)
 """
@@ -296,16 +370,37 @@ __declspec(dllexport) int __cdecl fixture_SetRegistryValue(
 }
 
 __declspec(dllexport) int __cdecl fixture_ConfigMatches(
-    const char *url, const char *model, const char *api_key)
+    const char *url, const char *model, const char *api_key, const char *app_id)
 {
-    return url != NULL && model != NULL && api_key != NULL &&
+    return url != NULL && model != NULL && api_key != NULL && app_id != NULL &&
         strcmp(g_url, url) == 0 && strcmp(g_model, model) == 0 &&
-        strcmp(g_api_key, api_key) == 0;
+        strcmp(g_api_key, api_key) == 0 && strcmp(g_app_id, app_id) == 0;
 }
 
 __declspec(dllexport) uint32_t __cdecl fixture_TimeoutSeconds(void)
 {
     return g_timeout_seconds;
+}
+
+__declspec(dllexport) uint32_t __cdecl fixture_NormalizeUrl(
+    uint32_t adapter_id, const char *url, char *out, uint32_t capacity)
+{
+    return hd2ct_normalize_url(url, adapter_id, out, capacity) ? 1u : 0u;
+}
+
+__declspec(dllexport) uint32_t __cdecl fixture_CacheCount(void)
+{
+    uint32_t count = 0;
+    uint32_t i;
+    for (i = 0; i < HD2CT_CACHE_COUNT; ++i) {
+        if (g_cache[i].used != 0) ++count;
+    }
+    return count;
+}
+
+__declspec(dllexport) uint32_t __cdecl fixture_RateCount(void)
+{
+    return g_rate_count;
 }
 """
 
@@ -333,11 +428,50 @@ def result_content(translation: str = "你好，绝地潜兵。", is_chinese: bo
     )
 
 
+def google_response(translation: str = "你好，绝地潜兵。", source: str = "en") -> bytes:
+    return json.dumps(
+        {"data": {"translations": [{"translatedText": translation,
+                                       "detectedSourceLanguage": source}]}},
+        ensure_ascii=False,
+        separators=(",", ":"),
+    ).encode("utf-8")
+
+
+def baidu_response(
+    translations: tuple[str, ...] = ("你好，", "绝地潜兵。"), source: str = "en",
+    error_code: int | str | None = None,
+) -> bytes:
+    response = {
+        "from": source,
+        "to": "zh",
+        "trans_result": [{"src": "source", "dst": item} for item in translations],
+    }
+    if error_code is not None:
+        response["error_code"] = error_code
+    return json.dumps(
+        response,
+        ensure_ascii=False,
+        separators=(",", ":"),
+    ).encode("utf-8")
+
+
+def youdao_response(
+    translation: str = "你好，绝地潜兵。", language: str = "en2zh-CHS",
+    error_code: str = "0",
+) -> bytes:
+    return json.dumps(
+        {"errorCode": error_code, "l": language, "translation": [translation]},
+        ensure_ascii=False,
+        separators=(",", ":"),
+    ).encode("utf-8")
+
+
 class FakeState:
     def __init__(self) -> None:
         self.lock = threading.Lock()
         self.paths: list[str] = []
         self.payloads: list[dict] = []
+        self.content_types: list[str] = []
         self.status = 200
         self.response = provider_response(result_content())
         self.delay = 0.0
@@ -348,7 +482,10 @@ class FakeState:
         with self.lock:
             self.paths.clear()
             self.payloads.clear()
+            self.content_types.clear()
             self.headers.clear()
+            self.status = 200
+            self.delay = 0.0
         self.request_finished.clear()
 
 
@@ -391,12 +528,20 @@ class NativeHttpWorkerTests(unittest.TestCase):
                 size = int(self.headers.get("Content-Length", "0"))
                 raw = self.rfile.read(size)
                 try:
-                    payload = json.loads(raw.decode("utf-8"))
+                    content_type = self.headers.get("Content-Type", "")
+                    if content_type.lower().startswith("application/x-www-form-urlencoded"):
+                        fields = parse_qs(raw.decode("utf-8"), keep_blank_values=True,
+                                          strict_parsing=True)
+                        payload = {key: values[-1] for key, values in fields.items()}
+                    else:
+                        payload = json.loads(raw.decode("utf-8"))
                 except Exception:
                     payload = {}
+                    content_type = self.headers.get("Content-Type", "")
                 with state.lock:
                     state.paths.append(self.path)
                     state.payloads.append(payload)
+                    state.content_types.append(content_type)
                     state.headers.append(dict(self.headers.items()))
                     response_status = state.status
                     response = state.response
@@ -443,6 +588,7 @@ class NativeHttpWorkerTests(unittest.TestCase):
         actions: list[dict] | None = None,
         timeout: float = 15.0,
         timeout_seconds: int = 20,
+        model: str = "fake-model",
     ) -> dict:
         completed = subprocess.run(
             [
@@ -453,6 +599,7 @@ class NativeHttpWorkerTests(unittest.TestCase):
                 url if url is not None else self.url + "/",
                 json.dumps(actions or [], ensure_ascii=False),
                 str(timeout_seconds),
+                model,
             ],
             cwd=ROOT,
             check=False,
@@ -498,6 +645,7 @@ class NativeHttpWorkerTests(unittest.TestCase):
             str(dll),
             "-lwinhttp",
             "-ladvapi32",
+            "-lbcrypt",
         ]
         completed = subprocess.run(
             command,
@@ -517,6 +665,7 @@ class NativeHttpWorkerTests(unittest.TestCase):
         self,
         registry: dict[str, dict[str, str]],
         expected_config: dict[str, str] | None = None,
+        actions: list[dict] | None = None,
     ) -> dict:
         command = [
             sys.executable,
@@ -527,6 +676,8 @@ class NativeHttpWorkerTests(unittest.TestCase):
         ]
         if expected_config is not None:
             command.append(json.dumps(expected_config))
+        if actions is not None:
+            command.extend(["--actions", json.dumps(actions, ensure_ascii=False)])
         child_environment = {
             name: os.environ[name]
             for name in os.environ
@@ -537,6 +688,7 @@ class NativeHttpWorkerTests(unittest.TestCase):
                 "HD2CT_API_URL": "http://127.0.0.1:1/process-fallback",
                 "HD2CT_MODEL": "fake-process-model",
                 "HD2CT_API_KEY": "fake-process-key",
+                "HD2CT_APP_ID": "fake-process-app-id",
                 "HD2CT_ENABLED": "1",
                 "HD2CT_TIMEOUT_SECONDS": "77",
             }
@@ -569,8 +721,33 @@ class NativeHttpWorkerTests(unittest.TestCase):
             "HD2CT_API_KEY": "fake-machine-key",
         }
 
-        result = self.run_environment_child({})
-        self.assertEqual(result, {"status": 1, "enabled": 0, "submit": 0, "timeout": 20})
+        self.state.clear()
+        unknown_actions = [
+            {"op": "submit", "token": "unknown-service", "body_hex": "73616665"},
+            {"op": "wait", "token": "unknown-service"},
+            {"op": "submit", "token": "unknown-service-again", "body_hex": "73616665"},
+            {"op": "wait", "token": "unknown-service-again"},
+        ]
+        result = self.run_environment_child({}, actions=unknown_actions)
+        self.assertEqual(result["status"], 0)
+        self.assertEqual(result["enabled"], 1)
+        self.assertEqual([item.get("accepted") for item in result["actions"]],
+                         [1, None, 1, None])
+        self.assertEqual(result["actions"][1]["result"], "ERR\nUNSUPPORTED_SERVICE")
+        self.assertEqual(result["actions"][3]["result"], "ERR\nUNSUPPORTED_SERVICE")
+        self.assertEqual(result["cache_count"], 0)
+        self.assertEqual(result["rate_count"], 0)
+        self.assertEqual(self.state.paths, [])
+
+        disabled = self.run_environment_child({"user": {"HD2CT_ENABLED": "0"}})
+        self.assertEqual(disabled["status"], 3)
+        self.assertEqual(disabled["enabled"], 0)
+
+        invalid_option = self.run_environment_child(
+            {"user": {"HD2CT_TIMEOUT_SECONDS": "invalid"}}
+        )
+        self.assertEqual(invalid_option["status"], 2)
+        self.assertEqual(invalid_option["enabled"], 0)
 
         for missing_name in user_config:
             user = dict(user_config)
@@ -579,9 +756,13 @@ class NativeHttpWorkerTests(unittest.TestCase):
             del machine[missing_name]
             with self.subTest(missing_registry_value=missing_name):
                 result = self.run_environment_child({"user": user, "machine": machine})
-                self.assertEqual(result["status"], 1)
-                self.assertEqual(result["enabled"], 0)
-                self.assertEqual(result["submit"], 0)
+                if missing_name == "HD2CT_MODEL":
+                    self.assertEqual(result["status"], 0)
+                    self.assertEqual(result["enabled"], 1)
+                else:
+                    self.assertEqual(result["status"], 1)
+                    self.assertEqual(result["enabled"], 0)
+                    self.assertEqual(result["submit"], 0)
 
         result = self.run_environment_child(
             {"user": user_config, "machine": machine_config}, user_config
@@ -590,6 +771,28 @@ class NativeHttpWorkerTests(unittest.TestCase):
         self.assertEqual(result["enabled"], 1)
         self.assertEqual(result["timeout"], 20)
         self.assertEqual(result["selected_config_matches"], 1)
+
+        stale_app_id = dict(user_config)
+        stale_app_id["HD2CT_APP_ID"] = "invalid\nlegacy-value"
+        result = self.run_environment_child(
+            {"user": stale_app_id},
+            {**user_config, "HD2CT_APP_ID": ""},
+        )
+        self.assertEqual(result["status"], 0)
+        self.assertEqual(result["selected_config_matches"], 1)
+
+        empty_signed_app_id = {
+            "HD2CT_API_URL": self.url + "/Baidu/custom",
+            "HD2CT_MODEL": "",
+            "HD2CT_API_KEY": "bd-secret",
+            "HD2CT_APP_ID": "",
+        }
+        result = self.run_environment_child(
+            {"user": empty_signed_app_id,
+             "machine": {"HD2CT_APP_ID": "machine-app-id"}},
+        )
+        self.assertEqual(result["status"], 1)
+        self.assertEqual(result["enabled"], 0)
 
         result = self.run_environment_child(
             {"machine": machine_config}, machine_config
@@ -601,11 +804,17 @@ class NativeHttpWorkerTests(unittest.TestCase):
         empty_user = dict(user_config)
         empty_user["HD2CT_MODEL"] = ""
         result = self.run_environment_child(
-            {"user": empty_user, "machine": machine_config}
+            {"user": empty_user, "machine": machine_config},
+            expected_config={
+                "HD2CT_API_URL": empty_user["HD2CT_API_URL"],
+                "HD2CT_MODEL": "",
+                "HD2CT_API_KEY": "",
+                "HD2CT_APP_ID": "",
+            },
         )
-        self.assertEqual(result["status"], 1)
-        self.assertEqual(result["enabled"], 0)
-        self.assertEqual(result["submit"], 0)
+        self.assertEqual(result["status"], 0)
+        self.assertEqual(result["enabled"], 1)
+        self.assertEqual(result["selected_config_matches"], 1)
 
         invalid_user = dict(user_config)
         invalid_user["HD2CT_API_URL"] = "ftp://127.0.0.1:1/user"
@@ -615,6 +824,181 @@ class NativeHttpWorkerTests(unittest.TestCase):
         self.assertEqual(result["status"], 2)
         self.assertEqual(result["enabled"], 0)
         self.assertEqual(result["submit"], 0)
+
+        self.assert_signed_provider_adapters()
+
+    def assert_signed_provider_adapters(self) -> None:
+        source = "撤离 & 补给/alpha\n再集合"
+        baidu_config = {
+            "HD2CT_API_URL": self.url + "/Baidu/custom/path",
+            "HD2CT_MODEL": " \t ",
+            "HD2CT_API_KEY": "bd-secret",
+            "HD2CT_APP_ID": "bd+app&1",
+        }
+        self.state.clear()
+        self.state.response = baidu_response()
+        result = self.run_environment_child(
+            {"user": baidu_config}, baidu_config,
+            [
+                {"op": "submit", "token": "baidu-success",
+                 "body_hex": source.encode("utf-8").hex()},
+                {"op": "wait", "token": "baidu-success"},
+                {"op": "submit", "token": "baidu-cache-hit",
+                 "body_hex": source.encode("utf-8").hex()},
+                {"op": "wait", "token": "baidu-cache-hit"},
+            ],
+        )
+        self.assertEqual(result["status"], 0)
+        self.assertEqual(result["selected_config_matches"], 1)
+        self.assertEqual(result["actions"][1]["result"], "MT\n你好，\n绝地潜兵。")
+        self.assertEqual(result["actions"][3]["result"], "MT\n你好，\n绝地潜兵。")
+        self.assertEqual(self.state.paths, ["/Baidu/custom/path"])
+        self.assertTrue(self.state.content_types[0].startswith("application/x-www-form-urlencoded"))
+        form = self.state.payloads[0]
+        self.assertEqual(form["q"], source)
+        self.assertEqual(form["from"], "auto")
+        self.assertEqual(form["to"], "zh")
+        self.assertEqual(form["appid"], baidu_config["HD2CT_APP_ID"])
+        expected_md5 = hashlib.md5(
+            (baidu_config["HD2CT_APP_ID"] + source + form["salt"] +
+             baidu_config["HD2CT_API_KEY"]).encode("utf-8")
+        ).hexdigest()
+        self.assertEqual(form["sign"], expected_md5)
+
+        self.state.clear()
+        self.state.response = baidu_response(("不覆盖中文",), source="zh")
+        chinese = "我们已在 A1 集合。"
+        preserved = self.run_environment_child(
+            {"user": baidu_config}, baidu_config,
+            [
+                {"op": "submit", "token": "baidu-chinese",
+                 "body_hex": chinese.encode("utf-8").hex()},
+                {"op": "wait", "token": "baidu-chinese"},
+            ],
+        )
+        self.assertEqual(preserved["actions"][1]["result"], "MT\n不覆盖中文")
+
+        self.state.clear()
+        same_chinese = "撤离点集合。"
+        self.state.response = baidu_response((same_chinese,), source="zh")
+        preserved = self.run_environment_child(
+            {"user": baidu_config}, baidu_config,
+            [
+                {"op": "submit", "token": "baidu-chinese-same",
+                 "body_hex": same_chinese.encode("utf-8").hex()},
+                {"op": "wait", "token": "baidu-chinese-same"},
+            ],
+        )
+        self.assertEqual(preserved["actions"][1]["result"], "MT\n" + same_chinese)
+
+        self.state.clear()
+        self.state.response = baidu_response(("ignored",), error_code=54003)
+        provider_error = self.run_environment_child(
+            {"user": baidu_config}, baidu_config,
+            [
+                {"op": "submit", "token": "baidu-error", "body_hex": "6869"},
+                {"op": "wait", "token": "baidu-error"},
+            ],
+        )
+        self.assertEqual(provider_error["actions"][1]["result"], "ERR\nRATE_LIMITED")
+        self.assertNotIn("bd-secret", json.dumps(provider_error))
+
+        self.state.clear()
+        self.state.response = b'{"from":"en","trans_result":[{"dst":""}]}'
+        malformed = self.run_environment_child(
+            {"user": baidu_config}, baidu_config,
+            [
+                {"op": "submit", "token": "baidu-malformed", "body_hex": "6869"},
+                {"op": "wait", "token": "baidu-malformed"},
+            ],
+        )
+        self.assertEqual(malformed["actions"][1]["result"], "ERR\nBAD_RESPONSE")
+
+        yd_source = "🙂" * 12 + " A&B/撤离 " + "补给🙂" * 12
+        youdao_config = {
+            "HD2CT_API_URL": self.url + "/Youdao/custom/path",
+            "HD2CT_MODEL": "　 ",
+            "HD2CT_API_KEY": "yd-secret",
+            "HD2CT_APP_ID": "yd+app&1",
+        }
+        self.state.clear()
+        self.state.response = youdao_response()
+        result = self.run_environment_child(
+            {"user": youdao_config}, youdao_config,
+            [
+                {"op": "submit", "token": "youdao-success",
+                 "body_hex": yd_source.encode("utf-8").hex()},
+                {"op": "wait", "token": "youdao-success"},
+            ],
+        )
+        self.assertEqual(result["status"], 0)
+        self.assertEqual(result["actions"][1]["result"], "MT\n你好，绝地潜兵。")
+        self.assertEqual(self.state.paths, ["/Youdao/custom/path"])
+        form = self.state.payloads[0]
+        self.assertEqual(form["q"], yd_source)
+        self.assertEqual(form["from"], "auto")
+        self.assertEqual(form["to"], "zh-CHS")
+        self.assertEqual(form["appKey"], youdao_config["HD2CT_APP_ID"])
+        self.assertEqual(form["strict"], "true")
+        self.assertEqual(form["signType"], "v3")
+        expected_input = yd_source[:10] + str(len(yd_source)) + yd_source[-10:]
+        self.assertEqual(len(yd_source), len(list(yd_source)))
+        self.assertEqual(form["curtime"].isdigit(), True)
+        self.assertLessEqual(abs(int(form["curtime"]) - int(time.time())), 5)
+        expected_sha256 = hashlib.sha256(
+            (youdao_config["HD2CT_APP_ID"] + expected_input + form["salt"] +
+             form["curtime"] + youdao_config["HD2CT_API_KEY"]).encode("utf-8")
+        ).hexdigest()
+        self.assertEqual(form["sign"], expected_sha256)
+
+        self.state.clear()
+        self.state.response = youdao_response("不覆盖中文", language="zh-CHS2zh-CHS")
+        chinese = "中文原文保留。"
+        preserved = self.run_environment_child(
+            {"user": youdao_config}, youdao_config,
+            [
+                {"op": "submit", "token": "youdao-chinese",
+                 "body_hex": chinese.encode("utf-8").hex()},
+                {"op": "wait", "token": "youdao-chinese"},
+            ],
+        )
+        self.assertEqual(preserved["actions"][1]["result"], "MT\n不覆盖中文")
+
+        self.state.clear()
+        same_chinese = "撤离点集合。"
+        self.state.response = youdao_response(same_chinese, language="zh-CHS2zh-CHS")
+        preserved = self.run_environment_child(
+            {"user": youdao_config}, youdao_config,
+            [
+                {"op": "submit", "token": "youdao-chinese-same",
+                 "body_hex": same_chinese.encode("utf-8").hex()},
+                {"op": "wait", "token": "youdao-chinese-same"},
+            ],
+        )
+        self.assertEqual(preserved["actions"][1]["result"], "MT\n" + same_chinese)
+
+        self.state.clear()
+        self.state.response = youdao_response("ignored", error_code="401")
+        provider_error = self.run_environment_child(
+            {"user": youdao_config}, youdao_config,
+            [
+                {"op": "submit", "token": "youdao-error", "body_hex": "6869"},
+                {"op": "wait", "token": "youdao-error"},
+            ],
+        )
+        self.assertEqual(provider_error["actions"][1]["result"], "ERR\nQUOTA_EXCEEDED")
+        self.assertNotIn("yd-secret", json.dumps(provider_error))
+
+        self.state.clear()
+        self.state.response = b'{"errorCode":"0","l":"en2zh-CHS","translation":[]}'
+        malformed = self.run_environment_child(
+            {"user": youdao_config}, youdao_config,
+            [
+                {"op": "submit", "token": "youdao-malformed", "body_hex": "6869"},
+                {"op": "wait", "token": "youdao-malformed"},
+            ],
+        )
+        self.assertEqual(malformed["actions"][1]["result"], "ERR\nBAD_RESPONSE")
 
     def test_endpoint_completion_covers_root_v1_and_custom_paths(self) -> None:
         cases = (
@@ -641,6 +1025,146 @@ class NativeHttpWorkerTests(unittest.TestCase):
                 self.assertEqual(result["actions"][1]["result"], "OK\n你好，绝地潜兵。")
                 self.assertEqual(self.state.paths, [expected])
                 self.assertEqual(self.state.payloads[0]["reasoning_effort"], "none")
+
+        root_cases = (
+            (1, "/chat/completions"),
+            (2, "/language/translate/v2"),
+            (3, "/api/trans/vip/translate"),
+            (4, "/api"),
+        )
+        normalize_actions = []
+        for adapter_id, path in root_cases:
+            normalize_actions.append({
+                "op": "normalize", "adapter_id": adapter_id, "url": self.url,
+            })
+            normalize_actions.append({
+                "op": "normalize", "adapter_id": adapter_id,
+                "url": self.url + "/custom/Google",
+            })
+        normalized = self.run_environment_child({}, actions=normalize_actions)
+        for i, (_, path) in enumerate(root_cases):
+            root_result = normalized["actions"][i * 2]
+            custom_result = normalized["actions"][i * 2 + 1]
+            self.assertEqual(root_result["accepted"], 1)
+            self.assertEqual(root_result["url"], self.url + path)
+            self.assertEqual(custom_result["accepted"], 1)
+            self.assertEqual(custom_result["url"], self.url + "/custom/Google")
+
+        google_path = "/Google/Baidu/Youdao/custom"
+        self.state.clear()
+        self.state.response = google_response("Hello &amp; &#x1F642;", "en")
+        google_source = "Hello"
+        google = self.run_child(
+            self.url + google_path,
+            [
+                {"op": "submit", "token": "google-route",
+                 "body_hex": google_source.encode("utf-8").hex()},
+                {"op": "wait", "token": "google-route"},
+            ],
+            model=" \t ",
+        )
+        self.assertEqual(google["actions"][1]["result"], "MT\nHello & 🙂")
+        self.assertEqual(self.state.paths, [google_path])
+        self.assertEqual(self.state.payloads[0], {
+            "q": google_source, "target": "zh-CN", "format": "text",
+        })
+        self.assertEqual(self.state.content_types[0], "application/json")
+        self.assertEqual(self.state.headers[0].get("x-goog-api-key"), "fake-api-key")
+        self.assertNotIn("Authorization", self.state.headers[0])
+
+        self.state.clear()
+        self.state.response = google_response("ignored result", "zh-Hans")
+        chinese = "中文原文。"
+        preserved = self.run_child(
+            self.url + "/google/custom",
+            [
+                {"op": "submit", "token": "google-chinese",
+                 "body_hex": chinese.encode("utf-8").hex()},
+                {"op": "wait", "token": "google-chinese"},
+            ],
+            model="",
+        )
+        self.assertEqual(preserved["actions"][1]["result"], "MT\nignored result")
+
+        self.state.clear()
+        self.state.response = google_response(chinese, "zh-Hans")
+        same_chinese = self.run_child(
+            self.url + "/google/custom",
+            [
+                {"op": "submit", "token": "google-chinese-same",
+                 "body_hex": chinese.encode("utf-8").hex()},
+                {"op": "wait", "token": "google-chinese-same"},
+            ],
+            model="",
+        )
+        self.assertEqual(same_chinese["actions"][1]["result"], "MT\n" + chinese)
+
+        stale_app_id = {
+            "HD2CT_API_URL": self.url + "/Google/custom",
+            "HD2CT_MODEL": "",
+            "HD2CT_API_KEY": "google-secret",
+            "HD2CT_APP_ID": "invalid\nlegacy-value",
+        }
+        self.state.clear()
+        self.state.response = google_response("你好", "en")
+        result = self.run_environment_child(
+            {"user": stale_app_id},
+            {**stale_app_id, "HD2CT_APP_ID": ""},
+            [
+                {"op": "submit", "token": "google-no-app-id", "body_hex": "6869"},
+                {"op": "wait", "token": "google-no-app-id"},
+            ],
+        )
+        self.assertEqual(result["status"], 0)
+        self.assertEqual(result["selected_config_matches"], 1)
+        self.assertEqual(result["actions"][1]["result"], "MT\n你好")
+
+        self.state.clear()
+        self.state.response = b'{"data":{"translations":[]}}'
+        malformed = self.run_child(
+            self.url + "/Google/custom",
+            [
+                {"op": "submit", "token": "google-malformed", "body_hex": "6869"},
+                {"op": "wait", "token": "google-malformed"},
+            ],
+            model="",
+        )
+        self.assertEqual(malformed["actions"][1]["result"], "ERR\nBAD_RESPONSE")
+
+        self.state.clear()
+        self.state.status = 429
+        self.state.response = b"private Google quota body"
+        denied = self.run_child(
+            self.url + "/Google/custom",
+            [
+                {"op": "submit", "token": "google-http-error", "body_hex": "6869"},
+                {"op": "wait", "token": "google-http-error"},
+            ],
+            model="",
+        )
+        self.assertEqual(denied["actions"][1]["result"], "ERR\nHTTP_429")
+        self.assertNotIn("private Google quota body", json.dumps(denied))
+
+        self.state.clear()
+        self.state.response = provider_response(result_content())
+        ai_override = self.run_child(
+            self.url + google_path,
+            [
+                {"op": "submit", "token": "ai-overrides-provider", "body_hex": "6869"},
+                {"op": "wait", "token": "ai-overrides-provider"},
+            ],
+            model="fake-model",
+        )
+        self.assertEqual(ai_override["actions"][1]["result"], "OK\n你好，绝地潜兵。")
+        self.assertIn("messages", self.state.payloads[0])
+        self.assertEqual(self.state.paths, [google_path])
+
+        missing_signed_app_id = self.run_child(
+            self.url + "/Baidu/missing-app-id",
+            model="",
+        )
+        self.assertEqual(missing_signed_app_id["status"], 1)
+        self.assertEqual(missing_signed_app_id["enabled"], 0)
         self.assert_environment_initialization_uses_registry()
 
     def test_english_translation_preserves_chinese_and_model_translation(self) -> None:
@@ -727,6 +1251,45 @@ class NativeHttpWorkerTests(unittest.TestCase):
         )
         self.assertEqual([entry["accepted"] for entry in result["actions"]], [1, 1])
         self.assertLess(max(entry["elapsed_ms"] for entry in result["actions"]), 200.0)
+
+        self.state.clear()
+        cached = self.run_child(
+            actions=[
+                {"op": "submit", "token": "cache-one", "body_hex": "6869"},
+                {"op": "wait", "token": "cache-one"},
+                {"op": "submit", "token": "cache-two", "body_hex": "6869"},
+                {"op": "wait", "token": "cache-two"},
+            ],
+        )
+        self.assertEqual(cached["actions"][1]["result"], "OK\n你好，绝地潜兵。")
+        self.assertEqual(cached["actions"][3]["result"], "OK\n你好，绝地潜兵。")
+        self.assertEqual(len(self.state.paths), 1)
+
+        self.state.clear()
+        self.state.delay = 0.5
+        cancelled = self.run_child(
+            actions=[
+                {"op": "submit", "token": "cancel-me", "body_hex": "6869"},
+                {"op": "cancel", "token": "cancel-me"},
+                {"op": "sleep", "seconds": 0.6},
+                {"op": "poll", "token": "cancel-me"},
+            ],
+        )
+        self.assertEqual(cancelled["actions"][0]["accepted"], 1)
+        self.assertEqual(cancelled["actions"][1]["cancelled"], 1)
+        self.assertIsNone(cancelled["actions"][3]["result"])
+
+        self.state.clear()
+        self.state.delay = 1.5
+        timed_out = self.run_child(
+            actions=[
+                {"op": "submit", "token": "timeout-one", "body_hex": "6869"},
+                {"op": "wait", "token": "timeout-one", "timeout": 3.0},
+            ],
+            timeout=5.0,
+            timeout_seconds=1,
+        )
+        self.assertEqual(timed_out["actions"][1]["result"], "ERR\nTIMEOUT")
 
 if __name__ == "__main__":
     unittest.main()
