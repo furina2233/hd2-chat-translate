@@ -154,7 +154,7 @@ def fake_metadata(dll: bytes) -> bytes:
     return json.dumps(
         {
             "schema_version": 1,
-            "abi_version": 1,
+            "abi_version": 2,
             "filename": "hd2ct_http.dll",
             "size": len(dll),
             "sha256": hashlib.sha256(dll).hexdigest(),
@@ -271,7 +271,7 @@ local function run_loader()
     local information_calls = 0
     local submitted = 0
     local enabled = true
-    local disabled = false
+    local cancel_all_called = false
 
     local function add_handle(reference, share, position)
         next_handle = next_handle + 1
@@ -378,11 +378,6 @@ local function run_loader()
     end
 
     local exports = {}
-    exports.HD2CT_ABIVersion = ffi.cast("HD2Probe_U32 (*)(void)", function() return 1 end)
-    exports.HD2CT_InitializeEnvironment = ffi.cast("HD2Probe_U32 (*)(void)", function() return 0 end)
-    exports.HD2CT_IsEnabled = ffi.cast("HD2Probe_U32 (*)(void)", function() return enabled and 1 or 0 end)
-    exports.HD2CT_LastStatus = ffi.cast(
-        "HD2Probe_U32 (*)(void)", function() return 0 end)
     exports.HD2CT_Submit = ffi.cast(
         "HD2Probe_U32 (*)(const char *, const char *, HD2Probe_U32)",
         function(_, _, _) submitted = submitted + 1; return 1 end)
@@ -396,17 +391,14 @@ local function run_loader()
             written[0] = #result
             return 1
         end)
-    exports.HD2CT_Cancel = ffi.cast("HD2Probe_U32 (*)(const char *)", function() return 1 end)
-    exports.HD2CT_Disable = ffi.cast("void (*)(void)", function() disabled = true end)
+    exports.HD2CT_Cancel = ffi.cast("HD2Probe_U32 (*)(const char *)", function(token)
+        if token == nil then cancel_all_called = true end
+        return 1
+    end)
     local expected_exports = {
-        HD2CT_ABIVersion = true,
-        HD2CT_InitializeEnvironment = true,
-        HD2CT_IsEnabled = true,
-        HD2CT_LastStatus = true,
         HD2CT_Submit = true,
         HD2CT_Poll = true,
         HD2CT_Cancel = true,
-        HD2CT_Disable = true,
     }
     function kernel.GetProcAddress(_, name)
         if not expected_exports[name] then bad_export = true; return nil end
@@ -434,16 +426,16 @@ local function run_loader()
 MODULE_SOURCE
     end)()
     local loader = factory(ffi, kernel, bcrypt, source_hash, u16_ascii)
-    local api, init_status = loader.load()
+    local api = loader.load()
     local result = {api and "loaded" or "failed", tostring(load_calls), tostring(load_lock_ok),
         tostring(load_flag_ok), tostring(bad_export), tostring(deleted_unowned), tostring(move_flags_ok),
-        tostring(init_status or -1), tostring(#deleted_paths), tostring(submitted)}
+        tostring(api and api.abi_version or -1), tostring(#deleted_paths), tostring(submitted)}
     if api then
         api.submit("hd2ct_1", "body")
         result[#result + 1] = api.response("hd2ct_1") or "pending"
-        api.disable()
+        api.cancel(nil)
     end
-    result[#result + 1] = tostring(disabled)
+    result[#result + 1] = tostring(cancel_all_called)
     result[#result + 1] = tostring(information_calls)
     RESULT = table.concat(result, "|")
 end
@@ -559,6 +551,14 @@ class StandaloneBuilderTests(unittest.TestCase):
                     dll,
                     json.dumps(bad_metadata).encode("utf-8"),
                 )
+            old_abi_metadata = dict(metadata)
+            old_abi_metadata["abi_version"] = 1
+            with self.assertRaisesRegex(ValueError, "ABI"):
+                builder.standalone_module_source(
+                    (ROOT / "game" / "chat_http_native.lua").read_bytes(),
+                    dll,
+                    json.dumps(old_abi_metadata).encode("utf-8"),
+                )
 
             meta_path.write_bytes(fake_metadata(dll))
             with (
@@ -578,7 +578,7 @@ class StandaloneBuilderTests(unittest.TestCase):
     def test_loader_holds_verified_read_lock_through_absolute_hardened_load(self):
         result = self.run_loader("positive")
         self.assertEqual(result[0:4], ["loaded", "1", "true", "true"])
-        self.assertEqual(result[4:8], ["false", "false", "true", "0"])
+        self.assertEqual(result[4:8], ["false", "false", "true", "2"])
         self.assertEqual(result[10:12], ["OK\ntranslated", "true"])
 
     def test_loader_rejects_bad_payload_file_size_sha_and_reparse_paths(self):

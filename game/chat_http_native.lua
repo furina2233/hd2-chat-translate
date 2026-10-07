@@ -6,7 +6,7 @@ return function(ffi, kernel, bcrypt, hash_bytes, u16_ascii)
     local DLL_SIZE = HD2CT_DLL_SIZE
     local DLL_SHA256 = HD2CT_DLL_SHA256
     local DLL_HEX = HD2CT_DLL_HEX
-    local GLOBAL_KEY = "__HD2_CHAT_HTTP_NATIVE_V1"
+    local GLOBAL_KEY = "__HD2_CHAT_HTTP_NATIVE_V2"
     local FILE_ATTRIBUTE_DIRECTORY = 0x10
     local FILE_ATTRIBUTE_REPARSE_POINT = 0x400
     local FILE_FLAG_BACKUP_SEMANTICS = 0x02000000
@@ -258,34 +258,36 @@ return function(ffi, kernel, bcrypt, hash_bytes, u16_ascii)
     end
 
     local function has_functions(api)
-        return api.c_version and api.c_initialize and api.c_enabled and api.c_last_status
-            and api.c_submit and api.c_poll and api.c_cancel and api.c_disable
+        return type(api.submit) == "function" and type(api.response) == "function"
+            and type(api.cancel) == "function"
     end
 
     local loader = {}
     function loader.load()
         local prior = rawget(_G, GLOBAL_KEY)
         if type(prior) == "table" and prior.sha256 == DLL_SHA256 and prior.size == DLL_SIZE
-            and prior.abi_version == 1 and has_functions(prior) then
-            return prior, tonumber(prior.init_status) or 2
+            and prior.abi_version == HD2CT_ABI_VERSION and has_functions(prior) then
+            local ok, cancelled = pcall(prior.cancel, nil)
+            if not ok or cancelled ~= true then return nil end
+            return prior
         end
 
         local payload = dll_payload()
-        if not payload then return nil, 2 end
+        if not payload then return nil end
         local retained = {}
         local root, root_length = local_app_directory(retained)
-        if not root then unlock_all(retained); return nil, 2 end
+        if not root then unlock_all(retained); return nil end
         local directory, directory_length = ensure_native_directory(root, root_length, retained)
-        if not directory then unlock_all(retained); return nil, 2 end
+        if not directory then unlock_all(retained); return nil end
         local path, locked = nil, nil
         locked, path = write_payload(directory, directory_length, payload)
-        if not locked or not path then unlock_all(retained); return nil, 2 end
+        if not locked or not path then unlock_all(retained); return nil end
 
         local library = kernel.LoadLibraryExW(path, nil, LOAD_LIBRARY_SEARCH_SYSTEM32)
         if library == nil then
             kernel.CloseHandle(locked)
             unlock_all(retained)
-            return nil, 2
+            return nil
         end
         kernel.CloseHandle(locked)
         unlock_all(retained)
@@ -293,32 +295,16 @@ return function(ffi, kernel, bcrypt, hash_bytes, u16_ascii)
         local function resolve(name, signature)
             return function_pointer(kernel.GetProcAddress(library, name), signature)
         end
+        local c_submit = resolve("HD2CT_Submit", "HD2Probe_U32 (*)(const char *, const char *, HD2Probe_U32)")
+        local c_poll = resolve("HD2CT_Poll", "HD2Probe_U32 (*)(const char *, char *, HD2Probe_U32, HD2Probe_U32 *)")
+        local c_cancel = resolve("HD2CT_Cancel", "HD2Probe_U32 (*)(const char *)")
         local api = {
-            c_version = resolve("HD2CT_ABIVersion", "HD2Probe_U32 (*)(void)"),
-            c_initialize = resolve("HD2CT_InitializeEnvironment", "HD2Probe_U32 (*)(void)"),
-            c_enabled = resolve("HD2CT_IsEnabled", "HD2Probe_U32 (*)(void)"),
-            c_last_status = resolve("HD2CT_LastStatus", "HD2Probe_U32 (*)(void)"),
-            c_submit = resolve("HD2CT_Submit", "HD2Probe_U32 (*)(const char *, const char *, HD2Probe_U32)"),
-            c_poll = resolve("HD2CT_Poll", "HD2Probe_U32 (*)(const char *, char *, HD2Probe_U32, HD2Probe_U32 *)"),
-            c_cancel = resolve("HD2CT_Cancel", "HD2Probe_U32 (*)(const char *)"),
-            c_disable = resolve("HD2CT_Disable", "void (*)(void)"),
             sha256 = DLL_SHA256,
             size = DLL_SIZE,
             library = library,
-            abi_version = 0,
+            abi_version = HD2CT_ABI_VERSION,
         }
-        if not has_functions(api) then return nil, 2 end
-        local abi_ok, abi_value = pcall(api.c_version)
-        local abi = abi_ok and tonumber(abi_value) or nil
-        if not abi or abi ~= 1 then return nil, 2 end
-        api.abi_version = abi
-        local init_ok, init_value = pcall(api.c_initialize)
-        local init_status = init_ok and tonumber(init_value) or 4
-        if not init_status or init_status < 0 or init_status > 4
-            or init_status ~= math.floor(init_status) then
-            init_status = 4
-        end
-        api.init_status = init_status
+        if not c_submit or not c_poll or not c_cancel then return nil end
 
         local accepted = {}
         local accepted_count = 0
@@ -346,26 +332,14 @@ return function(ffi, kernel, bcrypt, hash_bytes, u16_ascii)
             end
         end
 
-        function api.enabled()
-            local ok, result = pcall(api.c_enabled)
-            return ok and tonumber(result) == 1
-        end
-
-        function api.last_status()
-            local ok, result = pcall(api.c_last_status)
-            local value = ok and tonumber(result) or nil
-            if not value or value < 0 or value > 65535 or value ~= math.floor(value) then return nil end
-            return value
-        end
-
-        function api.retry_cancels(limit)
+        local function retry_cancels(limit)
             if type(limit) ~= "number" or limit < 1 then return 0 end
             local tries = math.min(math.floor(limit), #pending_cancels)
             local completed = 0
             for _ = 1, tries do
                 local token = table.remove(pending_cancels, 1)
                 if token then
-                    local ok, result = pcall(api.c_cancel, token)
+                    local ok, result = pcall(c_cancel, token)
                     if ok and tonumber(result) == 1 then
                         pending_cancel_set[token] = nil
                         forget_token(token)
@@ -379,14 +353,14 @@ return function(ffi, kernel, bcrypt, hash_bytes, u16_ascii)
         end
 
         function api.submit(token, body)
-            api.retry_cancels(4)
+            retry_cancels(4)
             if not safe_token(token) or type(body) ~= "string" or #body < 1 or #body > 1023
                 or accepted[token] or accepted_count >= 64 then
                 return false
             end
             local buffer = ffi.new("char[?]", #body)
             ffi.copy(buffer, body, #body)
-            local ok, result = pcall(api.c_submit, token, buffer, #body)
+            local ok, result = pcall(c_submit, token, buffer, #body)
             if not ok or tonumber(result) ~= 1 then return false end
             accepted[token] = true
             accepted_count = accepted_count + 1
@@ -394,11 +368,12 @@ return function(ffi, kernel, bcrypt, hash_bytes, u16_ascii)
         end
 
         function api.response(token)
+            retry_cancels(4)
             if not accepted[token] or not safe_token(token) then return nil end
             local buffer = ffi.new("char[16388]")
             local written = ffi.new("HD2Probe_U32[1]")
             written[0] = 0
-            local ok, result = pcall(api.c_poll, token, buffer, 16388, written)
+            local ok, result = pcall(c_poll, token, buffer, 16388, written)
             if not ok then return "ERR\nRESPONSE_EXCEPTION" end
             if tonumber(result) ~= 1 then return nil end
             local length = tonumber(written[0])
@@ -409,9 +384,18 @@ return function(ffi, kernel, bcrypt, hash_bytes, u16_ascii)
         end
 
         function api.cancel(token)
+            if token == nil then
+                local ok, result = pcall(c_cancel, nil)
+                if not ok or tonumber(result) ~= 1 then return false end
+                accepted = {}
+                accepted_count = 0
+                pending_cancels = {}
+                pending_cancel_set = {}
+                return true
+            end
             if not safe_token(token) then return false end
             if not accepted[token] then return true end
-            local ok, result = pcall(api.c_cancel, token)
+            local ok, result = pcall(c_cancel, token)
             if ok and tonumber(result) == 1 then
                 forget_token(token)
                 return true
@@ -423,11 +407,8 @@ return function(ffi, kernel, bcrypt, hash_bytes, u16_ascii)
             return false
         end
 
-        function api.disable()
-            pcall(api.c_disable)
-        end
         rawset(_G, GLOBAL_KEY, api)
-        return api, init_status
+        return api
     end
     return loader
 end

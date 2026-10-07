@@ -25,121 +25,13 @@ import build_native_http
 NATIVE_SOURCES = build_native_http.NATIVE_SOURCES
 NATIVE_TEST_ROOT = ROOT / "artifacts" / "validation"
 
-CHILD = r"""
-import ctypes
-import json
-import sys
-import time
-
-dll_path, url = sys.argv[1], sys.argv[2]
-actions = json.loads(sys.argv[3])
-timeout_seconds = int(sys.argv[4]) if len(sys.argv) > 4 else 20
-model = sys.argv[5] if len(sys.argv) > 5 else "fake-model"
-lib = ctypes.CDLL(dll_path)
-lib.HD2CT_ABIVersion.argtypes = []
-lib.HD2CT_ABIVersion.restype = ctypes.c_uint32
-lib.HD2CT_InitializeConfig.argtypes = [
-    ctypes.c_char_p, ctypes.c_char_p, ctypes.c_char_p, ctypes.c_uint32,
-]
-lib.HD2CT_InitializeConfig.restype = ctypes.c_uint32
-lib.HD2CT_IsEnabled.argtypes = []
-lib.HD2CT_IsEnabled.restype = ctypes.c_uint32
-lib.HD2CT_LastStatus.argtypes = []
-lib.HD2CT_LastStatus.restype = ctypes.c_uint32
-lib.HD2CT_Submit.argtypes = [ctypes.c_char_p, ctypes.c_void_p, ctypes.c_uint32]
-lib.HD2CT_Submit.restype = ctypes.c_uint32
-lib.HD2CT_Poll.argtypes = [
-    ctypes.c_char_p, ctypes.c_void_p, ctypes.c_uint32,
-    ctypes.POINTER(ctypes.c_uint32),
-]
-lib.HD2CT_Poll.restype = ctypes.c_uint32
-lib.HD2CT_Cancel.argtypes = [ctypes.c_char_p]
-lib.HD2CT_Cancel.restype = ctypes.c_uint32
-lib.HD2CT_Disable.argtypes = []
-lib.HD2CT_Disable.restype = None
-
-test_started = time.perf_counter()
-status = lib.HD2CT_InitializeConfig(
-    url.encode("utf-8"), model.encode("utf-8"), b"fake-api-key", timeout_seconds,
-)
-result = {
-    "abi": lib.HD2CT_ABIVersion(),
-    "status": status,
-    "enabled": lib.HD2CT_IsEnabled(),
-    "last_status": lib.HD2CT_LastStatus(),
-    "initialize_elapsed_ms": (time.perf_counter() - test_started) * 1000.0,
-    "actions": [],
-}
-
-def submit(action):
-    token = action["token"].encode("ascii")
-    body = bytes.fromhex(action.get("body_hex", ""))
-    backing = ctypes.create_string_buffer(body if body else b"\0", max(1, len(body)))
-    return lib.HD2CT_Submit(token, ctypes.cast(backing, ctypes.c_void_p), len(body))
-
-def poll(token):
-    buffer = ctypes.create_string_buffer(16388)
-    written = ctypes.c_uint32(0)
-    found = lib.HD2CT_Poll(
-        token.encode("ascii"), ctypes.cast(buffer, ctypes.c_void_p),
-        len(buffer), ctypes.byref(written),
-    )
-    if not found:
-        return None
-    return bytes(buffer.raw[:written.value]).decode("utf-8")
-
-if status == 0:
-    for action in actions:
-        op = action["op"]
-        if op == "submit":
-            before = time.perf_counter()
-            accepted = submit(action)
-            result["actions"].append({
-                "accepted": accepted,
-                "elapsed_ms": (time.perf_counter() - before) * 1000.0,
-            })
-        elif op == "wait":
-            poll_started = time.perf_counter()
-            deadline = time.monotonic() + action.get("timeout", 8.0)
-            value = None
-            while time.monotonic() < deadline:
-                value = poll(action["token"])
-                if value is not None:
-                    break
-                time.sleep(0.01)
-            result["actions"].append({
-                "result": value,
-                "first_result_elapsed_ms": (time.perf_counter() - poll_started) * 1000.0,
-            })
-        elif op == "poll":
-            result["actions"].append({"result": poll(action["token"])})
-        elif op == "cancel":
-            result["actions"].append({
-                "cancelled": lib.HD2CT_Cancel(action["token"].encode("ascii")),
-            })
-        elif op == "disable":
-            lib.HD2CT_Disable()
-            result["actions"].append({
-                "enabled": lib.HD2CT_IsEnabled(),
-                "status": lib.HD2CT_LastStatus(),
-            })
-        elif op == "sleep":
-            time.sleep(action["seconds"])
-            result["actions"].append({"slept": action["seconds"]})
-        else:
-            raise RuntimeError("unknown test action")
-
-result["final_last_status"] = lib.HD2CT_LastStatus()
-result["elapsed_before_print_ms"] = (time.perf_counter() - test_started) * 1000.0
-print(json.dumps(result, ensure_ascii=True), flush=True)
-"""
-
 ENVIRONMENT_CHILD = r"""
 import ctypes
 import json
 import os
 import sys
 import time
+import threading
 
 dll_path, registry_json = sys.argv[1], sys.argv[2]
 arguments = sys.argv[3:]
@@ -166,6 +58,8 @@ os.environ.update({
 lib = ctypes.CDLL(dll_path)
 lib.fixture_ClearRegistry.argtypes = []
 lib.fixture_ClearRegistry.restype = None
+lib.fixture_SetRegistryDelay.argtypes = [ctypes.c_uint32]
+lib.fixture_SetRegistryDelay.restype = None
 lib.fixture_SetRegistryValue.argtypes = [ctypes.c_uint32, ctypes.c_wchar_p, ctypes.c_wchar_p]
 lib.fixture_SetRegistryValue.restype = ctypes.c_int
 lib.fixture_ConfigMatches.argtypes = [
@@ -182,10 +76,24 @@ lib.fixture_CacheCount.argtypes = []
 lib.fixture_CacheCount.restype = ctypes.c_uint32
 lib.fixture_RateCount.argtypes = []
 lib.fixture_RateCount.restype = ctypes.c_uint32
-lib.HD2CT_InitializeEnvironment.argtypes = []
-lib.HD2CT_InitializeEnvironment.restype = ctypes.c_uint32
-lib.HD2CT_IsEnabled.argtypes = []
-lib.HD2CT_IsEnabled.restype = ctypes.c_uint32
+lib.fixture_Initialized.argtypes = []
+lib.fixture_Initialized.restype = ctypes.c_uint32
+lib.fixture_Status.argtypes = []
+lib.fixture_Status.restype = ctypes.c_uint32
+lib.fixture_Enabled.argtypes = []
+lib.fixture_Enabled.restype = ctypes.c_uint32
+lib.fixture_BootstrapCount.argtypes = []
+lib.fixture_BootstrapCount.restype = ctypes.c_uint32
+lib.fixture_ForceWorkerFailure.argtypes = []
+lib.fixture_ForceWorkerFailure.restype = None
+lib.fixture_ForceBootstrapCreateFailure.argtypes = []
+lib.fixture_ForceBootstrapCreateFailure.restype = None
+lib.fixture_ForceWorkerCreateFailure.argtypes = [ctypes.c_uint32]
+lib.fixture_ForceWorkerCreateFailure.restype = None
+lib.fixture_StartLockHold.argtypes = [ctypes.c_uint32]
+lib.fixture_StartLockHold.restype = ctypes.c_int
+lib.fixture_ReleaseLock.argtypes = []
+lib.fixture_ReleaseLock.restype = None
 lib.HD2CT_Submit.argtypes = [ctypes.c_char_p, ctypes.c_void_p, ctypes.c_uint32]
 lib.HD2CT_Submit.restype = ctypes.c_uint32
 lib.HD2CT_Poll.argtypes = [
@@ -193,63 +101,130 @@ lib.HD2CT_Poll.argtypes = [
     ctypes.POINTER(ctypes.c_uint32),
 ]
 lib.HD2CT_Poll.restype = ctypes.c_uint32
+lib.HD2CT_Cancel.argtypes = [ctypes.c_char_p]
+lib.HD2CT_Cancel.restype = ctypes.c_uint32
 
 lib.fixture_ClearRegistry()
+fixture = json.loads(registry_json)
+registry_delay = fixture.pop("__registry_delay_ms", 0)
+if fixture.pop("__worker_failure", False):
+    lib.fixture_ForceWorkerFailure()
+if fixture.pop("__bootstrap_create_failure", False):
+    lib.fixture_ForceBootstrapCreateFailure()
+worker_create_failure_at = fixture.pop("__worker_create_failure_at", 0)
+if worker_create_failure_at:
+    lib.fixture_ForceWorkerCreateFailure(worker_create_failure_at)
+lock_hold_ms = fixture.pop("__lock_hold_ms", 0)
+lib.fixture_SetRegistryDelay(registry_delay)
 for hive_name, hive in (("user", 0), ("machine", 1)):
-    for name, value in json.loads(registry_json).get(hive_name, {}).items():
+    for name, value in fixture.get(hive_name, {}).items():
         if not lib.fixture_SetRegistryValue(hive, name, value):
             raise RuntimeError("fixture registry value was rejected")
 
-status = lib.HD2CT_InitializeEnvironment()
-enabled = lib.HD2CT_IsEnabled()
-submit_result = None
-if not enabled:
-    submit_result = lib.HD2CT_Submit(b"missing-config", b"safe", 4)
+def submit(token, body_hex="73616665"):
+    body = bytes.fromhex(body_hex)
+    backing = ctypes.create_string_buffer(body if body else b"\0", max(1, len(body)))
+    return lib.HD2CT_Submit(
+        token.encode("ascii"), ctypes.cast(backing, ctypes.c_void_p), len(body),
+    )
+
+def poll(token):
+    buffer = ctypes.create_string_buffer(16388)
+    written = ctypes.c_uint32(0)
+    found = lib.HD2CT_Poll(
+        token.encode("ascii"), ctypes.cast(buffer, ctypes.c_void_p),
+        len(buffer), ctypes.byref(written),
+    )
+    if not found:
+        return None
+    return bytes(buffer.raw[:written.value]).decode("utf-8")
+
+def wait_initialized(timeout=5.0):
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if lib.fixture_Initialized() == 2:
+            return True
+        time.sleep(0.005)
+    return lib.fixture_Initialized() == 2
+
+if not actions:
+    actions = [
+        {"op": "submit", "token": "fixture-bootstrap", "body_hex": "73616665"},
+        {"op": "wait", "token": "fixture-bootstrap", "timeout": 2.0},
+    ]
 action_results = []
-if enabled:
-    for action in actions:
-        if action["op"] == "submit":
-            body = bytes.fromhex(action.get("body_hex", ""))
-            backing = ctypes.create_string_buffer(body if body else b"\0", max(1, len(body)))
-            accepted = lib.HD2CT_Submit(
-                action["token"].encode("ascii"),
-                ctypes.cast(backing, ctypes.c_void_p), len(body),
+for action in actions:
+    op = action["op"]
+    if op == "submit":
+        started = time.perf_counter()
+        accepted = submit(action["token"], action.get("body_hex", ""))
+        action_results.append({
+            "accepted": accepted,
+            "elapsed_ms": (time.perf_counter() - started) * 1000.0,
+        })
+    elif op in ("poll", "wait"):
+        started = time.perf_counter()
+        deadline = time.monotonic() + action.get("timeout", 8.0)
+        value = poll(action["token"])
+        while value is None and op == "wait" and time.monotonic() < deadline:
+            time.sleep(0.01)
+            value = poll(action["token"])
+        action_results.append({
+            "result": value,
+            "elapsed_ms": (time.perf_counter() - started) * 1000.0,
+        })
+    elif op == "cancel":
+        action_results.append({
+            "cancelled": lib.HD2CT_Cancel(action["token"].encode("ascii")),
+        })
+    elif op == "cancel_all":
+        action_results.append({"cancelled": lib.HD2CT_Cancel(None)})
+    elif op == "concurrent_submit":
+        results = [None] * len(action["tokens"])
+        threads = []
+        for index, token in enumerate(action["tokens"]):
+            thread = threading.Thread(
+                target=lambda i=index, t=token: results.__setitem__(i, submit(t, action.get("body_hex", "73616665")))
             )
-            action_results.append({"accepted": accepted})
-        elif action["op"] in ("poll", "wait"):
-            token = action["token"].encode("ascii")
-            value = None
-            deadline = time.monotonic() + action.get("timeout", 8.0)
-            while True:
-                buffer = ctypes.create_string_buffer(16388)
-                written = ctypes.c_uint32(0)
-                found = lib.HD2CT_Poll(
-                    token, ctypes.cast(buffer, ctypes.c_void_p), len(buffer),
-                    ctypes.byref(written),
-                )
-                if found:
-                    value = bytes(buffer.raw[:written.value]).decode("utf-8")
-                    break
-                if action["op"] == "poll" or time.monotonic() >= deadline:
-                    break
-                time.sleep(0.01)
-            action_results.append({"result": value})
-        elif action["op"] == "normalize":
-            output = ctypes.create_string_buffer(2049)
-            accepted = lib.fixture_NormalizeUrl(
-                action["adapter_id"], action["url"].encode("utf-8"),
-                ctypes.cast(output, ctypes.c_void_p), len(output),
-            )
-            action_results.append({
-                "accepted": accepted,
-                "url": output.value.decode("utf-8"),
-            })
-        else:
-            raise RuntimeError("unknown environment fixture action")
+            threads.append(thread)
+            thread.start()
+        for thread in threads:
+            thread.join()
+        action_results.append({"accepted": results})
+    elif op == "force_worker_failure":
+        lib.fixture_ForceWorkerFailure()
+        action_results.append({"forced": True})
+    elif op == "hold_lock":
+        action_results.append({"held": bool(lib.fixture_StartLockHold(lock_hold_ms or action.get("milliseconds", 500)))})
+    elif op == "release_lock":
+        lib.fixture_ReleaseLock()
+        action_results.append({"released": True})
+    elif op == "sleep":
+        time.sleep(action["seconds"])
+        action_results.append({"slept": action["seconds"]})
+    elif op == "wait_initialized":
+        action_results.append({"initialized": wait_initialized(action.get("timeout", 5.0))})
+    elif op == "normalize":
+        output = ctypes.create_string_buffer(2049)
+        accepted = lib.fixture_NormalizeUrl(
+            action["adapter_id"], action["url"].encode("utf-8"),
+            ctypes.cast(output, ctypes.c_void_p), len(output),
+        )
+        action_results.append({"accepted": accepted, "url": output.value.decode("utf-8")})
+    else:
+        raise RuntimeError("unknown environment fixture action")
+
+wait_initialized()
+if lock_hold_ms:
+    lib.fixture_ReleaseLock()
+status = lib.fixture_Status()
+enabled = lib.fixture_Enabled()
 result = {
     "status": status,
     "enabled": enabled,
-    "submit": submit_result,
+    "init_state": lib.fixture_Initialized(),
+    "bootstrap_count": lib.fixture_BootstrapCount(),
+    "submit": action_results[0].get("accepted") if action_results else None,
     "timeout": lib.fixture_TimeoutSeconds(),
     "cache_count": lib.fixture_CacheCount(),
     "rate_count": lib.fixture_RateCount(),
@@ -271,6 +246,7 @@ ENVIRONMENT_SHIM_C = r"""
 #define WINVER 0x0601
 #include <windows.h>
 #include <winreg.h>
+#include <process.h>
 #include <stdint.h>
 #include <string.h>
 #include <wchar.h>
@@ -286,6 +262,10 @@ typedef struct FixtureRegistryValue {
 } FixtureRegistryValue;
 
 static FixtureRegistryValue fixture_values[FIXTURE_VALUE_COUNT];
+static volatile LONG fixture_registry_delay_ms;
+static HANDLE fixture_lock_ready;
+static HANDLE fixture_lock_release;
+static HANDLE fixture_lock_thread_handle;
 
 LSTATUS WINAPI fixture_RegGetValueW(
     HKEY root, LPCWSTR subkey, LPCWSTR name, DWORD flags, LPDWORD type,
@@ -295,6 +275,10 @@ LSTATUS WINAPI fixture_RegGetValueW(
     DWORD index;
     DWORD required;
     (void)flags;
+    {
+        LONG delay = InterlockedCompareExchange(&fixture_registry_delay_ms, 0, 0);
+        if (delay > 0) Sleep((DWORD)delay);
+    }
     if (root == HKEY_CURRENT_USER && subkey != NULL &&
         wcscmp(subkey, L"Environment") == 0) {
         hive = 0u;
@@ -332,6 +316,12 @@ LSTATUS WINAPI fixture_RegGetValueW(
 __declspec(dllexport) void __cdecl fixture_ClearRegistry(void)
 {
     SecureZeroMemory(fixture_values, sizeof(fixture_values));
+    InterlockedExchange(&fixture_registry_delay_ms, 0);
+}
+
+__declspec(dllexport) void __cdecl fixture_SetRegistryDelay(uint32_t milliseconds)
+{
+    InterlockedExchange(&fixture_registry_delay_ms, (LONG)milliseconds);
 }
 
 __declspec(dllexport) int __cdecl fixture_SetRegistryValue(
@@ -404,6 +394,85 @@ __declspec(dllexport) uint32_t __cdecl fixture_CacheCount(void)
 __declspec(dllexport) uint32_t __cdecl fixture_RateCount(void)
 {
     return g_rate_count;
+}
+
+__declspec(dllexport) uint32_t __cdecl fixture_Initialized(void)
+{
+    return (uint32_t)InterlockedCompareExchange(&g_initialized, 0, 0);
+}
+
+__declspec(dllexport) uint32_t __cdecl fixture_Status(void)
+{
+    return (uint32_t)InterlockedCompareExchange(&g_status, 0, 0);
+}
+
+__declspec(dllexport) uint32_t __cdecl fixture_Enabled(void)
+{
+    return (uint32_t)InterlockedCompareExchange(&g_enabled, 0, 0);
+}
+
+__declspec(dllexport) uint32_t __cdecl fixture_BootstrapCount(void)
+{
+    return (uint32_t)InterlockedCompareExchange(&g_test_bootstrap_count, 0, 0);
+}
+
+__declspec(dllexport) void __cdecl fixture_ForceWorkerFailure(void)
+{
+    InterlockedExchange(&g_test_fail_worker_session, 1);
+}
+
+__declspec(dllexport) void __cdecl fixture_ForceBootstrapCreateFailure(void)
+{
+    InterlockedExchange(&g_test_fail_bootstrap_create, 1);
+}
+
+__declspec(dllexport) void __cdecl fixture_ForceWorkerCreateFailure(uint32_t ordinal)
+{
+    InterlockedExchange(&g_test_fail_worker_create_at, (LONG)ordinal);
+}
+
+static unsigned __stdcall fixture_lock_thread_main(void *parameter)
+{
+    DWORD milliseconds = *(DWORD *)parameter;
+    AcquireSRWLockExclusive(&g_lock);
+    SetEvent(fixture_lock_ready);
+    (void)WaitForSingleObject(fixture_lock_release, milliseconds);
+    ReleaseSRWLockExclusive(&g_lock);
+    return 0;
+}
+
+__declspec(dllexport) int __cdecl fixture_StartLockHold(uint32_t milliseconds)
+{
+    DWORD timeout = milliseconds;
+    uintptr_t thread;
+    if (fixture_lock_ready != NULL || fixture_lock_release != NULL ||
+        fixture_lock_thread_handle != NULL) return 0;
+    fixture_lock_ready = CreateEventW(NULL, TRUE, FALSE, NULL);
+    fixture_lock_release = CreateEventW(NULL, TRUE, FALSE, NULL);
+    if (fixture_lock_ready == NULL || fixture_lock_release == NULL) return 0;
+    thread = _beginthreadex(NULL, 0, fixture_lock_thread_main, &timeout, 0, NULL);
+    if (thread == 0) return 0;
+    fixture_lock_thread_handle = (HANDLE)thread;
+    if (WaitForSingleObject(fixture_lock_ready, 2000u) != WAIT_OBJECT_0) return 0;
+    return 1;
+}
+
+__declspec(dllexport) void __cdecl fixture_ReleaseLock(void)
+{
+    if (fixture_lock_release != NULL) SetEvent(fixture_lock_release);
+    if (fixture_lock_thread_handle != NULL) {
+        (void)WaitForSingleObject(fixture_lock_thread_handle, 2000u);
+        CloseHandle(fixture_lock_thread_handle);
+        fixture_lock_thread_handle = NULL;
+    }
+    if (fixture_lock_ready != NULL) {
+        CloseHandle(fixture_lock_ready);
+        fixture_lock_ready = NULL;
+    }
+    if (fixture_lock_release != NULL) {
+        CloseHandle(fixture_lock_release);
+        fixture_lock_release = NULL;
+    }
 }
 """
 
@@ -596,29 +665,19 @@ class NativeHttpWorkerTests(unittest.TestCase):
         timeout_seconds: int = 20,
         model: str = "fake-model",
     ) -> dict:
-        completed = subprocess.run(
-            [
-                sys.executable,
-                "-c",
-                CHILD,
-                str(self.dll),
-                url if url is not None else self.url + "/",
-                json.dumps(actions or [], ensure_ascii=False),
-                str(timeout_seconds),
-                model,
-            ],
-            cwd=ROOT,
-            check=False,
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            timeout=timeout,
+        selected_url = url if url is not None else self.url + "/"
+        config = {
+            "HD2CT_API_URL": selected_url,
+            "HD2CT_MODEL": model,
+            "HD2CT_API_KEY": "fake-api-key",
+            "HD2CT_ENABLED": "1",
+            "HD2CT_TIMEOUT_SECONDS": str(timeout_seconds),
+        }
+        if "baidu" in selected_url.lower() or "youdao" in selected_url.lower():
+            config["HD2CT_APP_ID"] = "fake-app-id"
+        return self.run_environment_child(
+            {"user": config}, actions=actions, timeout=timeout,
         )
-        self.assertEqual(completed.returncode, 0, completed.stderr)
-        lines = [line for line in completed.stdout.splitlines() if line.strip()]
-        self.assertEqual(len(lines), 1, completed.stdout)
-        return json.loads(lines[0])
 
     @classmethod
     def environment_test_dll(cls) -> Path:
@@ -653,6 +712,7 @@ class NativeHttpWorkerTests(unittest.TestCase):
             "-fexec-charset=UTF-8",
             "-D_WIN32_WINNT=0x0601",
             "-DWINVER=0x0601",
+            "-DHD2CT_TESTING",
             "-DCJSON_NESTING_LIMIT=32",
             "-DCJSON_HIDE_SYMBOLS",
             "-Wl,--exclude-all-symbols",
@@ -687,6 +747,7 @@ class NativeHttpWorkerTests(unittest.TestCase):
         registry: dict[str, dict[str, str]],
         expected_config: dict[str, str] | None = None,
         actions: list[dict] | None = None,
+        timeout: float = 15.0,
     ) -> dict:
         command = [
             sys.executable,
@@ -723,7 +784,7 @@ class NativeHttpWorkerTests(unittest.TestCase):
             text=True,
             encoding="utf-8",
             errors="replace",
-            timeout=15,
+            timeout=timeout,
         )
         self.assertEqual(completed.returncode, 0, completed.stderr)
         lines = [line for line in completed.stdout.splitlines() if line.strip()]
@@ -750,8 +811,8 @@ class NativeHttpWorkerTests(unittest.TestCase):
             {"op": "wait", "token": "unknown-service-again"},
         ]
         result = self.run_environment_child({}, actions=unknown_actions)
-        self.assertEqual(result["status"], 0)
-        self.assertEqual(result["enabled"], 1)
+        self.assertEqual(result["status"], 5)
+        self.assertEqual(result["enabled"], 0)
         self.assertEqual([item.get("accepted") for item in result["actions"]],
                          [1, None, 1, None])
         self.assertEqual(result["actions"][1]["result"], "ERR\nUNSUPPORTED_SERVICE")
@@ -763,12 +824,16 @@ class NativeHttpWorkerTests(unittest.TestCase):
         disabled = self.run_environment_child({"user": {"HD2CT_ENABLED": "0"}})
         self.assertEqual(disabled["status"], 3)
         self.assertEqual(disabled["enabled"], 0)
+        self.assertEqual(disabled["actions"][1]["result"], "SKIP\n")
+        self.assertEqual(disabled["rate_count"], 0)
+        self.assertEqual(self.state.paths, [])
 
         invalid_option = self.run_environment_child(
             {"user": {"HD2CT_TIMEOUT_SECONDS": "invalid"}}
         )
         self.assertEqual(invalid_option["status"], 2)
         self.assertEqual(invalid_option["enabled"], 0)
+        self.assertEqual(invalid_option["actions"][1]["result"], "ERR\nINVALID_CONFIG")
 
         for missing_name in user_config:
             user = dict(user_config)
@@ -778,12 +843,14 @@ class NativeHttpWorkerTests(unittest.TestCase):
             with self.subTest(missing_registry_value=missing_name):
                 result = self.run_environment_child({"user": user, "machine": machine})
                 if missing_name == "HD2CT_MODEL":
-                    self.assertEqual(result["status"], 0)
-                    self.assertEqual(result["enabled"], 1)
+                    self.assertEqual(result["status"], 5)
+                    self.assertEqual(result["enabled"], 0)
+                    self.assertEqual(result["actions"][1]["result"], "ERR\nUNSUPPORTED_SERVICE")
                 else:
                     self.assertEqual(result["status"], 1)
                     self.assertEqual(result["enabled"], 0)
-                    self.assertEqual(result["submit"], 0)
+                    self.assertEqual(result["submit"], 1)
+                    self.assertEqual(result["actions"][1]["result"], "ERR\nMISSING_CONFIG")
 
         result = self.run_environment_child(
             {"user": user_config, "machine": machine_config}, user_config
@@ -833,9 +900,10 @@ class NativeHttpWorkerTests(unittest.TestCase):
                 "HD2CT_APP_ID": "",
             },
         )
-        self.assertEqual(result["status"], 0)
-        self.assertEqual(result["enabled"], 1)
+        self.assertEqual(result["status"], 5)
+        self.assertEqual(result["enabled"], 0)
         self.assertEqual(result["selected_config_matches"], 1)
+        self.assertEqual(result["actions"][1]["result"], "ERR\nUNSUPPORTED_SERVICE")
 
         invalid_user = dict(user_config)
         invalid_user["HD2CT_API_URL"] = "ftp://127.0.0.1:1/user"
@@ -844,7 +912,8 @@ class NativeHttpWorkerTests(unittest.TestCase):
         )
         self.assertEqual(result["status"], 2)
         self.assertEqual(result["enabled"], 0)
-        self.assertEqual(result["submit"], 0)
+        self.assertEqual(result["submit"], 1)
+        self.assertEqual(result["actions"][1]["result"], "ERR\nINVALID_CONFIG")
 
         self.assert_signed_provider_adapters()
 
@@ -871,8 +940,8 @@ class NativeHttpWorkerTests(unittest.TestCase):
         )
         self.assertEqual(result["status"], 0)
         self.assertEqual(result["selected_config_matches"], 1)
-        self.assertEqual(result["actions"][1]["result"], "MT\n你好，\n绝地潜兵。")
-        self.assertEqual(result["actions"][3]["result"], "MT\n你好，\n绝地潜兵。")
+        self.assertEqual(result["actions"][1]["result"], "OK\n你好，\n绝地潜兵。")
+        self.assertEqual(result["actions"][3]["result"], "OK\n你好，\n绝地潜兵。")
         self.assertEqual(self.state.paths, ["/Baidu/custom/path"])
         self.assertTrue(self.state.content_types[0].startswith("application/x-www-form-urlencoded"))
         form = self.state.payloads[0]
@@ -897,7 +966,7 @@ class NativeHttpWorkerTests(unittest.TestCase):
                 {"op": "wait", "token": "baidu-chinese"},
             ],
         )
-        self.assertEqual(preserved["actions"][1]["result"], "MT\n不覆盖中文")
+        self.assertEqual(preserved["actions"][1]["result"], "OK\n不覆盖中文")
 
         self.state.clear()
         same_chinese = "撤离点集合。"
@@ -910,7 +979,7 @@ class NativeHttpWorkerTests(unittest.TestCase):
                 {"op": "wait", "token": "baidu-chinese-same"},
             ],
         )
-        self.assertEqual(preserved["actions"][1]["result"], "MT\n" + same_chinese)
+        self.assertEqual(preserved["actions"][1]["result"], "OK\n" + same_chinese)
 
         self.state.clear()
         self.state.response = baidu_response(("ignored",), error_code=54003)
@@ -953,7 +1022,7 @@ class NativeHttpWorkerTests(unittest.TestCase):
             ],
         )
         self.assertEqual(result["status"], 0)
-        self.assertEqual(result["actions"][1]["result"], "MT\n你好，绝地潜兵。")
+        self.assertEqual(result["actions"][1]["result"], "OK\n你好，绝地潜兵。")
         self.assertEqual(self.state.paths, ["/Youdao/custom/path"])
         form = self.state.payloads[0]
         self.assertEqual(form["q"], yd_source)
@@ -983,7 +1052,7 @@ class NativeHttpWorkerTests(unittest.TestCase):
                 {"op": "wait", "token": "youdao-chinese"},
             ],
         )
-        self.assertEqual(preserved["actions"][1]["result"], "MT\n不覆盖中文")
+        self.assertEqual(preserved["actions"][1]["result"], "OK\n不覆盖中文")
 
         self.state.clear()
         same_chinese = "撤离点集合。"
@@ -996,7 +1065,7 @@ class NativeHttpWorkerTests(unittest.TestCase):
                 {"op": "wait", "token": "youdao-chinese-same"},
             ],
         )
-        self.assertEqual(preserved["actions"][1]["result"], "MT\n" + same_chinese)
+        self.assertEqual(preserved["actions"][1]["result"], "OK\n" + same_chinese)
 
         self.state.clear()
         self.state.response = youdao_response("ignored", error_code="401")
@@ -1084,7 +1153,7 @@ class NativeHttpWorkerTests(unittest.TestCase):
             ],
             model=" \t ",
         )
-        self.assertEqual(google["actions"][1]["result"], "MT\nHello & 🙂")
+        self.assertEqual(google["actions"][1]["result"], "OK\nHello & 🙂")
         self.assertEqual(self.state.paths, [google_path])
         self.assertEqual(self.state.payloads[0], {
             "q": google_source, "target": "zh-CN", "format": "text",
@@ -1105,7 +1174,7 @@ class NativeHttpWorkerTests(unittest.TestCase):
             ],
             model="",
         )
-        self.assertEqual(preserved["actions"][1]["result"], "MT\nignored result")
+        self.assertEqual(preserved["actions"][1]["result"], "OK\nignored result")
 
         self.state.clear()
         self.state.response = google_response(chinese, "zh-Hans")
@@ -1115,10 +1184,16 @@ class NativeHttpWorkerTests(unittest.TestCase):
                 {"op": "submit", "token": "google-chinese-same",
                  "body_hex": chinese.encode("utf-8").hex()},
                 {"op": "wait", "token": "google-chinese-same"},
+                {"op": "submit", "token": "google-chinese-same-cache",
+                 "body_hex": chinese.encode("utf-8").hex()},
+                {"op": "wait", "token": "google-chinese-same-cache"},
             ],
             model="",
         )
-        self.assertEqual(same_chinese["actions"][1]["result"], "MT\n" + chinese)
+        self.assertEqual(same_chinese["actions"][1]["result"], "OK\n" + chinese)
+        self.assertEqual(same_chinese["actions"][3]["result"], "OK\n" + chinese)
+        self.assertEqual(self.state.paths, ["/google/custom"])
+        self.assertEqual(len(self.state.payloads), 1)
 
         stale_app_id = {
             "HD2CT_API_URL": self.url + "/Google/custom",
@@ -1138,7 +1213,7 @@ class NativeHttpWorkerTests(unittest.TestCase):
         )
         self.assertEqual(result["status"], 0)
         self.assertEqual(result["selected_config_matches"], 1)
-        self.assertEqual(result["actions"][1]["result"], "MT\n你好")
+        self.assertEqual(result["actions"][1]["result"], "OK\n你好")
 
         self.state.clear()
         self.state.response = b'{"data":{"translations":[]}}'
@@ -1180,12 +1255,16 @@ class NativeHttpWorkerTests(unittest.TestCase):
         self.assertIn("messages", self.state.payloads[0])
         self.assertEqual(self.state.paths, [google_path])
 
-        missing_signed_app_id = self.run_child(
-            self.url + "/Baidu/missing-app-id",
-            model="",
+        missing_signed_app_id = self.run_environment_child(
+            {"user": {
+                "HD2CT_API_URL": self.url + "/Baidu/missing-app-id",
+                "HD2CT_MODEL": "",
+                "HD2CT_API_KEY": "fake-api-key",
+            }}
         )
         self.assertEqual(missing_signed_app_id["status"], 1)
         self.assertEqual(missing_signed_app_id["enabled"], 0)
+        self.assertEqual(missing_signed_app_id["actions"][1]["result"], "ERR\nMISSING_CONFIG")
         self.assert_environment_initialization_uses_registry()
 
     def test_english_translation_preserves_chinese_and_model_translation(self) -> None:
@@ -1221,10 +1300,31 @@ class NativeHttpWorkerTests(unittest.TestCase):
             actions=[
                 {"op": "submit", "token": "chinese", "body_hex": chinese.encode("utf-8").hex()},
                 {"op": "wait", "token": "chinese"},
+                {"op": "submit", "token": "chinese-cache", "body_hex": chinese.encode("utf-8").hex()},
+                {"op": "wait", "token": "chinese-cache"},
             ],
         )
-        self.assertEqual(preserved["actions"][1]["result"], "OK\n" + chinese)
+        self.assertEqual(preserved["actions"][1]["result"], "SKIP\n")
+        self.assertEqual(preserved["actions"][3]["result"], "SKIP\n")
+        self.assertEqual(len(self.state.paths), 1)
         self.assertEqual(self.state.payloads[0]["messages"][1]["content"], chinese)
+
+        self.state.clear()
+        source_equal = "Hold this position."
+        self.state.response = provider_response(result_content(source_equal, is_chinese=False))
+        same_translation = self.run_child(
+            actions=[
+                {"op": "submit", "token": "same-translation",
+                 "body_hex": source_equal.encode("utf-8").hex()},
+                {"op": "wait", "token": "same-translation"},
+                {"op": "submit", "token": "same-translation-cache",
+                 "body_hex": source_equal.encode("utf-8").hex()},
+                {"op": "wait", "token": "same-translation-cache"},
+            ],
+        )
+        self.assertEqual(same_translation["actions"][1]["result"], "SKIP\n")
+        self.assertEqual(same_translation["actions"][3]["result"], "SKIP\n")
+        self.assertEqual(len(self.state.paths), 1)
 
         self.state.clear()
         self.state.response = provider_response(result_content("打得不错", is_chinese=False))
@@ -1239,6 +1339,12 @@ class NativeHttpWorkerTests(unittest.TestCase):
         self.assertEqual(self.state.payloads[0]["messages"][1]["content"], raw_gg)
 
     def test_http401_is_redacted_and_invalid_model_result_is_classified(self) -> None:
+        self.assertEqual(self.meta_json["abi_version"], 2)
+        objdump = build_native_http.resolve_objdump(Path(self.meta_json["compiler"]), None)
+        self.assertEqual(
+            build_native_http.exported_names(self.dll, objdump),
+            {"HD2CT_Submit", "HD2CT_Poll", "HD2CT_Cancel"},
+        )
         self.state.status = 401
         self.state.response = b"secret-provider-error-body"
         unauthorized = self.run_child(
@@ -1248,7 +1354,6 @@ class NativeHttpWorkerTests(unittest.TestCase):
             ],
         )
         self.assertEqual(unauthorized["actions"][1]["result"], "ERR\nHTTP_401")
-        self.assertEqual(unauthorized["final_last_status"], 401)
         self.assertNotIn("secret-provider-error-body", json.dumps(unauthorized))
 
         self.state.clear()
@@ -1272,6 +1377,36 @@ class NativeHttpWorkerTests(unittest.TestCase):
         )
         self.assertEqual([entry["accepted"] for entry in result["actions"]], [1, 1])
         self.assertLess(max(entry["elapsed_ms"] for entry in result["actions"]), 200.0)
+        self.assertEqual(result["bootstrap_count"], 1)
+
+        self.state.clear()
+        delayed_registry = {
+            "user": {
+                "HD2CT_API_URL": self.url + "/async-bootstrap",
+                "HD2CT_MODEL": "fake-model",
+                "HD2CT_API_KEY": "fake-api-key",
+            },
+            "__registry_delay_ms": 100,
+        }
+        asynchronous = self.run_environment_child(
+            delayed_registry,
+            actions=[
+                {"op": "submit", "token": "async-first", "body_hex": "6869"},
+                {"op": "poll", "token": "async-first"},
+                {"op": "concurrent_submit", "tokens": ["async-second", "async-third"]},
+                {"op": "wait", "token": "async-first"},
+                {"op": "wait", "token": "async-second"},
+                {"op": "wait", "token": "async-third"},
+            ],
+        )
+        self.assertEqual(asynchronous["bootstrap_count"], 1)
+        self.assertEqual(asynchronous["actions"][0]["accepted"], 1)
+        self.assertLess(asynchronous["actions"][0]["elapsed_ms"], 200.0)
+        self.assertIsNone(asynchronous["actions"][1]["result"])
+        self.assertEqual(asynchronous["actions"][2]["accepted"], [1, 1])
+        self.assertEqual(asynchronous["actions"][3]["result"], "OK\n你好，绝地潜兵。")
+        self.assertEqual(asynchronous["actions"][4]["result"], "OK\n你好，绝地潜兵。")
+        self.assertEqual(asynchronous["actions"][5]["result"], "OK\n你好，绝地潜兵。")
 
         self.state.clear()
         cached = self.run_child(
@@ -1285,6 +1420,86 @@ class NativeHttpWorkerTests(unittest.TestCase):
         self.assertEqual(cached["actions"][1]["result"], "OK\n你好，绝地潜兵。")
         self.assertEqual(cached["actions"][3]["result"], "OK\n你好，绝地潜兵。")
         self.assertEqual(len(self.state.paths), 1)
+
+        self.state.clear()
+        cancel_all = self.run_environment_child(
+            {
+                "user": {
+                    "HD2CT_API_URL": self.url + "/cancel-all",
+                    "HD2CT_MODEL": "fake-model",
+                    "HD2CT_API_KEY": "fake-api-key",
+                },
+                "__lock_hold_ms": 1000,
+            },
+            actions=[
+                {"op": "submit", "token": "cancel-all-old", "body_hex": "6869"},
+                {"op": "hold_lock"},
+                {"op": "cancel_all"},
+                {"op": "release_lock"},
+                {"op": "submit", "token": "cancel-all-new", "body_hex": "6869"},
+                {"op": "poll", "token": "cancel-all-old"},
+                {"op": "wait", "token": "cancel-all-new"},
+            ],
+        )
+        self.assertTrue(cancel_all["actions"][1]["held"])
+        self.assertEqual(cancel_all["actions"][2]["cancelled"], 1)
+        self.assertEqual(cancel_all["actions"][4]["accepted"], 1)
+        self.assertIsNone(cancel_all["actions"][5]["result"])
+        self.assertEqual(cancel_all["actions"][6]["result"], "OK\n你好，绝地潜兵。")
+
+        self.state.clear()
+        failed_worker = self.run_environment_child(
+            {
+                "user": {
+                    "HD2CT_API_URL": self.url + "/worker-failure",
+                    "HD2CT_MODEL": "fake-model",
+                    "HD2CT_API_KEY": "fake-api-key",
+                },
+                "__worker_failure": True,
+            },
+            actions=[
+                {"op": "submit", "token": "worker-failure", "body_hex": "6869"},
+                {"op": "wait", "token": "worker-failure"},
+            ],
+        )
+        self.assertEqual(failed_worker["status"], 4)
+        self.assertEqual(failed_worker["actions"][1]["result"], "ERR\nSERVICE_ERROR")
+        self.assertEqual(self.state.paths, [])
+
+        for failure_case, injected_failure in (
+            ("bootstrap", {"__bootstrap_create_failure": True}),
+            ("second-worker", {"__worker_create_failure_at": 2}),
+        ):
+            with self.subTest(thread_creation_failure=failure_case):
+                self.state.clear()
+                thread_creation_failure = self.run_environment_child(
+                    {
+                        "user": {
+                            "HD2CT_API_URL": self.url + "/thread-create-failure",
+                            "HD2CT_MODEL": "fake-model",
+                            "HD2CT_API_KEY": "fake-api-key",
+                        },
+                        **injected_failure,
+                    },
+                    actions=[
+                        {"op": "submit", "token": f"{failure_case}-failure-one",
+                         "body_hex": "6869"},
+                        {"op": "wait", "token": f"{failure_case}-failure-one"},
+                        {"op": "cancel", "token": f"{failure_case}-failure-one"},
+                        {"op": "submit", "token": f"{failure_case}-failure-two",
+                         "body_hex": "6869"},
+                        {"op": "wait", "token": f"{failure_case}-failure-two"},
+                    ],
+                )
+                self.assertEqual(thread_creation_failure["status"], 4)
+                self.assertEqual(thread_creation_failure["actions"][0]["accepted"], 1)
+                self.assertEqual(thread_creation_failure["actions"][1]["result"],
+                                 "ERR\nSERVICE_ERROR")
+                self.assertEqual(thread_creation_failure["actions"][2]["cancelled"], 1)
+                self.assertEqual(thread_creation_failure["actions"][3]["accepted"], 1)
+                self.assertEqual(thread_creation_failure["actions"][4]["result"],
+                                 "ERR\nSERVICE_ERROR")
+                self.assertEqual(self.state.paths, [])
 
         self.state.clear()
         self.state.delay = 0.5

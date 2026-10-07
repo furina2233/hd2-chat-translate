@@ -534,7 +534,8 @@ local ERROR_MESSAGES = {
     RATE_LIMITED = "请求太频繁，请稍后再试",
     BACKOFF = "请稍后重试",
     INVALID_URL = "接口地址无效",
-    INVALID_CONFIG = "模型配置无效",
+    MISSING_CONFIG = "翻译配置不完整",
+    INVALID_CONFIG = "翻译配置无效",
     INTERNAL = "翻译服务异常",
     UNSUPPORTED_SERVICE = "暂不支持此翻译服务",
     AUTH_INVALID = "翻译凭据或签名无效",
@@ -581,11 +582,12 @@ end
 
 local function parse_response(raw)
     if type(raw) ~= "string" or #raw > MAX_RESPONSE_BYTES then return "invalid" end
+    if raw == "SKIP\n" then return "skip" end
     local prefix = raw:sub(1, 3)
-    if prefix == "OK\n" or prefix == "MT\n" then
+    if prefix == "OK\n" then
         local text = raw:sub(4)
         if not M.valid_text(text, M.MAX_TRANSLATION_BYTES) then return "invalid" end
-        return prefix == "MT\n" and "machine" or "ok", text
+        return "ok", text
     end
     if raw:sub(1, 4) == "ERR\n" and #raw > 4 then return "error", raw:sub(5) end
     return "invalid"
@@ -638,8 +640,8 @@ local function process_one_pending(state)
             elseif kind == "error" then
                 bump(state, "translation_errors")
                 set_error_display(state, item, text)
-            elseif kind == "ok" and text == item.source_body then
-                terminal_response_failure(state, item, "translation_unchanged")
+            elseif kind == "skip" then
+                finish_item(state, item)
                 return
             else
                 item.translation = text

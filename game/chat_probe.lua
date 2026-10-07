@@ -1049,9 +1049,6 @@ local function initialize_probe()
     local translate_owned_tokens = {}
     local translate_file_sequence = 0
     local native_transport_api
-    local native_init_status
-    local native_last_status
-    local native_disabled = false
 
     local MAX_OBSERVER_ADDRESS = 0x7fffffffffff
     local MAX_OBSERVER_READ = 16 * 1024
@@ -1761,13 +1758,7 @@ local function initialize_probe()
             translate_heartbeat_next_poll = observer_now + 250
             translate_cached_heartbeat = nil
             if native_transport_api then
-                local status_ok, status = pcall(native_transport_api.last_status)
-                if status_ok and status ~= nil then native_last_status = status end
-                local enabled_ok, enabled = pcall(native_transport_api.enabled)
-                if enabled_ok and native_init_status == 0 and enabled then
-                    translate_cached_heartbeat = string.format("HD2CT1 %.0f\n", observer_now)
-                end
-                pcall(native_transport_api.retry_cancels, 4)
+                translate_cached_heartbeat = string.format("HD2CT1 %.0f\n", observer_now)
             end
             observer_translate_heartbeat_is_fresh(translate_cached_heartbeat)
             return translate_cached_heartbeat
@@ -1821,14 +1812,13 @@ local function initialize_probe()
         if STANDALONE_ENABLED then
             if not TRANSLATE_ENABLED or not translate_heartbeat_fresh
                 or not observer_translate_valid_token(token)
-                or not native_transport_api or native_init_status ~= 0
+                or not native_transport_api
                 or type(body) ~= "string" or #body == 0 or #body > TRANSLATE_MAX_REQUEST_BYTES
                 or not translate_core or type(translate_core.valid_text) ~= "function"
                 or not translate_core.valid_text(body, TRANSLATE_MAX_REQUEST_BYTES) then
                 return false
             end
             local ok, submitted = pcall(function()
-                native_transport_api.retry_cancels(4)
                 return native_transport_api.submit(token, body)
             end)
             if not ok then return false, "SUBMIT_EXCEPTION" end
@@ -1871,8 +1861,7 @@ local function initialize_probe()
 
     local function observer_translate_read_response(token)
         if STANDALONE_ENABLED then
-            if not observer_translate_valid_token(token) or not native_transport_api
-                or native_init_status ~= 0 then
+            if not observer_translate_valid_token(token) or not native_transport_api then
                 return nil
             end
             local ok, response = pcall(native_transport_api.response, token)
@@ -1890,7 +1879,9 @@ local function initialize_probe()
 
     local function observer_translate_cancel(token)
         if STANDALONE_ENABLED then
-            if not observer_translate_valid_token(token) or not native_transport_api then return false end
+            if not native_transport_api then return false end
+            if token == nil then return native_transport_api.cancel(nil) == true end
+            if not observer_translate_valid_token(token) then return false end
             return native_transport_api.cancel(token) == true
         end
         if not translate_owned_tokens[token] or not observer_translate_valid_token(token) then return false end
@@ -2432,14 +2423,6 @@ local function initialize_probe()
                 end
             end
         end
-        if STANDALONE_ENABLED then
-            if observer_translate_safe_count(native_init_status, 4) then
-                report.native_init_status = native_init_status
-            end
-            if observer_translate_safe_count(native_last_status, 65535) then
-                report.native_last_status = native_last_status
-            end
-        end
         return report
     end
 
@@ -2708,19 +2691,10 @@ local function initialize_probe()
         })
         if STANDALONE_ENABLED then
             native_transport_api = nil
-            native_init_status = nil
-            native_last_status = nil
-            native_disabled = false
             if target_verified == true and native_http_loader then
-                local load_ok, api, init_status = pcall(native_http_loader.load)
+                local load_ok, api = pcall(native_http_loader.load)
                 if load_ok and type(api) == "table" then
                     native_transport_api = api
-                    local initialized = tonumber(init_status)
-                    native_init_status = observer_translate_safe_count(initialized, 4) and initialized or 2
-                    local last = api.last_status()
-                    native_last_status = tonumber(last)
-                else
-                    native_init_status = 2
                 end
             end
         end
@@ -2860,14 +2834,13 @@ local function initialize_probe()
         return true
     end
 
-    local function observer_translate_disable_native()
-        if not STANDALONE_ENABLED or native_disabled then return end
-        native_disabled = true
-        if native_transport_api then pcall(native_transport_api.disable) end
+    local function observer_translate_cleanup_native()
+        if not STANDALONE_ENABLED or not native_transport_api then return end
+        pcall(native_transport_api.cancel, nil)
     end
 
     local function observer_finish_translation_with_error(reason)
-        observer_translate_disable_native()
+        observer_translate_cleanup_native()
         if translate_state and translate_core and type(translate_core.manifest) == "function" then
             local manifest_ok, manifest = pcall(translate_core.manifest, translate_state)
             if manifest_ok and type(manifest) == "table" then
@@ -2953,7 +2926,7 @@ local function initialize_probe()
             local step_ok, done = pcall(translate_core.step, translate_state)
             if not step_ok then return observer_finish_translation_with_error("internal_error") end
             if observer_faulted then return observer_finish_translation_with_error("adapter_error") end
-            if done == true then observer_translate_disable_native() end
+            if done == true then observer_translate_cleanup_native() end
             return done == true
         end
         if not observer_state then return true end

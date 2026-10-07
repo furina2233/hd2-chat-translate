@@ -40,7 +40,8 @@ enum {
     HD2CT_STATUS_MISSING_CONFIG = 1,
     HD2CT_STATUS_INVALID_CONFIG = 2,
     HD2CT_STATUS_DISABLED = 3,
-    HD2CT_STATUS_WORKER_FAILURE = 4
+    HD2CT_STATUS_WORKER_FAILURE = 4,
+    HD2CT_STATUS_UNSUPPORTED_SERVICE = 5
 };
 
 enum {
@@ -138,7 +139,6 @@ int hd2ct_parse_timeout(const char *value, uint32_t *timeout_out);
 /* 服务选择、适配器描述及共享签名与表单工具。 */
 uint32_t hd2ct_select_adapter(const char *url, const char *model);
 const HD2CT_Adapter *hd2ct_adapter_for_id(uint32_t adapter_id);
-const char *hd2ct_success_prefix(uint32_t adapter_id);
 const char *hd2ct_provider_error_code(uint32_t adapter_id, const char *code);
 int hd2ct_form_add(HD2CT_FormBuffer *form, const char *name,
                    const char *value, size_t value_length);

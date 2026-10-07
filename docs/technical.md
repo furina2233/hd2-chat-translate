@@ -17,7 +17,7 @@
 
 | 文件 | 职责 |
 | --- | --- |
-| [client.h](../native/client.h) | Lua 使用的九个公开 ABI 函数 |
+| [client.h](../native/client.h) | 提交、轮询、取消三个公开任务接口 |
 | [internal.h](../native/internal.h) | 模块间的私有类型、上限与函数声明 |
 | [client.c](../native/client.c) | 配置初始化、线程生命周期及集中管理的队列、缓存、限流状态 |
 | [common.c](../native/common.c) | UTF-8、文本、JSON 与结果格式的共用工具 |
@@ -49,7 +49,7 @@
 
 ## 配置与 HTTP/JSON 协议
 
-原生模块在初始化时读取 Windows 持久环境变量：先读 HKCU\Environment，再读 HKLM\SYSTEM\CurrentControlSet\Control\Session Manager\Environment。若用户变量存在，即使值为空或无效，也不回退到系统变量；不读取进程继承值。每次游戏启动只初始化一次。
+首次有效提交由原生客户端启动一次后台初始化，读取 Windows 持久环境变量：先读 HKCU\Environment，再读 HKLM\SYSTEM\CurrentControlSet\Control\Session Manager\Environment。若用户变量存在，即使值为空或无效，也不回退到系统变量；不读取进程继承值。每个进程只初始化一次，配置和启用状态完全由 C 管理。
 
 HD2CT_MODEL 非空时选择 AI 翻译；缺失、为空或仅含空白时选择机器翻译，按 URL 中忽略大小写的 google、baidu、youdao 依次匹配。已支持服务需要 HD2CT_API_URL 与 HD2CT_API_KEY，百度、有道还需要 HD2CT_APP_ID。HD2CT_TIMEOUT_SECONDS 可选，默认为 20 秒、有效范围 1–120；HD2CT_ENABLED 可选，默认为 1，允许值为 0 或 1。模型名最多 256 字节，密钥与应用 ID 各最多 4096 字节，URL 最多 2048 字节。密钥保存在进程内供请求使用，停用或初始化失败时会清零。
 
@@ -57,11 +57,25 @@ AI 适配器把地址根路径补全为 /chat/completions，或把精确的 /v1�
 
 AI Chat Completions 请求 JSON 含 model、temperature=0、reasoning_effort="none"、response_format.type=json_object 及 system/user 两条 messages。每次请求都显式指定思考强度为 none。聊天正文单独放在 user message；提示词常量 HD2CT_SYSTEM_PROMPT 位于 [native/adapter/chat_completions.c](../native/adapter/chat_completions.c)。它要求中文原样保留、其他语言翻为简短自然的简体中文，并要求 JSON 仅含 is_chinese 和 translation。当前规则包含常见缩写、游戏术语和敌名映射，例如 Charger=牛、Spore Charger=孢子牛；不对 gg 或 ggs 加特例。
 
-响应读取 Chat Completions 的 choices[0].message.content，并要求其为只含 is_chinese(bool) 与 translation(string) 的 JSON 对象。若 is_chinese 为 true，原文直接作为结果；否则 translation 必须是合法 UTF-8、非空且不超过 16,384 字节。
+响应读取 Chat Completions 的 choices[0].message.content，并要求其为只含 is_chinese(bool) 与 translation(string) 的 JSON 对象。若 is_chinese 为 true，C 向 Lua 返回保持原文结果；否则 translation 必须是合法 UTF-8、非空且不超过 16,384 字节。AI 的译文与原文相同时也由 C 决定保持原文。
+
+## 原生任务接口
+
+ABI 2 的 DLL 只导出三个函数，签名见 [client.h](../native/client.h)：
+
+| 接口 | 语义 |
+| --- | --- |
+| `HD2CT_Submit(token, body, bytes)` | 校验并接收任务，返回 1 表示入队；无效参数、重复 token、队列已满或锁忙返回 0。首次提交触发后台初始化，调用方不等待配置读取或网络请求。 |
+| `HD2CT_Poll(token, out, capacity, written)` | 非阻塞轮询；返回 1 时写入结果，written 不含末尾 NUL。未完成、token 不存在、锁忙或缓冲区不足返回 0。读取结果后由调用方取消该 token 以释放槽位。 |
+| `HD2CT_Cancel(token)` | 取消任务或释放已完成槽位；token 不存在也返回 1，单项取消遇锁忙返回 0，可重试。传入 NULL 取消全部当前任务，锁忙时由 C 记录并延后处理，保留服务配置与工作线程。 |
+
+结果统一为 `OK\n译文`、精确的 `SKIP\n` 或 `ERR\n固定错误码`。Lua 对 OK 组合“原文 + 换行 + 译文： + 译文”，对 SKIP 保留原文并结束任务，对 ERR 显示短提示，不依据翻译方式或文本相等作决定。显式停用返回 SKIP；缺少配置、配置无效和后台初始化失败经 Poll 返回固定错误，已接收任务不因这些失败而丢失。
+
+后台初始化在普通线程中执行，不在 DllMain 中读取注册表或执行网络工作。初始化完成后，有效服务启动两个 WinHTTP worker；停用或无效配置不启动网络服务。Lua 的心跳只表示传输模块已加载且本地时钟有效。异常、结束或复用 Lua 实例时，通过取消接口清理任务；C 服务生命周期和环境变量开关独立管理。
 
 ## 翻译适配器
 
-原生客户端用 AI、机器翻译两个基适配器组织具体适配器；基适配器负责共同的配置要求及路径规则，具体适配器负责请求构造、认证、接口路径与响应解析。WinHTTP 传输、工作线程、缓存、限流、超时、取消和队列共用。AI 成功结果为 `OK\n...`，机器成功结果为 `MT\n...`，失败为 `ERR\n固定错误码`。ABI 仍为 1，保留原来的九个导出函数。游戏端使用 InitializeEnvironment 获取完整配置；四参数 InitializeConfig 支持 AI/Google，百度、有道缺少应用 ID 时返回缺少配置。
+原生客户端用 AI、机器翻译两个基适配器组织具体适配器；基适配器负责共同的配置要求及路径规则，具体适配器负责请求构造、认证、接口路径与响应解析。WinHTTP 传输、工作线程、缓存、限流、超时、取消和队列共用。服务选型、凭据、配置校验和是否输出译文均由 C 处理；Lua 使用统一的三个任务接口。
 
 | 适配器 | 协议与认证 | 成功响应 |
 | --- | --- | --- |
@@ -71,11 +85,11 @@ AI Chat Completions 请求 JSON 含 model、temperature=0、reasoning_effort="no
 
 有道 input 按 Unicode 码点计数：最多 20 个码点时为完整 q，否则为前 10 个码点、十进制码点总数、后 10 个码点。签名使用尚未 URL 编码的 UTF-8 文本，表单各字段随后编码；curtime 为 UTC Unix 秒。签名及随机 salt 使用 Windows BCrypt。
 
-机器翻译不发送 AI 提示词；Google 省略 source 参数启用自动检测，百度、有道使用 from=auto。有道 strict=true 保证按指定目标处理，避免默认自动中译英。成功结果保留服务实际返回的译文，不按源语言字段替换为原文。MT 前缀在 HTTP 成功和缓存命中时均保留，Lua 强制组合双语显示，即使译文与原文相同；OK 前缀仍按 AI 的原文相等规则跳过回写。
+机器翻译不发送 AI 提示词；Google 省略 source 参数启用自动检测，百度、有道使用 from=auto。有道 strict=true 保证按指定目标处理，避免默认自动中译英。成功结果保留服务实际返回的译文，不按源语言字段替换为原文，即使译文与原文相同也返回 OK。缓存保存完整的 OK 或 SKIP 结果，命中时保持同一显示决定。
 
 三家文本接口的公开文档没有给出自动检测同语种时可用于确定源文本为中文的专用错误码。[Google 文档](https://docs.cloud.google.com/translate/docs/languages)的同语言限制位于 AutoML 自定义模型范围，不能用于断言 Basic v2 的自动检测行为；百度 58001、有道 102 都可能表示其他不支持的语言。因此按实际响应判断成功或失败，通用语言错误显示短提示，不据此吞掉消息。同语种服务端响应需用有效凭据另行实测，离线回环只验证适配器解析与显示规则。
 
-未知机器翻译服务保持初始化就绪，让新消息扫描与错误显示继续运行；收到消息后返回 UNSUPPORTED_SERVICE，不发 HTTP 请求，不占用限流或缓存错误。已支持服务的缺少配置、格式无效、显式禁用仍分别使用原有初始化状态。机器服务的错误码映射为固定短提示，响应原文、签名、密钥及堆栈不进入聊天或状态报告。
+未知机器翻译服务收到消息后返回 UNSUPPORTED_SERVICE，不发 HTTP 请求，不占用限流或缓存错误。已支持服务缺少配置时返回 MISSING_CONFIG，配置无效时返回 INVALID_CONFIG，后台初始化失败时返回 SERVICE_ERROR；显式禁用返回 SKIP。错误码映射为固定短提示，响应原文、签名、密钥及堆栈不进入聊天或状态报告。
 
 ## 调度、队列与数据上限
 
@@ -101,9 +115,9 @@ AI Chat Completions 请求 JSON 含 model、temperature=0、reasoning_effort="no
 
 ## 原生模块安全加载
 
-DLL 随 Lua addon 嵌入并校验字节长度、SHA-256 和 ABI version 1。Lua 侧将其写入 %LOCALAPPDATA%\HD2ChatTranslate\native 目录，DLL 文件名使用其 SHA-256 值；再从已核验的绝对路径使用 LoadLibraryExW，并将依赖搜索限制在 System32。路径及文件句柄拒绝 reparse point；文件大小和哈希在加载前复核。后台线程启动后，原生模块使用 GetModuleHandleExW pin 保持至游戏进程结束。
+DLL 随 Lua addon 嵌入，构建器要求 metadata 的 ABI 为 2，并核验字节长度和 SHA-256。Lua 侧将其写入 %LOCALAPPDATA%\HD2ChatTranslate\native 目录，DLL 文件名使用其 SHA-256 值；再从已核验的绝对路径使用 LoadLibraryExW，并将依赖搜索限制在 System32，按三个任务接口解析函数。路径及文件句柄拒绝 reparse point；文件大小和哈希在加载前复核。C 在启动后台初始化前使用 GetModuleHandleExW pin 保持至游戏进程结束。
 
-Lua FFI 的 BY_HANDLE_FILE_INFORMATION 定义为 52 字节，并核对 dwVolumeSerialNumber 偏移 28、nFileSizeHigh 偏移 32、nFileIndexLow 偏移 48。原生构建限定为 Win64 PE、九个 ABI 导出和 Windows 系统依赖，不接受额外 MinGW 运行库。
+Lua FFI 的 BY_HANDLE_FILE_INFORMATION 定义为 52 字节，并核对 dwVolumeSerialNumber 偏移 28、nFileSizeHigh 偏移 32、nFileIndexLow 偏移 48。原生构建限定为 Win64 PE、三个任务接口导出和 Windows 系统依赖，不接受额外 MinGW 运行库。
 
 状态报告位于 %LOCALAPPDATA%\HD2ChatTranslate\mailbox\chat-translate-{session}.json。独立模式下请求与响应经进程内 API 传递，mailbox 只用于状态报告。首次与停止时写入报告，运行期间最多每 5 秒更新一次；通过临时文件完整写入、关闭后替换，不强制刷盘。
 
@@ -123,17 +137,7 @@ Arsenal manifest Guid 固定为 a741d044-972b-4dc5-b08e-1a68441e1d7f，patch 文
 
 独立包报告 schema_version 为 1，mode 为 standalone，transport 为 in_process_winhttp。status 可为 target_unverified、inactive、baseline、ready、pending、applying 或 stopped；code 仅包含固定状态原因。counters 是白名单计数，不含聊天正文、URL 或密钥。常见字段包括 submitted、translations_ready、error_displays_ready、apply_confirmed、slot_event_filtered；pending_count 上限为 32，baseline_remaining 上限为 64。
 
-native_init_status 的含义：
-
-| 值 | 含义 |
-| --- | --- |
-| 0 | 初始化就绪 |
-| 1 | 缺少配置 |
-| 2 | 配置或模块无效 |
-| 3 | 翻译已关闭 |
-| 4 | 后台 worker 初始化失败 |
-
-native_last_status 为 0 表示成功，100–599 表示 HTTP 状态码；1000 为网络或其他传输错误，1001 为响应格式错误，1002 为超时，1003 为本机频率限制，1004 为退避，1005 为过期，1007 为响应过大，1008 为地址无效，1009 为内部错误。
+C 管理的配置、启用及初始化状态不作为 Lua 报告字段。任务失败通过响应短码显示，报告保留消息、队列和布局的白名单计数。
 
 layout.verified 表示布局签名门禁通过；reflows_confirmed、rows_positioned 和 failures 分别记录已确认重排、已确认定位与布局失败次数。预算不足的 deferred 不计入 failures。last_failure_code 表示最近失败阶段：
 

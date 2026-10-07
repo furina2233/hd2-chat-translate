@@ -213,11 +213,3 @@ const HD2CT_Adapter *hd2ct_adapter_for_id(uint32_t adapter_id)
     }
     return NULL;
 }
-
-const char *hd2ct_success_prefix(uint32_t adapter_id)
-{
-    const HD2CT_Adapter *adapter = hd2ct_adapter_for_id(adapter_id);
-    if (adapter != NULL && adapter->base != NULL &&
-        adapter->base->family == HD2CT_FAMILY_AI) return "OK\n";
-    return "MT\n";
-}

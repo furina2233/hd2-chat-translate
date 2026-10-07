@@ -66,7 +66,7 @@ def validate_native_dll(dll: bytes, metadata: bytes) -> tuple[int, str]:
         type(meta.get("schema_version")) is not int
         or meta.get("schema_version") != 1
         or type(meta.get("abi_version")) is not int
-        or meta.get("abi_version") != 1
+        or meta.get("abi_version") != 2
         or meta.get("filename") != "hd2ct_http.dll"
         or meta.get("architecture") != "x86_64"
         or isinstance(meta.get("size"), bool)
@@ -130,6 +130,7 @@ def standalone_module_source(template: bytes, dll: bytes, metadata: bytes) -> by
     if len(template) + size * 2 > MAX_SOURCE_BYTES:
         raise ValueError("DLL hex载荷将超过512 KiB Lua源码上限；请将结果交由主控评估")
     payload = (
+        "local HD2CT_ABI_VERSION = 2\n"
         f"local HD2CT_DLL_SIZE = {size}\n"
         f'local HD2CT_DLL_SHA256 = "{digest}"\n'
         f'local HD2CT_DLL_HEX = "{dll.hex()}"\n'
@@ -441,9 +442,9 @@ def addon_files(
         ]
     )
     description = (
-        "进程内聊天翻译：通过游戏内原生网络线程将聊天交给配置的大模型，"
-        "非中文消息显示为原文、换行和“译文：”加译文；中文保持原样，请求失败显示简短提示，不广播译文。"
-        "读取 HD2CT_API_URL、HD2CT_MODEL、HD2CT_API_KEY、"
+        "进程内聊天翻译：通过游戏内原生网络线程将聊天交给配置的翻译服务，"
+        "翻译成功后显示原文、换行和“译文：”加译文；服务判断无需回写时保持原文，请求失败显示简短提示，不广播译文。"
+        "读取 HD2CT_API_URL、HD2CT_MODEL、HD2CT_API_KEY、HD2CT_APP_ID、"
         "HD2CT_TIMEOUT_SECONDS（默认20）和 HD2CT_ENABLED（默认1）环境变量。"
         "内置 Bingus Shared Loader v18，无需另外导入。Arsenal 默认优先级请放在列表最底；"
         "启用 first-mod-wins 时请放在列表最顶。"

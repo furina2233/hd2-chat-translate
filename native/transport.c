@@ -300,7 +300,7 @@ void hd2ct_http_worker_request(HINTERNET session, const HD2CT_WorkerJob *job,
                                  result + 3u, result_bytes, &failure_code)) {
         goto cleanup;
     }
-    memcpy(result, hd2ct_success_prefix(job->adapter_id), 3u);
+    memcpy(result, "OK\n", 3u);
     *result_bytes += 3u;
     result[*result_bytes] = '\0';
     *successful = 1;

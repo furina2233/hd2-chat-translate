@@ -499,20 +499,14 @@ assert(not translate_heartbeat_fresh)
 
 -- standalone transport的Lua错误需局部捕获，不得触发memory adapter全局故障锁。
 STANDALONE_ENABLED = true
-native_init_status = 0
 translate_heartbeat_fresh = true
 native_transport_api = {
-    last_status = function() error("PRIVATE_NATIVE_STATUS") end,
-    enabled = function() return true end,
-    retry_cancels = function() error("PRIVATE_NATIVE_CANCEL") end,
     submit = function() return true end,
     response = function() return "OK\ntranslated" end,
+    cancel = function() return true end,
 }
 local standalone_heartbeat = translate_adapter.heartbeat()
 assert(standalone_heartbeat == "HD2CT1 4101\n" and not observer_faulted)
-local retry_error_submit, retry_error_code = translate_adapter.submit(token, "Standalone body")
-assert(retry_error_submit == false and retry_error_code == "SUBMIT_EXCEPTION" and not observer_faulted)
-native_transport_api.retry_cancels = function() return 0 end
 native_transport_api.submit = function() error("PRIVATE_NATIVE_SUBMIT") end
 local submit_error_result, submit_error_code = translate_adapter.submit(token, "Standalone body")
 assert(submit_error_result == false and submit_error_code == "SUBMIT_EXCEPTION" and not observer_faulted)
@@ -1199,7 +1193,6 @@ local json_core = core
 local translate_core = dofile([[TRANSLATE_CORE_PATH]])
 local STANDALONE_ENABLED = false
 local native_transport_api
-local native_init_status = 0
 local TRANSLATE_ENABLED = false
 local DISPLAY_TEST_ENABLED = false
 local observer_display_native_gate = false

@@ -26,7 +26,7 @@ typedef struct HD2CT_CacheEntry {
     uint32_t source_bytes;
     uint32_t result_bytes;
     char source[HD2CT_MAX_SOURCE + 1u];
-    char result[HD2CT_MAX_TRANSLATION + 1u];
+    char result[HD2CT_MAX_RESULT + 1u];
 } HD2CT_CacheEntry;
 
 static SRWLOCK g_lock = SRWLOCK_INIT;
@@ -45,14 +45,21 @@ static char g_app_id[HD2CT_MAX_KEY + 1u];
 static volatile LONG g_adapter_id = HD2CT_ADAPTER_UNKNOWN;
 static volatile LONG g_enabled;
 static volatile LONG g_status = HD2CT_STATUS_MISSING_CONFIG;
+/* 0 尚未启动，1 后台配置中，2 初始化已结束。 */
 static volatile LONG g_initialized;
-static volatile LONG g_disabled_terminal;
 static volatile LONG g_clear_key_pending;
+static volatile LONG g_cancel_all_pending;
 static volatile LONG g_failure_count;
 static volatile LONG64 g_backoff_until;
 static volatile LONG g_last_request_status;
 static volatile LONG g_request_status_set;
 static LONG g_stop_workers;
+#ifdef HD2CT_TESTING
+static volatile LONG g_test_fail_worker_session;
+static volatile LONG g_test_bootstrap_count;
+static volatile LONG g_test_fail_bootstrap_create;
+static volatile LONG g_test_fail_worker_create_at;
+#endif
 
 static void hd2ct_clear_key_locked(void)
 {
@@ -94,8 +101,7 @@ static uint32_t hd2ct_status_from_result(const char *result, uint32_t bytes)
         }
         return 1000u;
     }
-    if (bytes >= 3u && (memcmp(result, "OK\n", 3u) == 0 ||
-                        memcmp(result, "MT\n", 3u) == 0)) {
+    if (bytes >= 3u && memcmp(result, "OK\n", 3u) == 0) {
         return 0u;
     }
     if (hd2ct_error_is(result, bytes, "TIMEOUT")) {
@@ -125,17 +131,12 @@ static uint32_t hd2ct_status_from_result(const char *result, uint32_t bytes)
     return 1000u;
 }
 
-static uint32_t hd2ct_init_return(void)
-{
-    return (uint32_t)InterlockedCompareExchange(&g_status, 0, 0);
-}
-
 static int hd2ct_pin_module(void)
 {
     HMODULE module = NULL;
     return GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
                               GET_MODULE_HANDLE_EX_FLAG_PIN,
-                              (LPCWSTR)(const void *)&HD2CT_InitializeEnvironment,
+                              (LPCWSTR)(const void *)&HD2CT_Submit,
                               &module) != 0;
 }
 
@@ -145,9 +146,10 @@ static void hd2ct_zero_key(void)
     SecureZeroMemory(g_app_id, sizeof(g_app_id));
 }
 
-static void hd2ct_cancel_active_locked(void)
+static void hd2ct_apply_cancel_all_locked(void)
 {
     uint32_t i;
+    if (InterlockedExchange(&g_cancel_all_pending, 0) == 0) return;
     for (i = 0; i < HD2CT_JOB_COUNT; ++i) {
         if (g_jobs[i].state == HD2CT_SLOT_ACTIVE) {
             g_jobs[i].cancelled = 1;
@@ -164,13 +166,32 @@ static void hd2ct_fail_init(uint32_t status)
 {
     InterlockedExchange(&g_enabled, 0);
     InterlockedExchange(&g_status, (LONG)status);
+    InterlockedExchange(&g_initialized, 2);
     if (TryAcquireSRWLockExclusive(&g_lock)) {
+        hd2ct_apply_cancel_all_locked();
         hd2ct_clear_key_locked();
         ReleaseSRWLockExclusive(&g_lock);
     } else {
         InterlockedExchange(&g_clear_key_pending, 1);
         WakeAllConditionVariable(&g_work_available);
     }
+    WakeAllConditionVariable(&g_work_available);
+}
+
+static void hd2ct_mark_worker_failure(void)
+{
+    InterlockedExchange(&g_enabled, 0);
+    InterlockedExchange(&g_status, HD2CT_STATUS_WORKER_FAILURE);
+    InterlockedExchange(&g_initialized, 2);
+    InterlockedExchange(&g_stop_workers, 1);
+    if (TryAcquireSRWLockExclusive(&g_lock)) {
+        hd2ct_apply_cancel_all_locked();
+        hd2ct_clear_key_locked();
+        ReleaseSRWLockExclusive(&g_lock);
+    } else {
+        InterlockedExchange(&g_clear_key_pending, 1);
+    }
+    WakeAllConditionVariable(&g_work_available);
 }
 
 static uint64_t hd2ct_job_deadline(const HD2CT_WorkerJob *job)
@@ -262,6 +283,7 @@ int hd2ct_take_rate_slot(void)
     uint32_t retained = 0;
     int allowed = 0;
     AcquireSRWLockExclusive(&g_lock);
+    hd2ct_apply_cancel_all_locked();
     for (i = 0; i < g_rate_count; ++i) {
         if (now - g_rate_times[i] < HD2CT_RATE_PERIOD_MS) {
             g_rate_times[retained++] = g_rate_times[i];
@@ -280,11 +302,13 @@ int hd2ct_job_cancelled(uint32_t slot_index, uint64_t serial)
 {
     int cancelled = 1;
     AcquireSRWLockExclusive(&g_lock);
+    hd2ct_apply_cancel_all_locked();
     if (slot_index < HD2CT_JOB_COUNT &&
         g_jobs[slot_index].serial == serial &&
         g_jobs[slot_index].state == HD2CT_SLOT_ACTIVE &&
         g_jobs[slot_index].cancelled == 0 &&
-        InterlockedCompareExchange(&g_enabled, 0, 0) != 0) {
+        InterlockedCompareExchange(&g_enabled, 0, 0) != 0 &&
+        InterlockedCompareExchange(&g_status, 0, 0) == HD2CT_STATUS_READY) {
         cancelled = 0;
     }
     ReleaseSRWLockExclusive(&g_lock);
@@ -297,6 +321,7 @@ static void hd2ct_complete_job(const HD2CT_WorkerJob *job, const char *result,
 {
     HD2CT_JobSlot *slot;
     AcquireSRWLockExclusive(&g_lock);
+    hd2ct_apply_cancel_all_locked();
     if (job->slot_index >= HD2CT_JOB_COUNT) {
         ReleaseSRWLockExclusive(&g_lock);
         return;
@@ -306,16 +331,36 @@ static void hd2ct_complete_job(const HD2CT_WorkerJob *job, const char *result,
         ReleaseSRWLockExclusive(&g_lock);
         return;
     }
-    if (slot->timeout_reported != 0 &&
-        InterlockedCompareExchange(&g_enabled, 0, 0) != 0) {
+    if (slot->timeout_reported != 0) {
         slot->state = HD2CT_SLOT_DONE;
         ReleaseSRWLockExclusive(&g_lock);
         return;
     }
-    if (slot->cancelled != 0 || InterlockedCompareExchange(&g_enabled, 0, 0) == 0) {
+    if (slot->cancelled != 0) {
         SecureZeroMemory(slot, sizeof(*slot));
         ReleaseSRWLockExclusive(&g_lock);
         return;
+    }
+    if (InterlockedCompareExchange(&g_status, 0, 0) != HD2CT_STATUS_READY ||
+        InterlockedCompareExchange(&g_enabled, 0, 0) == 0) {
+        uint32_t status = (uint32_t)InterlockedCompareExchange(&g_status, 0, 0);
+        const char *code = status == HD2CT_STATUS_DISABLED ? NULL :
+                           status == HD2CT_STATUS_MISSING_CONFIG ? "MISSING_CONFIG" :
+                           status == HD2CT_STATUS_INVALID_CONFIG ? "INVALID_CONFIG" :
+                           status == HD2CT_STATUS_UNSUPPORTED_SERVICE ? "UNSUPPORTED_SERVICE" :
+                           "SERVICE_ERROR";
+        if (status == HD2CT_STATUS_DISABLED) {
+            result = "SKIP\n";
+            result_bytes = 5u;
+        } else {
+            hd2ct_build_error(slot->result, sizeof(slot->result),
+                              &slot->result_bytes, code);
+            slot->state = HD2CT_SLOT_DONE;
+            ReleaseSRWLockExclusive(&g_lock);
+            return;
+        }
+        successful = 0;
+        remember_success = 0;
     }
     if (result_bytes > HD2CT_MAX_RESULT) {
         result = "ERR\nINTERNAL";
@@ -323,10 +368,10 @@ static void hd2ct_complete_job(const HD2CT_WorkerJob *job, const char *result,
         successful = 0;
         remember_success = 0;
     }
-    if (successful && remember_success && result_bytes >= 3u &&
-        (memcmp(result, "OK\n", 3u) == 0 ||
-         memcmp(result, "MT\n", 3u) == 0)) {
-        hd2ct_put_cache_locked(job, result + 3u, result_bytes - 3u);
+    if (successful && remember_success &&
+        ((result_bytes >= 3u && memcmp(result, "OK\n", 3u) == 0) ||
+         (result_bytes == 5u && memcmp(result, "SKIP\n", 5u) == 0))) {
+        hd2ct_put_cache_locked(job, result, result_bytes);
     }
     memcpy(slot->result, result, result_bytes);
     slot->result[result_bytes] = '\0';
@@ -340,6 +385,7 @@ static void hd2ct_set_slot_request_deadline(const HD2CT_WorkerJob *job,
 {
     HD2CT_JobSlot *slot;
     AcquireSRWLockExclusive(&g_lock);
+    hd2ct_apply_cancel_all_locked();
     if (job->slot_index < HD2CT_JOB_COUNT) {
         slot = &g_jobs[job->slot_index];
         if (slot->serial == job->serial &&
@@ -362,7 +408,10 @@ static int hd2ct_take_next_job_locked(HD2CT_WorkerJob *copy)
             sequence = g_jobs[i].serial;
         }
     }
-    if (selected == HD2CT_JOB_COUNT) {
+    if (selected == HD2CT_JOB_COUNT ||
+        InterlockedCompareExchange(&g_initialized, 0, 0) != 2 ||
+        InterlockedCompareExchange(&g_status, 0, 0) != HD2CT_STATUS_READY ||
+        InterlockedCompareExchange(&g_enabled, 0, 0) == 0) {
         return 0;
     }
     g_jobs[selected].state = HD2CT_SLOT_ACTIVE;
@@ -414,11 +463,6 @@ static void hd2ct_process_job(HINTERNET session, const HD2CT_WorkerJob *job)
     cache_hit = hd2ct_find_cache_locked(job, result, &result_bytes);
     ReleaseSRWLockExclusive(&g_lock);
     if (cache_hit) {
-        const char *prefix = hd2ct_success_prefix(job->adapter_id);
-        memmove(result + 3u, result, result_bytes);
-        memcpy(result, prefix, 3u);
-        result_bytes += 3u;
-        result[result_bytes] = '\0';
         hd2ct_complete_job(job, result, result_bytes, 1, 0);
         SecureZeroMemory(result, sizeof(result));
         return;
@@ -461,6 +505,14 @@ static void hd2ct_process_job(HINTERNET session, const HD2CT_WorkerJob *job)
         hd2ct_error_is(result, result_bytes, "RATE_LIMITED")) {
         hd2ct_set_request_status(hd2ct_status_from_result(result, result_bytes));
     }
+    if (successful && job->adapter_id == HD2CT_ADAPTER_AI &&
+        result_bytes >= 3u && memcmp(result, "OK\n", 3u) == 0 &&
+        result_bytes - 3u == job->source_bytes &&
+        memcmp(result + 3u, job->source, job->source_bytes) == 0) {
+        memcpy(result, "SKIP\n", 5u);
+        result[5] = '\0';
+        result_bytes = 5u;
+    }
     hd2ct_complete_job(job, result, result_bytes, successful, successful);
     SecureZeroMemory(result, sizeof(result));
 }
@@ -468,56 +520,48 @@ static void hd2ct_process_job(HINTERNET session, const HD2CT_WorkerJob *job)
 static unsigned __stdcall hd2ct_worker_main(void *parameter)
 {
     HINTERNET session = NULL;
-    uint32_t adapter_id;
     (void)parameter;
-    adapter_id = (uint32_t)InterlockedCompareExchange(&g_adapter_id, 0, 0);
-    if (adapter_id != HD2CT_ADAPTER_UNKNOWN) {
-        session = WinHttpOpen(L"HD2 Chat Translate/1", WINHTTP_ACCESS_TYPE_DEFAULT_PROXY,
-                              WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
-        if (session == NULL) {
-            InterlockedExchange(&g_enabled, 0);
-            InterlockedExchange(&g_status, HD2CT_STATUS_WORKER_FAILURE);
-            InterlockedExchange(&g_stop_workers, 1);
-            AcquireSRWLockExclusive(&g_lock);
-            hd2ct_clear_key_locked();
-            hd2ct_cancel_active_locked();
-            ReleaseSRWLockExclusive(&g_lock);
-            WakeAllConditionVariable(&g_work_available);
-            return 0;
-        }
+#ifdef HD2CT_TESTING
+    if (InterlockedCompareExchange(&g_test_fail_worker_session, 0, 0) != 0) {
+        hd2ct_mark_worker_failure();
+        return 0;
+    }
+#endif
+    session = WinHttpOpen(L"HD2 Chat Translate/1", WINHTTP_ACCESS_TYPE_DEFAULT_PROXY,
+                          WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
+    if (session == NULL) {
+        hd2ct_mark_worker_failure();
+        return 0;
     }
     for (;;) {
         HD2CT_WorkerJob job;
         int have_job = 0;
         AcquireSRWLockExclusive(&g_lock);
+        hd2ct_apply_cancel_all_locked();
         if (InterlockedCompareExchange(&g_clear_key_pending, 0, 0) != 0 ||
             InterlockedCompareExchange(&g_enabled, 0, 0) == 0) {
             hd2ct_clear_key_locked();
         }
-        if (InterlockedCompareExchange(&g_enabled, 0, 0) == 0) {
-            hd2ct_cancel_active_locked();
-        }
         while (!have_job && InterlockedCompareExchange(&g_stop_workers, 0, 0) == 0) {
-            if (InterlockedCompareExchange(&g_enabled, 0, 0) != 0) {
+            if (InterlockedCompareExchange(&g_initialized, 0, 0) == 2 &&
+                InterlockedCompareExchange(&g_status, 0, 0) == HD2CT_STATUS_READY &&
+                InterlockedCompareExchange(&g_enabled, 0, 0) != 0) {
                 have_job = hd2ct_take_next_job_locked(&job);
                 if (have_job) {
                     break;
                 }
             }
             SleepConditionVariableSRW(&g_work_available, &g_lock, INFINITE, 0);
+            hd2ct_apply_cancel_all_locked();
             if (InterlockedCompareExchange(&g_clear_key_pending, 0, 0) != 0 ||
                 InterlockedCompareExchange(&g_enabled, 0, 0) == 0) {
                 hd2ct_clear_key_locked();
-            }
-            if (InterlockedCompareExchange(&g_enabled, 0, 0) == 0) {
-                hd2ct_cancel_active_locked();
             }
         }
         if (InterlockedCompareExchange(&g_stop_workers, 0, 0) != 0) {
             if (InterlockedCompareExchange(&g_clear_key_pending, 0, 0) != 0 ||
                 InterlockedCompareExchange(&g_enabled, 0, 0) == 0) {
                 hd2ct_clear_key_locked();
-                hd2ct_cancel_active_locked();
             }
             ReleaseSRWLockExclusive(&g_lock);
             break;
@@ -537,12 +581,18 @@ static int hd2ct_start_workers(void)
     uintptr_t workers[2] = {0, 0};
     unsigned i;
     for (i = 0; i < 2u; ++i) {
+#ifdef HD2CT_TESTING
+        if (InterlockedCompareExchange(&g_test_fail_worker_create_at, 0, 0) ==
+            (LONG)(i + 1u)) {
+            workers[i] = 0;
+        } else {
+            workers[i] = _beginthreadex(NULL, 0, hd2ct_worker_main, NULL, 0, NULL);
+        }
+#else
         workers[i] = _beginthreadex(NULL, 0, hd2ct_worker_main, NULL, 0, NULL);
+#endif
         if (workers[i] == 0) {
-            InterlockedExchange(&g_enabled, 0);
-            InterlockedExchange(&g_status, HD2CT_STATUS_WORKER_FAILURE);
-            InterlockedExchange(&g_stop_workers, 1);
-            WakeAllConditionVariable(&g_work_available);
+            hd2ct_mark_worker_failure();
             if (workers[0] != 0) {
                 CloseHandle((HANDLE)workers[0]);
             }
@@ -567,11 +617,6 @@ static int hd2ct_commit_config(const char *url, const char *model,
     size_t app_id_length = hd2ct_bounded_length(app_id, HD2CT_MAX_KEY);
     int signed_machine = adapter != NULL && adapter->app_id_required;
     *failure_status = HD2CT_STATUS_INVALID_CONFIG;
-    if (InterlockedCompareExchange(&g_disabled_terminal, 0, 0) != 0) {
-        *failure_status = HD2CT_STATUS_DISABLED;
-        InterlockedExchange(&g_status, HD2CT_STATUS_DISABLED);
-        return 0;
-    }
     if (timeout_seconds < 1u || timeout_seconds > 120u ||
         url_length > HD2CT_MAX_URL || model_length > HD2CT_MAX_MODEL ||
         key_length > HD2CT_MAX_KEY || app_id_length > HD2CT_MAX_KEY) {
@@ -609,29 +654,12 @@ static int hd2ct_commit_config(const char *url, const char *model,
     }
     InterlockedExchange(&g_adapter_id, (LONG)adapter_id);
     g_timeout_seconds = timeout_seconds;
-    if (!hd2ct_pin_module()) {
-        hd2ct_zero_key();
-        *failure_status = HD2CT_STATUS_WORKER_FAILURE;
-        return 0;
-    }
-    InterlockedExchange(&g_status, HD2CT_STATUS_READY);
-    InterlockedExchange(&g_enabled, 1);
-    if (!hd2ct_start_workers()) {
-        *failure_status = HD2CT_STATUS_WORKER_FAILURE;
-        return 0;
-    }
     *failure_status = HD2CT_STATUS_READY;
     return 1;
 }
 
-uint32_t HD2CT_ABIVersion(void)
+static unsigned __stdcall hd2ct_bootstrap_main(void *parameter)
 {
-    return 1u;
-}
-
-uint32_t HD2CT_InitializeEnvironment(void)
-{
-    LONG expected = 0;
     char url[HD2CT_MAX_URL + 1u] = {0};
     char model[HD2CT_MAX_MODEL + 1u] = {0};
     char api_key[HD2CT_MAX_KEY + 1u] = {0};
@@ -645,14 +673,13 @@ uint32_t HD2CT_InitializeEnvironment(void)
     int timeout_present = 0;
     int enabled_present = 0;
     uint32_t timeout = 20u;
-    int committed;
+    uint32_t adapter_id;
     uint32_t failure_status = HD2CT_STATUS_INVALID_CONFIG;
-    if (InterlockedCompareExchange(&g_disabled_terminal, 0, 0) != 0) {
-        return hd2ct_init_return();
-    }
-    if (InterlockedCompareExchange(&g_initialized, 1, expected) != expected) {
-        return hd2ct_init_return();
-    }
+    int committed;
+    (void)parameter;
+#ifdef HD2CT_TESTING
+    InterlockedIncrement(&g_test_bootstrap_count);
+#endif
     if (!hd2ct_read_environment_value(L"HD2CT_ENABLED", enabled_text,
                                       sizeof(enabled_text), &enabled_present)) {
         hd2ct_fail_init(HD2CT_STATUS_INVALID_CONFIG);
@@ -677,14 +704,15 @@ uint32_t HD2CT_InitializeEnvironment(void)
         hd2ct_fail_init(HD2CT_STATUS_INVALID_CONFIG);
         goto done;
     }
-    if (hd2ct_select_adapter(url, model) != HD2CT_ADAPTER_UNKNOWN) {
+    adapter_id = hd2ct_select_adapter(url, model);
+    if (adapter_id != HD2CT_ADAPTER_UNKNOWN) {
         if (!hd2ct_read_environment_value(L"HD2CT_API_KEY", api_key,
                                          sizeof(api_key), &key_present)) {
             hd2ct_fail_init(HD2CT_STATUS_INVALID_CONFIG);
             goto done;
         }
-        if (hd2ct_select_adapter(url, model) == HD2CT_ADAPTER_BAIDU ||
-            hd2ct_select_adapter(url, model) == HD2CT_ADAPTER_YOUDAO) {
+        if (adapter_id == HD2CT_ADAPTER_BAIDU ||
+            adapter_id == HD2CT_ADAPTER_YOUDAO) {
             if (!hd2ct_read_environment_value(L"HD2CT_APP_ID", app_id,
                                               sizeof(app_id), &app_id_present)) {
                 hd2ct_fail_init(HD2CT_STATUS_INVALID_CONFIG);
@@ -696,6 +724,21 @@ uint32_t HD2CT_InitializeEnvironment(void)
                                     &failure_status);
     if (!committed) {
         hd2ct_fail_init(failure_status);
+        goto done;
+    }
+    if (adapter_id == HD2CT_ADAPTER_UNKNOWN) {
+        hd2ct_fail_init(HD2CT_STATUS_UNSUPPORTED_SERVICE);
+        goto done;
+    }
+    InterlockedExchange(&g_status, HD2CT_STATUS_READY);
+    InterlockedExchange(&g_enabled, 1);
+    if (!hd2ct_start_workers()) {
+        hd2ct_fail_init(HD2CT_STATUS_WORKER_FAILURE);
+        goto done;
+    }
+    if (InterlockedCompareExchange(&g_status, 0, 0) != HD2CT_STATUS_WORKER_FAILURE) {
+        InterlockedExchange(&g_initialized, 2);
+        WakeAllConditionVariable(&g_work_available);
     }
 
 done:
@@ -703,44 +746,34 @@ done:
     SecureZeroMemory(app_id, sizeof(app_id));
     SecureZeroMemory(timeout_text, sizeof(timeout_text));
     SecureZeroMemory(enabled_text, sizeof(enabled_text));
-    return hd2ct_init_return();
+    SecureZeroMemory(url, sizeof(url));
+    SecureZeroMemory(model, sizeof(model));
+    return 0;
 }
 
-uint32_t HD2CT_InitializeConfig(const char *url, const char *model,
-                                const char *api_key, uint32_t timeout_seconds)
+static void hd2ct_start_bootstrap(void)
 {
-    LONG expected = 0;
-    int committed;
-    uint32_t failure_status = HD2CT_STATUS_INVALID_CONFIG;
-    if (InterlockedCompareExchange(&g_disabled_terminal, 0, 0) != 0) {
-        return hd2ct_init_return();
+    uintptr_t thread;
+    LONG prior = InterlockedCompareExchange(&g_initialized, 1, 0);
+    if (prior != 0) return;
+    if (!hd2ct_pin_module()) {
+        hd2ct_fail_init(HD2CT_STATUS_WORKER_FAILURE);
+        return;
     }
-    if (InterlockedCompareExchange(&g_initialized, 1, expected) != expected) {
-        return hd2ct_init_return();
+#ifdef HD2CT_TESTING
+    if (InterlockedCompareExchange(&g_test_fail_bootstrap_create, 0, 0) != 0) {
+        thread = 0;
+    } else {
+        thread = _beginthreadex(NULL, 0, hd2ct_bootstrap_main, NULL, 0, NULL);
     }
-    if (hd2ct_bounded_length(url, HD2CT_MAX_URL) > HD2CT_MAX_URL ||
-        hd2ct_bounded_length(model, HD2CT_MAX_MODEL) > HD2CT_MAX_MODEL ||
-        hd2ct_bounded_length(api_key, HD2CT_MAX_KEY) > HD2CT_MAX_KEY) {
-        hd2ct_fail_init(HD2CT_STATUS_INVALID_CONFIG);
-        return hd2ct_init_return();
+#else
+    thread = _beginthreadex(NULL, 0, hd2ct_bootstrap_main, NULL, 0, NULL);
+#endif
+    if (thread == 0) {
+        hd2ct_fail_init(HD2CT_STATUS_WORKER_FAILURE);
+        return;
     }
-    committed = hd2ct_commit_config(url, model, api_key, "", timeout_seconds,
-                                    &failure_status);
-    if (!committed) hd2ct_fail_init(failure_status);
-    return hd2ct_init_return();
-}
-
-uint32_t HD2CT_IsEnabled(void)
-{
-    return InterlockedCompareExchange(&g_enabled, 0, 0) != 0 ? 1u : 0u;
-}
-
-uint32_t HD2CT_LastStatus(void)
-{
-    if (InterlockedCompareExchange(&g_request_status_set, 0, 0) != 0) {
-        return (uint32_t)InterlockedCompareExchange(&g_last_request_status, 0, 0);
-    }
-    return hd2ct_init_return();
+    CloseHandle((HANDLE)thread);
 }
 
 uint32_t HD2CT_Submit(const char *token, const char *body, uint32_t bytes)
@@ -749,7 +782,7 @@ uint32_t HD2CT_Submit(const char *token, const char *body, uint32_t bytes)
     uint32_t i;
     uint32_t free_slot = HD2CT_JOB_COUNT;
     uint64_t serial;
-    if (!HD2CT_IsEnabled() || body == NULL || bytes == 0 ||
+    if (body == NULL || bytes == 0 ||
         bytes > HD2CT_MAX_SOURCE || !hd2ct_valid_token(token, &token_length) ||
         !hd2ct_valid_utf8((const unsigned char *)body, bytes, 1)) {
         return 0u;
@@ -757,9 +790,9 @@ uint32_t HD2CT_Submit(const char *token, const char *body, uint32_t bytes)
     if (!TryAcquireSRWLockExclusive(&g_lock)) {
         return 0u;
     }
-    if (!HD2CT_IsEnabled()) {
-        ReleaseSRWLockExclusive(&g_lock);
-        return 0u;
+    hd2ct_apply_cancel_all_locked();
+    if (InterlockedCompareExchange(&g_clear_key_pending, 0, 0) != 0) {
+        hd2ct_clear_key_locked();
     }
     for (i = 0; i < HD2CT_JOB_COUNT; ++i) {
         if (g_jobs[i].state != HD2CT_SLOT_FREE &&
@@ -791,7 +824,27 @@ uint32_t HD2CT_Submit(const char *token, const char *body, uint32_t bytes)
     g_jobs[free_slot].source_bytes = bytes;
     WakeConditionVariable(&g_work_available);
     ReleaseSRWLockExclusive(&g_lock);
+    hd2ct_start_bootstrap();
     return 1u;
+}
+
+static void hd2ct_store_initial_result_locked(HD2CT_JobSlot *slot)
+{
+    uint32_t status = (uint32_t)InterlockedCompareExchange(&g_status, 0, 0);
+    const char *code;
+    if (status == HD2CT_STATUS_DISABLED) {
+        memcpy(slot->result, "SKIP\n", 5u);
+        slot->result[5] = '\0';
+        slot->result_bytes = 5u;
+    } else {
+        code = status == HD2CT_STATUS_MISSING_CONFIG ? "MISSING_CONFIG" :
+               status == HD2CT_STATUS_INVALID_CONFIG ? "INVALID_CONFIG" :
+               status == HD2CT_STATUS_UNSUPPORTED_SERVICE ? "UNSUPPORTED_SERVICE" :
+               "SERVICE_ERROR";
+        hd2ct_build_error(slot->result, sizeof(slot->result),
+                          &slot->result_bytes, code);
+    }
+    slot->state = HD2CT_SLOT_DONE;
 }
 
 uint32_t HD2CT_Poll(const char *token, char *out, uint32_t capacity, uint32_t *written)
@@ -802,15 +855,15 @@ uint32_t HD2CT_Poll(const char *token, char *out, uint32_t capacity, uint32_t *w
         *written = 0;
     }
     if (out == NULL || written == NULL || capacity == 0 ||
-        !hd2ct_valid_token(token, &token_length) || !HD2CT_IsEnabled()) {
+        !hd2ct_valid_token(token, &token_length)) {
         return 0u;
     }
     if (!TryAcquireSRWLockExclusive(&g_lock)) {
         return 0u;
     }
-    if (!HD2CT_IsEnabled()) {
-        ReleaseSRWLockExclusive(&g_lock);
-        return 0u;
+    hd2ct_apply_cancel_all_locked();
+    if (InterlockedCompareExchange(&g_clear_key_pending, 0, 0) != 0) {
+        hd2ct_clear_key_locked();
     }
     for (i = 0; i < HD2CT_JOB_COUNT; ++i) {
         HD2CT_JobSlot *slot = &g_jobs[i];
@@ -827,6 +880,16 @@ uint32_t HD2CT_Poll(const char *token, char *out, uint32_t capacity, uint32_t *w
                                   &slot->result_bytes, "TIMEOUT");
                 hd2ct_set_request_status(1002u);
                 hd2ct_record_failure();
+            }
+            if (slot->state != HD2CT_SLOT_DONE &&
+                InterlockedCompareExchange(&g_initialized, 0, 0) == 2 &&
+                InterlockedCompareExchange(&g_status, 0, 0) != HD2CT_STATUS_READY) {
+                hd2ct_store_initial_result_locked(slot);
+            } else if (slot->state != HD2CT_SLOT_DONE &&
+                       GetTickCount64() >= slot->submitted_ms + HD2CT_JOB_TTL_MS) {
+                hd2ct_build_error(slot->result, sizeof(slot->result),
+                                  &slot->result_bytes, "EXPIRED");
+                slot->state = HD2CT_SLOT_DONE;
             }
             if (slot->state != HD2CT_SLOT_DONE && slot->timeout_reported == 0) {
                 break;
@@ -850,11 +913,28 @@ uint32_t HD2CT_Cancel(const char *token)
 {
     size_t token_length;
     uint32_t i;
+    if (token == NULL) {
+        if (!TryAcquireSRWLockExclusive(&g_lock)) {
+            InterlockedExchange(&g_cancel_all_pending, 1);
+            WakeAllConditionVariable(&g_work_available);
+            return 1u;
+        }
+        hd2ct_apply_cancel_all_locked();
+        InterlockedExchange(&g_cancel_all_pending, 1);
+        hd2ct_apply_cancel_all_locked();
+        ReleaseSRWLockExclusive(&g_lock);
+        WakeAllConditionVariable(&g_work_available);
+        return 1u;
+    }
     if (!hd2ct_valid_token(token, &token_length)) {
         return 1u;
     }
     if (!TryAcquireSRWLockExclusive(&g_lock)) {
         return 0u;
+    }
+    hd2ct_apply_cancel_all_locked();
+    if (InterlockedCompareExchange(&g_clear_key_pending, 0, 0) != 0) {
+        hd2ct_clear_key_locked();
     }
     for (i = 0; i < HD2CT_JOB_COUNT; ++i) {
         HD2CT_JobSlot *slot = &g_jobs[i];
@@ -875,22 +955,4 @@ uint32_t HD2CT_Cancel(const char *token)
     }
     ReleaseSRWLockExclusive(&g_lock);
     return 1u;
-}
-
-void HD2CT_Disable(void)
-{
-    InterlockedExchange(&g_disabled_terminal, 1);
-    InterlockedExchange(&g_enabled, 0);
-    InterlockedExchange(&g_stop_workers, 1);
-    if (hd2ct_init_return() != HD2CT_STATUS_WORKER_FAILURE) {
-        InterlockedExchange(&g_status, HD2CT_STATUS_DISABLED);
-    }
-    if (TryAcquireSRWLockExclusive(&g_lock)) {
-        hd2ct_clear_key_locked();
-        hd2ct_cancel_active_locked();
-        ReleaseSRWLockExclusive(&g_lock);
-    } else {
-        InterlockedExchange(&g_clear_key_pending, 1);
-    }
-    WakeAllConditionVariable(&g_work_available);
 }

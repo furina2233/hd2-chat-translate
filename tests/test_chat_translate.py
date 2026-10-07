@@ -126,7 +126,7 @@ local function one_baseline_and_chinese_case()
     step(env)
     local token = env.submit_calls[1] and env.submit_calls[1].token
     assert(token, "Chinese source text was not submitted for model detection")
-    env.responses[token] = "OK\n你好，队友"
+    env.responses[token] = "SKIP\n"
     step(env)
     for _ = 1, 17 do step(env) end
     local manifest = core.manifest(env.state)
@@ -301,22 +301,26 @@ local function one_response_bounds_case()
     local too_long = run_response_case(string.rep("T", 16385))
     local nul = run_response_case("first" .. string.char(0) .. "last")
     local malformed = run_response_case(string.char(0xf0, 0x80, 0x80, 0x80))
-    local machine_same = run_response_case("same source", "same source", "MT\n")
-    local machine_different = run_response_case("machine translation", "source", "MT\n")
-    local machine_invalid = run_response_case(string.char(0xf0, 0x80, 0x80, 0x80), "source", "MT\n")
-    local machine_empty = run_response_case("", "source", "MT\n")
-    local machine_maximum = run_response_case(string.rep("M", 16384), "source", "MT\n")
+    local machine_same = run_response_case("same source", "same source", "OK\n")
+    local machine_different = run_response_case("machine translation", "source", "OK\n")
+    local machine_invalid = run_response_case(string.char(0xf0, 0x80, 0x80, 0x80), "source", "OK\n")
+    local machine_empty = run_response_case("", "source", "OK\n")
+    local machine_maximum = run_response_case(string.rep("M", 16384), "source", "OK\n")
+    local exact_skip = run_response_case("", "source", "SKIP\n")
+    local skip_with_text = run_response_case("unexpected", "source", "SKIP\n")
     return {valid_max = valid_max, maximum_display = maximum_display,
         too_long = too_long, nul = nul, malformed = malformed,
         machine_same = machine_same, machine_different = machine_different,
         machine_invalid = machine_invalid, machine_empty = machine_empty,
-        machine_maximum = machine_maximum}
+        machine_maximum = machine_maximum, exact_skip = exact_skip,
+        skip_with_text = skip_with_text}
 end
 
 
 local function one_error_message_case()
     return {
         http401 = run_error_response_case("HTTP_401"),
+        missing_config = run_error_response_case("MISSING_CONFIG"),
         network = run_error_response_case("NETWORK"),
         bad_response = run_error_response_case("BAD_RESPONSE"),
         unsupported_service = run_error_response_case("UNSUPPORTED_SERVICE"),
@@ -421,6 +425,10 @@ class ChatTranslateCoreTests(unittest.TestCase):
         self.assertEqual(machine_maximum["applied"], 1)
         self.assertEqual(machine_maximum["applied_bytes"], len("source\n译文：".encode("utf-8")) + 16384)
         self.assertEqual(machine_maximum["invalid"], 0)
+        self.assertEqual(responses["exact_skip"]["applied"], 0)
+        self.assertEqual(responses["exact_skip"]["invalid"], 0)
+        self.assertEqual(responses["exact_skip"]["translations_ready"], 0)
+        self.assertEqual(responses["skip_with_text"]["invalid"], 1)
 
     def test_build_gate_baselines_old_chat_and_preserves_unchanged_chinese(self) -> None:
         result = self._scenarios()
@@ -434,7 +442,7 @@ class ChatTranslateCoreTests(unittest.TestCase):
         self.assertEqual(baseline["submits"], 1)
         self.assertEqual(baseline["submitted_body"], "你好，队友")
         self.assertEqual(baseline["applies"], 0)
-        self.assertEqual(baseline["unchanged"], 1)
+        self.assertEqual(baseline["unchanged"], 0)
         self.assertEqual(baseline["cancels"], 1)
         self.assertGreaterEqual(baseline["duplicates"], 1)
         for private in ("你好，队友", "PRIVATE_ADAPTER_PROOF"):
@@ -471,6 +479,7 @@ class ChatTranslateCoreTests(unittest.TestCase):
         cases = result["error_messages"]
         expected = {
             "http401": "API 密钥无效",
+            "missing_config": "翻译配置不完整",
             "network": "网络连接失败",
             "bad_response": "返回内容无效",
             "unsupported_service": "暂不支持此翻译服务",

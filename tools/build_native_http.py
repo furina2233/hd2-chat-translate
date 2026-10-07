@@ -41,15 +41,9 @@ ALLOWED_IMPORTS = {
     "WINHTTP.DLL",
 }
 REQUIRED_EXPORTS = {
-    "HD2CT_ABIVersion",
-    "HD2CT_InitializeEnvironment",
-    "HD2CT_InitializeConfig",
-    "HD2CT_IsEnabled",
-    "HD2CT_LastStatus",
     "HD2CT_Submit",
     "HD2CT_Poll",
     "HD2CT_Cancel",
-    "HD2CT_Disable",
 }
 
 
@@ -191,12 +185,12 @@ def main() -> int:
             details.append(f"缺少：{', '.join(sorted(missing))}")
         if unexpected_exports:
             details.append(f"多出：{', '.join(sorted(unexpected_exports))}")
-        raise RuntimeError("DLL 导出必须恰好保留 9 个 ABI 名称；" + "；".join(details))
+        raise RuntimeError("DLL 导出必须恰好保留 3 个 ABI 名称；" + "；".join(details))
     compiler_version = run([str(compiler), "--version"]).splitlines()[0]
     binary = output.read_bytes()
     manifest = {
         "schema_version": 1,
-        "abi_version": 1,
+        "abi_version": 2,
         "filename": "hd2ct_http.dll",
         "size": len(binary),
         "sha256": hashlib.sha256(binary).hexdigest(),
