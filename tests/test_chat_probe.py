@@ -195,6 +195,9 @@ local outgoing_windows = {
     {rva = 0x185f000, size = 0x2000},
     {rva = 0xbeaf00, size = 0x1800},
     {rva = 0xbde300, size = 0x1000},
+    {rva = 0x1327f00, size = 0x2000},
+    {rva = 0x174fa00, size = 0x800},
+    {rva = 0x20bba00, size = 0x1800},
 }
 local function in_window(rva, length)
     for index, window in ipairs(outgoing_windows) do
@@ -389,6 +392,9 @@ class LuaCoreTests(unittest.TestCase):
             (0x185F000, 0x2000),
             (0xBEAF00, 0x1800),
             (0xBDE300, 0x1000),
+            (0x1327F00, 0x2000),
+            (0x174FA00, 0x800),
+            (0x20BBA00, 0x1800),
         ]
         self.assertEqual(
             [(item["rva"], item["size"]) for item in success_manifest["windows"]],
@@ -405,7 +411,8 @@ class LuaCoreTests(unittest.TestCase):
         self.assertLessEqual(success["max_read_request"], 1024)
         self.assertFalse(success["outside_query"])
         self.assertFalse(success["outside_read"])
-        self.assertEqual(success["total_read_bytes"], 4096 + sum(size for _, size in expected_windows))
+        self.assertEqual(sum(size for _, size in expected_windows), 47104)
+        self.assertEqual(success["total_read_bytes"], 4096 + 47104)
         self.assertEqual(
             [(item["rva"], item["size"], item["executable"]) for item in success["read_ranges"][:4]],
             [(offset, 1024, False) for offset in (0, 1024, 2048, 3072)],
@@ -426,16 +433,19 @@ class LuaCoreTests(unittest.TestCase):
         region_failure = outgoing["regionfailure"]["manifest"]
         self.assertEqual(region_failure["status"], "outgoing_probe_failed")
         self.assertEqual([window["status"] for window in region_failure["windows"]],
-                         ["complete", "failed", "not_attempted", "not_attempted"])
+                         ["complete", "failed", "not_attempted", "not_attempted",
+                          "not_attempted", "not_attempted", "not_attempted"])
         self.assertNotEqual(region_failure["windows"][1]["status"], "complete")
         gap_failure = outgoing["gapfailure"]["manifest"]
         self.assertEqual(gap_failure["status"], "outgoing_probe_failed")
         self.assertEqual([window["status"] for window in gap_failure["windows"]],
-                         ["failed", "not_attempted", "not_attempted", "not_attempted"])
+                         ["failed", "not_attempted", "not_attempted", "not_attempted",
+                          "not_attempted", "not_attempted", "not_attempted"])
         partial = outgoing["shortread"]["manifest"]
         self.assertEqual(partial["status"], "outgoing_probe_partial")
         self.assertEqual([window["status"] for window in partial["windows"]],
-                         ["partial", "not_attempted", "not_attempted", "not_attempted"])
+                         ["partial", "not_attempted", "not_attempted", "not_attempted",
+                          "not_attempted", "not_attempted", "not_attempted"])
         self.assertEqual(len(partial["windows"][0]["hex"]), 4096 * 2)
 
         entry_path = ROOT / "game" / "chat_probe.lua"
