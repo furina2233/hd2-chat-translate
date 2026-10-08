@@ -23,9 +23,20 @@ LAYOUT_FAKE_KERNEL = r'''
 local ffi = require("ffi")
 ffi.cdef[[typedef unsigned long long HD2Probe_U64;]]
 ffi.cdef[[typedef unsigned char HD2Probe_U8;]]
+local fake_clock_ms = 0
+local fake_clock_error = false
+local kernel = {GetTickCount64 = function()
+    if fake_clock_error then error("private fake clock failure") end
+    fake_clock_ms = fake_clock_ms + 1
+    return fake_clock_ms
+end}
 
 local memory = {}
 local read_counts = {}
+local geometry_read_starts = {}
+local geometry_read_calls = 0
+local geometry_read_bytes = 0
+local geometry_read_max = 0
 local query_calls = 0
 local region = {
     base = 0x100000, finish = 0x400000, allocation_base = 0x100000,
@@ -40,7 +51,8 @@ local throw_measure, throw_position, throw_setter, setter_returns_false
 local mutate_after_setter, mutate_after_position
 local current_message
 local observer_read_budget = 0
-local MAX_OBSERVER_READ = 16 * 1024
+local MAX_OBSERVER_READ = 256 * 1024
+local FULL_APPLY_READ_RESERVE = 224 * 1024
 local TRANSLATE_ENABLED = true
 local observer_display_native_gate = true
 local translate_heartbeat_fresh = true
@@ -71,18 +83,48 @@ local function float_bytes(value)
     return ffi.string(item, 4)
 end
 
+local function position_bytes(y)
+    local item = ffi.new("float[2]")
+    item[0] = 0
+    item[1] = y
+    return ffi.string(item, 8)
+end
+
 local function write_bytes(address, bytes)
     for index = 1, #bytes do memory[address + index - 1] = bytes:byte(index) end
 end
 
 local function read_bytes(address, length)
-    if read_failure and (read_failure_address == nil or address == read_failure_address) then
+    if read_failure and (read_failure_address == nil
+        or (read_failure_address >= address and read_failure_address < address + length)) then
         return nil, read_failure
     end
     if length > MAX_OBSERVER_READ - observer_read_budget then return nil, "budget_exhausted" end
     observer_read_budget = observer_read_budget + length
     read_counts[address] = (read_counts[address] or 0) + 1
-    if read_mutation then read_mutation(address, read_counts[address]) end
+    if geometry_read_starts[address] then
+        geometry_read_calls = geometry_read_calls + 1
+        geometry_read_bytes = geometry_read_bytes + length
+        geometry_read_max = math.max(geometry_read_max, length)
+    end
+    if read_mutation then
+        local matched = {}
+        for geometry_address in pairs(geometry_read_starts) do
+            if geometry_address >= address and geometry_address < address + length then
+                matched[#matched + 1] = geometry_address
+            end
+        end
+        table.sort(matched)
+        if #matched == 0 then matched[1] = address end
+        for _, current_address in ipairs(matched) do
+            local current_count = read_counts[current_address] or 0
+            if current_address ~= address then
+                current_count = current_count + 1
+                read_counts[current_address] = current_count
+            end
+            read_mutation(current_address, current_count)
+        end
+    end
     local output = {}
     for index = 0, length - 1 do
         local byte = memory[address + index]
@@ -127,6 +169,9 @@ local position_calls, measure_calls, setter_calls, setter_text, positioned = 0, 
 local function reset_case(config)
     config = config or {}
     memory, read_counts, positioned = {}, {}, {}
+    geometry_read_starts, geometry_read_calls, geometry_read_bytes, geometry_read_max = {}, 0, 0, 0
+    fake_clock_ms = 0
+    fake_clock_error = false
     query_calls = 0
     region.protect = config.protect or 0x04
     region.state = 0x1000
@@ -155,12 +200,18 @@ local function reset_case(config)
     local scales = config.scales or {1, 2, 0.5}
     local heights = config.heights or {20, 30, 70}
     local slots = {}
+    local initial_y = 0
+    local layout_gap = config.gap == nil and 5 or config.gap
     for index = 0, original_count - 1 do
         local slot = (original_head - index - 1) % 64
         slots[index + 1] = slot
         local row = manager + 0x4390 + slot * 0x3D8
+        write_bytes(row, string.rep("\0", 0x3D8))
+        geometry_read_starts[row + 0x10] = true
         write_bytes(row + 0x10, float_bytes(heights[index + 1] or 20)
             .. string.rep("\0", 0x20 - 0x10 - 4) .. float_bytes(scales[index + 1] or 1))
+        write_bytes(row + 0x3CC, position_bytes(initial_y))
+        initial_y = initial_y + (heights[index + 1] or 20) * (scales[index + 1] or 1) + layout_gap
     end
 
     local target_index = config.target_index or 0
@@ -237,6 +288,7 @@ local function reset_case(config)
             return true
         end,
         manager_for_root = function(value) return value + 0x14498 end,
+        now_ms = function() return tonumber(kernel.GetTickCount64()) end,
         measure = function(row)
             measure_calls = measure_calls + 1
             if throw_measure then error("private measure spy failure") end
@@ -341,14 +393,12 @@ reset_case({head = 1, target_index = 1, scales = {1, 0.5, 1.5}, heights = {25, 3
     measured_height = 90, gap = 4})
 result = apply_text()
 assert(result == "called_confirmed" and setter_calls == 1 and measure_calls == 1)
-assert(position_calls == 3 and positioned[1].row == manager + 0x4390)
-assert(positioned[2].row == manager + 0x4390 + 63 * 0x3D8)
-assert(positioned[3].row == manager + 0x4390 + 62 * 0x3D8)
-near(positioned[1].y, 0)
-near(positioned[2].y, 29)
-near(positioned[3].y, 78)
-near((function() local value = ffi.new("float[1]"); ffi.copy(value, read_bytes(positioned[1].row + 0x10, 4), 4); return tonumber(value[0]) end)(), 25)
-near((function() local value = ffi.new("float[1]"); ffi.copy(value, read_bytes(positioned[3].row + 0x10, 4), 4); return tonumber(value[0]) end)(), 60)
+assert(position_calls == 2 and positioned[1].row == manager + 0x4390 + 63 * 0x3D8)
+assert(positioned[2].row == manager + 0x4390 + 62 * 0x3D8)
+near(positioned[1].y, 29)
+near(positioned[2].y, 78)
+near((function() local value = ffi.new("float[1]"); ffi.copy(value, read_bytes(manager + 0x4390 + 0x10, 4), 4); return tonumber(value[0]) end)(), 25)
+near((function() local value = ffi.new("float[1]"); ffi.copy(value, read_bytes(positioned[2].row + 0x10, 4), 4); return tonumber(value[0]) end)(), 60)
 assert(read_bytes(manager + 0x13990, 4) == pack32(original_head))
 assert(read_bytes(manager + 0x139C0, 4) == pack32(original_count))
 
@@ -356,6 +406,36 @@ assert(read_bytes(manager + 0x139C0, 4) == pack32(original_count))
 reset_case({scales = {1, 1, 1}, heights = {30, 90, 25}, measured_height = 50})
 assert(apply_text() == "called_confirmed")
 assert(setter_calls == 1 and measure_calls == 1 and position_calls == 3)
+
+-- 高度未变时仍刷新目标行，其他缓存位置相同的行只做权限核验并跳过原生定位。
+reset_case({measured_height = 20})
+assert(apply_text() == "called_confirmed")
+local unchanged_position_stats = translate_layout.instance.stats()
+assert(position_calls == 1 and unchanged_position_stats.rows_positioned == 1
+    and unchanged_position_stats.positions_skipped == 2)
+assert(#positioned == 1 and positioned[1].row == target_row)
+assert(query_calls == 18, "reflow pure-read checks should use three fresh batches plus final per-row checks")
+assert(unchanged_position_stats.measure_last_ms == 1 and unchanged_position_stats.measure_max_ms == 1)
+assert(unchanged_position_stats.position_last_ms == 1 and unchanged_position_stats.position_max_ms == 1)
+local apply_timing_report = observer_translate_sanitize_report({status = "ready", counters = {}})
+assert(apply_timing_report.layout.apply_prepare_last_ms == 1
+    and apply_timing_report.layout.apply_verify_max_ms == 1
+    and apply_timing_report.layout.apply_setter_last_ms == 1
+    and apply_timing_report.layout.apply_verify_apply_last_ms == 1
+    and apply_timing_report.layout.apply_reflow_max_ms >= 1)
+assert(translate_layout.instance.record_timing("read_slot", 5))
+assert(not translate_layout.instance.record_timing("private_field", 99))
+assert(not translate_layout.instance.record_timing("response", math.huge))
+apply_timing_report = observer_translate_sanitize_report({status = "ready", counters = {}})
+assert(apply_timing_report.layout.read_slot_last_ms == 5
+    and apply_timing_report.layout.read_slot_max_ms == 5)
+
+-- 计时API异常时忽略计时，不改变正文setter或布局调用结果。
+reset_case({measured_height = 20})
+fake_clock_error = true
+assert(apply_text() == "called_confirmed")
+assert(setter_calls == 1 and measure_calls == 1 and position_calls == 1)
+fake_clock_error = false
 
 -- stale root/ring、head/count、行几何、只读页、无效浮点/count及预算不足都不回写。
 local function expect_preflight_failure(config, expected, mutate)
@@ -470,7 +550,7 @@ expect_preflight_failure({}, "deferred", function()
     read_failure = "budget_exhausted"
     read_failure_address = manager + 0x13990
 end)
-expect_preflight_failure({entry_budget = 2049}, "deferred")
+expect_preflight_failure({entry_budget = MAX_OBSERVER_READ - FULL_APPLY_READ_RESERVE + 1}, "deferred")
 
 local history_read_failure = expect_failure_diagnostic({}, "read_failed", 2, function()
     read_failure = "read_failed"
@@ -538,15 +618,21 @@ expect_heartbeat_failure(function()
     write_bytes(current_message.proof.entries_address + 2 * 0x18 + 20, pack32(0xDEADBEEF))
 end, "stale")
 
--- 完整64槽、最大14项map按fake-kernel实际读长计费；2048B旧预算加本次apply仍低于16KiB。
+-- 完整64槽、最大14项map按fake读长计费；四轮geometry各16个请求、单个span不超过4096B。
 reset_case({head = 0, count = 64, target_index = 0, entry_budget = 2048,
     measured_height = 40, gap = 5})
 result = apply_text()
 local full_history_budget = observer_read_budget
 assert(result == "called_confirmed" and setter_calls == 1 and measure_calls == 1)
-assert(position_calls == 64 and full_history_budget == 15129)
+assert(position_calls == 64 and full_history_budget == 200729,
+    "64-row position/read budget mismatch: " .. position_calls .. "/" .. full_history_budget)
+assert(geometry_read_calls == 64 and geometry_read_bytes == 190208)
+assert(geometry_read_max == 2972 and geometry_read_max <= 4096)
 assert(query_calls <= 1024, "64-row layout exceeded the range-query budget")
-assert(full_history_budget <= MAX_OBSERVER_READ and MAX_OBSERVER_READ - full_history_budget == 1255)
+assert(full_history_budget <= MAX_OBSERVER_READ and MAX_OBSERVER_READ - full_history_budget == 61415)
+local full_history_stats = translate_layout.instance.stats()
+assert(full_history_stats.rows_positioned == 64 and full_history_stats.positions_skipped == 0)
+assert(full_history_stats.position_last_ms == 64 and full_history_stats.position_max_ms == 64)
 assert(read_bytes(manager + 0x13990, 4) == pack32(original_head))
 assert(read_bytes(manager + 0x139C0, 4) == pack32(original_count))
 
@@ -624,6 +710,22 @@ assert(apply_text() == "called_unconfirmed")
 assert(setter_calls == 1 and measure_calls == 1 and position_calls == 1)
 observer_read_budget = 0
 assert(apply_text() == "disabled" and setter_calls == 1)
+
+-- 定位缓存读取失败时不调用原生position helper。
+reset_case({measured_height = 40})
+read_failure = "read_failed"
+read_failure_address = target_row + 0x3CC
+assert(apply_text() == "called_unconfirmed")
+assert(setter_calls == 1 and measure_calls == 1 and position_calls == 0)
+
+-- 缓存相同的非目标行仍须在跳过helper前重新验证权限。
+reset_case({measured_height = 20})
+local unchanged_older_row = manager + 0x4390 + 62 * 0x3D8
+read_mutation = function(address, count)
+    if address == unchanged_older_row + 0x3CC and count == 1 then region.protect = 0x02 end
+end
+assert(apply_text() == "called_unconfirmed")
+assert(setter_calls == 1 and measure_calls == 1 and position_calls == 1)
 
 -- 缺失或任一字节不同的函数签名会关闭factory；所有native spy都保持零调用。
 reset_case({verified = false})

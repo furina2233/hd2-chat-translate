@@ -223,10 +223,11 @@ function M.manifest(state)
     }
 end
 
-local function maybe_report(state, now_ms, force)
+local function maybe_report(state, now_ms, force, defer)
     local interval_elapsed = state.last_report_ms == nil
         or (now_ms >= state.last_report_ms and now_ms - state.last_report_ms >= M.REPORT_INTERVAL_MS)
     if not force and not interval_elapsed then return end
+    if not force and defer == true then return end
 
     state.last_report_ms = now_ms
     if type(state.adapter.output) ~= "function" then return end
@@ -610,18 +611,18 @@ end
 
 local function process_one_pending(state)
     local item = next_pending(state)
-    if not item then return end
+    if not item then return false end
 
     local now_ms = state.last_now_ms or 0
     if now_ms >= item.created_ms and now_ms - item.created_ms >= M.PENDING_TTL_MS then
         bump(state, "expired")
         finish_item(state, item)
-        return
+        return false
     end
 
     if item.display_text == nil then
         if item.next_response_poll_ms ~= nil and now_ms < item.next_response_poll_ms then
-            return
+            return false
         end
         item.next_response_poll_ms = add_saturated(now_ms, state.response_poll_ms)
         local ok, raw = pcall(state.adapter.response, item.token)
@@ -631,7 +632,7 @@ local function process_one_pending(state)
             set_error_display(state, item, "RESPONSE_EXCEPTION")
         elseif raw == nil then
             bump(state, "responses_waiting")
-            return
+            return false
         else
             local kind, text = parse_response(raw)
             if kind == "invalid" then
@@ -642,7 +643,7 @@ local function process_one_pending(state)
                 set_error_display(state, item, text)
             elseif kind == "skip" then
                 finish_item(state, item)
-                return
+                return false
             else
                 item.translation = text
                 item.display_text = item.source_body .. M.DISPLAY_SEPARATOR .. text
@@ -652,12 +653,12 @@ local function process_one_pending(state)
     end
 
     local active, fresh_now = ensure_active(state, true)
-    if not active then return end
+    if not active then return false end
     now_ms = fresh_now or state.last_now_ms or 0
     if now_ms >= item.created_ms and now_ms - item.created_ms >= M.PENDING_TTL_MS then
         bump(state, "expired")
         finish_item(state, item)
-        return
+        return false
     end
 
     set_status(state, "applying", nil)
@@ -672,7 +673,7 @@ local function process_one_pending(state)
     if not ok then
         bump(state, "adapter_errors")
         terminal_response_failure(state, item, "apply_errors")
-        return
+        return true
     end
 
     if result == "called_confirmed" then
@@ -701,6 +702,7 @@ local function process_one_pending(state)
         bump(state, "apply_errors")
         finish_item(state, item)
     end
+    return true
 end
 
 local function read_one_slot(state, slot)
@@ -1036,17 +1038,23 @@ function M.step(state)
     end
 
     bump(state, "active_steps")
-    process_one_pending(state)
+    local apply_entered = process_one_pending(state) == true
     if state.done then
         maybe_report(state, state.last_now_ms or 0, true)
         return true
     end
     if not state.heartbeat_active then
-        maybe_report(state, state.last_now_ms or 0, false)
+        maybe_report(state, state.last_now_ms or 0, false, apply_entered)
         return false
     end
 
     local now_ms = state.last_now_ms or 0
+    if apply_entered then
+        refresh_active_status(state)
+        maybe_report(state, now_ms, false, true)
+        return false
+    end
+
     local plan_pending = state.scan_plan_active and type(state.scan_plan_slots) == "table"
         and is_small_integer(state.scan_plan_index, 1, SLOT_COUNT + 1)
         and state.scan_plan_index <= #state.scan_plan_slots

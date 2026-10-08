@@ -279,8 +279,9 @@ capacity.responses["performance_session_2"] = "OK\ncapacity freed"
 step_at(capacity, 3210)
 local deferred_preserved = capacity.state.scan_plan_active and capacity.state.scan_plan_index == 1
 capacity.slot_status[5] = nil
+local deferred_retry_reads_before = capacity.read_count
 step_at(capacity, 3220)
-local deferred_retried = capacity.read_slots[#capacity.read_slots - 1] == 5
+local deferred_retried = capacity.read_count == deferred_retry_reads_before + 1
     and capacity.read_slots[#capacity.read_slots] == 5
     and not capacity.state.scan_plan_active
 
@@ -432,6 +433,47 @@ for _, fps in ipairs({60, 144, 240}) do
     end
 end
 
+local apply_frame = new_env()
+step_at(apply_frame, 0)
+apply_frame.state.baseline_active = false
+apply_frame.state.baseline_remaining = 0
+apply_frame.state.scan_owner_id = 17
+apply_frame.state.next_scan_ms = 5000
+apply_frame.state.scan_plan_active = true
+apply_frame.state.scan_plan_slots = {5, 6}
+apply_frame.state.scan_plan_index = 1
+seed_pending(apply_frame, 1)
+apply_frame.responses["performance_session_1"] = "OK\nlocalized"
+local apply_frame_reads_before = apply_frame.read_count
+step_at(apply_frame, 5000)
+local apply_frame_scan_deferred = apply_frame.read_count == apply_frame_reads_before
+    and apply_frame.state.scan_plan_active and apply_frame.state.scan_plan_index == 1
+    and apply_frame.state.next_scan_ms == 5000
+    and apply_frame.state.last_report_ms == 0 and #apply_frame.output_times == 1
+step_at(apply_frame, 5010)
+local scan_resumed_after_apply = apply_frame.read_count - apply_frame_reads_before == 2
+    and not apply_frame.state.scan_plan_active and apply_frame.state.scan_plan_index == 1
+    and apply_frame.output_times[2] == 5010
+
+local failed_apply_frame = new_env()
+step_at(failed_apply_frame, 0)
+failed_apply_frame.state.baseline_active = false
+failed_apply_frame.state.baseline_remaining = 0
+failed_apply_frame.state.scan_owner_id = 17
+failed_apply_frame.state.next_scan_ms = 5000
+failed_apply_frame.state.scan_plan_active = true
+failed_apply_frame.state.scan_plan_slots = {7}
+failed_apply_frame.state.scan_plan_index = 1
+seed_pending(failed_apply_frame, 1)
+failed_apply_frame.responses["performance_session_1"] = "OK\nlocalized"
+failed_apply_frame.apply_throw = true
+local failed_apply_reads_before = failed_apply_frame.read_count
+step_at(failed_apply_frame, 5000)
+local failed_apply_scan_deferred = #failed_apply_frame.apply_calls == 1
+    and failed_apply_frame.read_count == failed_apply_reads_before
+    and failed_apply_frame.state.scan_plan_active and failed_apply_frame.state.scan_plan_index == 1
+    and failed_apply_frame.state.last_report_ms == 0 and #failed_apply_frame.output_times == 1
+
 RESULT = json_core.encode_json({
     failed_writes = failed_writes,
     defaults = {
@@ -517,6 +559,10 @@ RESULT = json_core.encode_json({
         fallback_final_submits = #fallback_hint.submit_calls,
         fallback_hint_calls = fallback_hint.scan_plan_calls,
         fallback_next_slot = fallback_hint.state.next_slot,
+        apply_frame_scan_deferred = apply_frame_scan_deferred,
+        scan_resumed_after_apply = scan_resumed_after_apply,
+        apply_frame_report_times = apply_frame.output_times,
+        failed_apply_scan_deferred = failed_apply_scan_deferred,
     },
     stall = {
         first_batch_reads = reads_before_stall,
@@ -651,6 +697,14 @@ class ChatTranslatePerformanceTests(unittest.TestCase):
         self.assertEqual(plans["fallback_final_submits"], 1,
             "a failed hint permanently disabled later scan plans")
         self.assertEqual(plans["fallback_hint_calls"], 2)
+        self.assertTrue(plans["apply_frame_scan_deferred"],
+            "an entered apply must leave this frame's scan plan and deadline untouched")
+        self.assertTrue(plans["scan_resumed_after_apply"],
+            "a deferred scan plan or due report was lost after an apply frame")
+        self.assertEqual(plans["apply_frame_report_times"], [0, 5010],
+            "a due periodic report should move to the next step without an apply")
+        self.assertTrue(plans["failed_apply_scan_deferred"],
+            "an apply call that raises must still keep scanning off that frame")
 
     def test_response_intervals_stall_expiry_and_reconnect(self) -> None:
         result = self.scenarios()

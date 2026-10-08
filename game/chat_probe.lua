@@ -305,13 +305,36 @@ local translate_layout = (function()
         local gap = options.gap
         local measure = options.measure
         local position = options.position
+        local now_ms = options.now_ms
+        local timing_enabled = type(now_ms) == "function"
         local float_scratch = ffi.new("float[1]")
         local verified = options.verified == true and finite(gap) and gap >= 0 and gap <= 2048
         local disabled = not verified
+        local timing_names = {
+            apply_prepare = true,
+            apply_verify = true,
+            apply_setter = true,
+            apply_verify_apply = true,
+            apply_reflow = true,
+            apply_total = true,
+            measure = true,
+            position = true,
+            read_slot = true,
+            scan_plan = true,
+            submit = true,
+            response = true,
+            report = true,
+        }
+        local timing_fields = {
+            "apply_prepare", "apply_verify", "apply_setter", "apply_verify_apply",
+            "apply_reflow", "apply_total", "measure", "position", "read_slot",
+            "scan_plan", "submit", "response", "report",
+        }
         local statistics = {
             reflows_confirmed = 0,
             failures = 0,
             rows_positioned = 0,
+            positions_skipped = 0,
             last_failure_code = 0,
             last_history_head = 0,
             last_history_count = 0,
@@ -321,7 +344,40 @@ local translate_layout = (function()
             last_scale_class = 0,
             last_height_class = 0,
         }
+        for _, name in ipairs(timing_fields) do
+            statistics[name .. "_last_ms"] = 0
+            statistics[name .. "_max_ms"] = 0
+        end
         local api = {}
+
+        local function timing_now()
+            if type(now_ms) ~= "function" then return nil end
+            local ok, value = pcall(now_ms)
+            if not ok or not finite(value) or value < 0 then return nil end
+            return value
+        end
+
+        local function timing_elapsed(started)
+            if started == nil then return nil end
+            local finished = timing_now()
+            if finished == nil or finished < started then return nil end
+            local elapsed = finished - started
+            if not finite(elapsed) or elapsed < 0 or elapsed ~= math.floor(elapsed) then return nil end
+            return elapsed
+        end
+
+        local function record_timing(name, milliseconds)
+            if timing_names[name] ~= true or not finite(milliseconds)
+                or milliseconds < 0 or milliseconds ~= math.floor(milliseconds)
+                or milliseconds > MAX_SAFE_ADDRESS then
+                return false
+            end
+            local last_field = name .. "_last_ms"
+            local max_field = name .. "_max_ms"
+            statistics[last_field] = milliseconds
+            if milliseconds > statistics[max_field] then statistics[max_field] = milliseconds end
+            return true
+        end
 
         local function fail(status, code)
             if status ~= "deferred" then
@@ -456,10 +512,11 @@ local translate_layout = (function()
             return true
         end
 
-        local function capture_geometry(row)
-            local bytes, reason = read_exact(row.address + ROW_HEIGHT_OFFSET,
-                ROW_SCALE_OFFSET - ROW_HEIGHT_OFFSET + 4)
-            if not bytes then return nil, read_status(reason), 5 end
+        local function capture_geometry_bytes(row, bytes)
+            if type(bytes) ~= "string"
+                or #bytes ~= ROW_SCALE_OFFSET - ROW_HEIGHT_OFFSET + 4 then
+                return nil, "read_failed", 5
+            end
             local height = read_float(ffi, bytes, 0, float_scratch)
             local scale = read_float(ffi, bytes, ROW_SCALE_OFFSET - ROW_HEIGHT_OFFSET, float_scratch)
             if not valid_scale(scale) or not valid_height(height) then
@@ -487,6 +544,43 @@ local translate_layout = (function()
             local scale_start = ROW_SCALE_OFFSET - ROW_HEIGHT_OFFSET + 1
             local scale_end = scale_start + 3
             return {bytes = bytes, scale_bytes = bytes:sub(scale_start, scale_end), scale = scale, height = height}
+        end
+
+        local function capture_geometry_rows(rows)
+            local geometries = {}
+            local index = 1
+            while index <= #rows do
+                local finish_index = index
+                local allocation_base = rows[index].allocation_base
+                if allocation_base ~= nil then
+                    while finish_index < #rows and finish_index < index + 3
+                        and rows[finish_index].address == rows[finish_index + 1].address + ROW_SIZE
+                        and rows[finish_index + 1].allocation_base == allocation_base do
+                        finish_index = finish_index + 1
+                    end
+                end
+
+                local high_row = rows[index]
+                local low_row = rows[finish_index]
+                local span_length = high_row.address - low_row.address
+                    + ROW_SCALE_OFFSET - ROW_HEIGHT_OFFSET + 4
+                if span_length < 1 or span_length > 4096 then return nil, "read_failed", 5 end
+                local bytes, reason = read_exact(low_row.address + ROW_HEIGHT_OFFSET, span_length)
+                if not bytes then return nil, read_status(reason), 5 end
+                if #bytes ~= span_length then return nil, "read_failed", 5 end
+
+                for row_index = index, finish_index do
+                    local row = rows[row_index]
+                    local offset = row.address - low_row.address
+                    local geometry_bytes = bytes:sub(offset + 1,
+                        offset + ROW_SCALE_OFFSET - ROW_HEIGHT_OFFSET + 4)
+                    local geometry, geometry_error, geometry_code = capture_geometry_bytes(row, geometry_bytes)
+                    if not geometry then return nil, geometry_error, geometry_code end
+                    geometries[row_index] = geometry
+                end
+                index = finish_index + 1
+            end
+            return geometries
         end
 
         local function check_context_and_history(context, manager, history)
@@ -522,20 +616,20 @@ local translate_layout = (function()
                 if address == target_row then target_found = true end
             end
             if not writable_rows(rows) then return fail("read_failed", 4) end
-            for _, row in ipairs(rows) do
-                local geometry, geometry_error, geometry_code = capture_geometry(row)
-                if not geometry then return fail(geometry_error, geometry_code) end
-                row.geometry = geometry
+            local geometries, geometry_error, geometry_code = capture_geometry_rows(rows)
+            if not geometries then return fail(geometry_error, geometry_code) end
+            for index, row in ipairs(rows) do
+                row.geometry = geometries[index]
             end
             if not target_found then return fail("stale", 8) end
 
             local status, status_code = check_context_and_history(context, manager, history)
             if status then return fail(status, status_code) end
             if not writable_rows(rows) then return fail("read_failed", 4) end
-            for _, row in ipairs(rows) do
-                local geometry, geometry_error, geometry_code = capture_geometry(row)
-                if not geometry then return fail(geometry_error, geometry_code) end
-                if geometry.bytes ~= row.geometry.bytes then return fail("stale", 10) end
+            geometries, geometry_error, geometry_code = capture_geometry_rows(rows)
+            if not geometries then return fail(geometry_error, geometry_code) end
+            for index, row in ipairs(rows) do
+                if geometries[index].bytes ~= row.geometry.bytes then return fail("stale", 10) end
             end
             status, status_code = check_context_and_history(context, manager, history)
             if status then return fail(status, status_code) end
@@ -556,10 +650,10 @@ local translate_layout = (function()
             local status, status_code = check_context_and_history(snapshot.context, snapshot.manager, snapshot.history)
             if status then return fail(status, status_code) end
             if not writable_rows(snapshot.rows) then return fail("read_failed", 4) end
-            for _, row in ipairs(snapshot.rows) do
-                local geometry, geometry_error, geometry_code = capture_geometry(row)
-                if not geometry then return fail(geometry_error, geometry_code) end
-                if geometry.bytes ~= row.geometry.bytes then return fail("stale", 10) end
+            local geometries, geometry_error, geometry_code = capture_geometry_rows(snapshot.rows)
+            if not geometries then return fail(geometry_error, geometry_code) end
+            for index, row in ipairs(snapshot.rows) do
+                if geometries[index].bytes ~= row.geometry.bytes then return fail("stale", 10) end
             end
             status, status_code = check_context_and_history(snapshot.context, snapshot.manager, snapshot.history)
             if status then return fail(status, status_code) end
@@ -577,12 +671,9 @@ local translate_layout = (function()
 
             local status, status_code = check_context_and_history(snapshot.context, snapshot.manager, snapshot.history)
             if status then disabled = true; return fail("called_unconfirmed", status_code or 11) end
-            for _, row in ipairs(snapshot.rows) do
-                local row_writable = writable_range(row.address, ROW_SIZE, row.allocation_base)
-                if not row_writable then
-                    disabled = true
-                    return fail("called_unconfirmed", 11)
-                end
+            if not writable_rows(snapshot.rows) then
+                disabled = true
+                return fail("called_unconfirmed", 11)
             end
             local target
             for _, row in ipairs(snapshot.rows) do
@@ -590,16 +681,20 @@ local translate_layout = (function()
             end
             if not target then disabled = true; return fail("called_unconfirmed", 11) end
 
+            local measure_started = timing_enabled and timing_now() or nil
             local measure_ok = pcall(measure, target.address)
+            local measure_elapsed = measure_started ~= nil and timing_elapsed(measure_started) or nil
+            if measure_elapsed ~= nil then record_timing("measure", measure_elapsed) end
             if not measure_ok then disabled = true; return fail("called_unconfirmed", 11) end
 
-            for _, row in ipairs(snapshot.rows) do
-                if not writable_range(row.address, ROW_SIZE, row.allocation_base) then
-                    disabled = true
-                    return fail("called_unconfirmed", 11)
-                end
-                local geometry, geometry_error, geometry_code = capture_geometry(row)
-                if not geometry then disabled = true; return fail("called_unconfirmed", geometry_code) end
+            if not writable_rows(snapshot.rows) then
+                disabled = true
+                return fail("called_unconfirmed", 11)
+            end
+            local geometries, geometry_error, geometry_code = capture_geometry_rows(snapshot.rows)
+            if not geometries then disabled = true; return fail("called_unconfirmed", geometry_code) end
+            for index, row in ipairs(snapshot.rows) do
+                local geometry = geometries[index]
                 if row == target then
                     if geometry.scale_bytes ~= row.geometry.scale_bytes then
                         disabled = true
@@ -637,29 +732,59 @@ local translate_layout = (function()
 
             status, status_code = check_context_and_history(snapshot.context, snapshot.manager, snapshot.history)
             if status then disabled = true; return fail("called_unconfirmed", status_code or 11) end
+            if not writable_rows(snapshot.rows) then
+                disabled = true
+                return fail("called_unconfirmed", 11)
+            end
+
+            local position_elapsed_ms = 0
+            local position_timing_valid = timing_enabled
             for _, row in ipairs(snapshot.rows) do
-                local row_writable = writable_range(row.address, ROW_SIZE, row.allocation_base)
-                if not row_writable then
+                local cached = read_exact(row.address + ROW_POSITION_OFFSET, 8)
+                if type(cached) ~= "string" or #cached ~= 8 then
                     disabled = true
                     return fail("called_unconfirmed", 11)
+                end
+                if row.address ~= target_row and cached == row.position_bytes then
+                    local row_writable = writable_range(row.address, ROW_SIZE, row.allocation_base)
+                    if not row_writable then
+                        disabled = true
+                        return fail("called_unconfirmed", 11)
+                    end
+                    statistics.positions_skipped = add_count(statistics.positions_skipped, 1)
+                else
+                    local row_writable = writable_range(row.address, ROW_SIZE, row.allocation_base)
+                    if not row_writable then
+                        disabled = true
+                        return fail("called_unconfirmed", 11)
+                    end
+                    local position_ok
+                    if position_timing_valid then
+                        local position_started = timing_now()
+                        position_ok = pcall(position, row.address, row.position_packed, 0)
+                        local position_elapsed = timing_elapsed(position_started)
+                        if position_elapsed == nil then
+                            position_timing_valid = false
+                        else
+                            position_elapsed_ms = position_elapsed_ms + position_elapsed
+                            if position_elapsed_ms > MAX_SAFE_ADDRESS then
+                                position_elapsed_ms = MAX_SAFE_ADDRESS
+                            end
+                        end
+                    else
+                        position_ok = pcall(position, row.address, row.position_packed, 0)
+                    end
+                    if not position_ok then disabled = true; return fail("called_unconfirmed", 11) end
+                    local positioned, reason = read_exact(row.address + ROW_POSITION_OFFSET, 8)
+                    if not positioned or positioned ~= row.position_bytes then
+                        disabled = true
+                        return fail("called_unconfirmed", 11)
+                    end
+                    statistics.rows_positioned = add_count(statistics.rows_positioned, 1)
                 end
             end
 
-            for _, row in ipairs(snapshot.rows) do
-                local row_writable = writable_range(row.address, ROW_SIZE, row.allocation_base)
-                if not row_writable then
-                    disabled = true
-                    return fail("called_unconfirmed", 11)
-                end
-                local position_ok = pcall(position, row.address, row.position_packed, 0)
-                if not position_ok then disabled = true; return fail("called_unconfirmed", 11) end
-                local cached, reason = read_exact(row.address + ROW_POSITION_OFFSET, 8)
-                if not cached or cached ~= row.position_bytes then
-                    disabled = true
-                    return fail("called_unconfirmed", 11)
-                end
-                statistics.rows_positioned = add_count(statistics.rows_positioned, 1)
-            end
+            if position_timing_valid then record_timing("position", position_elapsed_ms) end
 
             status, status_code = check_context_and_history(snapshot.context, snapshot.manager, snapshot.history)
             if status then disabled = true; return fail("called_unconfirmed", status_code or 11) end
@@ -676,11 +801,12 @@ local translate_layout = (function()
         end
 
         function api.stats()
-            return {
+            local result = {
                 verified = verified,
                 reflows_confirmed = statistics.reflows_confirmed,
                 failures = statistics.failures,
                 rows_positioned = statistics.rows_positioned,
+                positions_skipped = statistics.positions_skipped,
                 last_failure_code = statistics.last_failure_code,
                 last_history_head = statistics.last_history_head,
                 last_history_count = statistics.last_history_count,
@@ -690,7 +816,14 @@ local translate_layout = (function()
                 last_scale_class = statistics.last_scale_class,
                 last_height_class = statistics.last_height_class,
             }
+            for _, name in ipairs(timing_fields) do
+                result[name .. "_last_ms"] = statistics[name .. "_last_ms"]
+                result[name .. "_max_ms"] = statistics[name .. "_max_ms"]
+            end
+            return result
         end
+
+        api.record_timing = record_timing
 
         return api
     end
@@ -1067,7 +1200,8 @@ local function initialize_probe()
     local native_transport_api
 
     local MAX_OBSERVER_ADDRESS = 0x7fffffffffff
-    local MAX_OBSERVER_READ = 16 * 1024
+    local MAX_OBSERVER_READ = TRANSLATE_ENABLED and 256 * 1024 or 16 * 1024
+    local FULL_APPLY_READ_RESERVE = 224 * 1024
     local OBSERVER_IMAGE_SIZE = expected_image_size
 
     local function append_wide_ascii(base, base_length, suffix)
@@ -1935,7 +2069,7 @@ local function initialize_probe()
         end
 
         local buffer = ffi.new("HD2Probe_U8[?]", byte_count)
-        for index = 1, #text do buffer[index - 1] = text:byte(index) end
+        ffi.copy(buffer, text, #text)
         -- 数组的最后一字节由FFI零初始化，登记后始终保留本次译文指针。
         registry.buffers[pin_count + 1] = buffer
         registry.bytes = registry.bytes + byte_count
@@ -2184,8 +2318,31 @@ local function initialize_probe()
     end
 
     local function observer_translate_apply(message, text)
+        local function timing_start()
+            local ok, value = pcall(kernel.GetTickCount64)
+            if not ok then return nil end
+            value = tonumber(value)
+            if type(value) ~= "number" or value ~= value or value == math.huge
+                or value == -math.huge or value < 0 then
+                return nil
+            end
+            return value
+        end
+
+        local function timing_finish(layout, name, started)
+            if started == nil then return end
+            local finished = timing_start()
+            if finished == nil or finished < started then return end
+            local elapsed = finished - started
+            if elapsed < 0 or elapsed ~= math.floor(elapsed)
+                or type(layout.record_timing) ~= "function" then
+                return
+            end
+            pcall(layout.record_timing, name, elapsed)
+        end
+
         if not TRANSLATE_ENABLED or not observer_display_native_gate then return "disabled" end
-        if observer_read_budget > MAX_OBSERVER_READ - 14 * 1024 then return "deferred" end
+        if observer_read_budget > MAX_OBSERVER_READ - FULL_APPLY_READ_RESERVE then return "deferred" end
         observer_translate_heartbeat(true)
         if not translate_heartbeat_fresh then return "stale" end
         local max_display_bytes = translate_core and translate_core.MAX_DISPLAY_BYTES
@@ -2218,8 +2375,10 @@ local function initialize_probe()
         local layout = translate_layout.instance
         if type(layout) ~= "table" or type(layout.prepare) ~= "function"
             or type(layout.reflow) ~= "function" then return "disabled" end
+        local prepare_started = timing_start()
         local layout_status, layout_snapshot = layout.prepare(
             current.proof.context, current.proof.widget)
+        timing_finish(layout, "apply_prepare", prepare_started)
         if layout_status == "deferred" then return "deferred" end
         if layout_status == "stale" then return "stale" end
         if layout_status == "read_failed" then return "read_failed" end
@@ -2232,14 +2391,25 @@ local function initialize_probe()
         -- 原生调用前刷新单调时钟和固定心跳，失效时绝不进入游戏函数。
         if not observer_translate_refresh_for_setter() then return "disabled" end
 
+        local verify_started = timing_start()
         local prepared_ok, prepared_status = pcall(layout.verify_prepared, layout_snapshot)
         if not prepared_ok then
+            timing_finish(layout, "apply_verify", verify_started)
             if type(layout.disable) == "function" then layout.disable(true) end
             return "read_failed"
         end
-        if prepared_status == "deferred" then return "deferred" end
-        if prepared_status == "stale" then return "stale" end
-        if prepared_status ~= "ready" then return "read_failed" end
+        if prepared_status == "deferred" then
+            timing_finish(layout, "apply_verify", verify_started)
+            return "deferred"
+        end
+        if prepared_status == "stale" then
+            timing_finish(layout, "apply_verify", verify_started)
+            return "stale"
+        end
+        if prepared_status ~= "ready" then
+            timing_finish(layout, "apply_verify", verify_started)
+            return "read_failed"
+        end
 
         local values_ok, values_stable, values_reason = pcall(
             observer_widget_verify_values,
@@ -2253,6 +2423,7 @@ local function initialize_probe()
             current.proof.body_address,
             current.proof.body_bytes
         )
+        timing_finish(layout, "apply_verify", verify_started)
         if not values_ok then
             if type(layout.disable) == "function" then layout.disable(true) end
             return "read_failed"
@@ -2263,17 +2434,23 @@ local function initialize_probe()
             return "read_failed"
         end
 
+        local setter_started = timing_start()
         local setter_ok, setter_result = pcall(observer_translate_setter, widget_argument, buffer)
+        timing_finish(layout, "apply_setter", setter_started)
         if not setter_ok or setter_result ~= true then
             if type(layout.disable) == "function" then layout.disable(true, 11) end
             return "called_unconfirmed"
         end
+        local verify_apply_started = timing_start()
         local verify_ok, verify_result = pcall(observer_translate_verify_apply, current.proof, buffer)
+        timing_finish(layout, "apply_verify_apply", verify_apply_started)
         if not verify_ok or not verify_result then
             if type(layout.disable) == "function" then layout.disable(true, 11) end
             return "called_unconfirmed"
         end
+        local reflow_started = timing_start()
         local reflow_ok, reflow_status = pcall(layout.reflow, layout_snapshot, current.proof.widget)
+        timing_finish(layout, "apply_reflow", reflow_started)
         if not reflow_ok then
             if type(layout.disable) == "function" then layout.disable(true) end
             return "called_unconfirmed"
@@ -2403,6 +2580,7 @@ local function initialize_probe()
                 reflows_confirmed = 0,
                 failures = 0,
                 rows_positioned = 0,
+                positions_skipped = 0,
                 last_failure_code = 0,
                 last_history_head = 0,
                 last_history_count = 0,
@@ -2418,10 +2596,22 @@ local function initialize_probe()
             local stats_ok, stats = pcall(translate_layout.instance.stats)
             if stats_ok and type(stats) == "table" then
                 report.layout.verified = stats.verified == true
-                for _, name in ipairs({"reflows_confirmed", "failures", "rows_positioned"}) do
+                for _, name in ipairs({"reflows_confirmed", "failures", "rows_positioned", "positions_skipped"}) do
                     local count = stats[name]
                     report.layout[name] = observer_translate_safe_count(count, 9007199254740991)
                         and count or 0
+                end
+                for _, name in ipairs({
+                    "apply_prepare", "apply_verify", "apply_setter", "apply_verify_apply",
+                    "apply_reflow", "apply_total", "measure", "position", "read_slot",
+                    "scan_plan", "submit", "response", "report",
+                }) do
+                    for _, suffix in ipairs({"last_ms", "max_ms"}) do
+                        local field = name .. "_" .. suffix
+                        local milliseconds = stats[field]
+                        report.layout[field] = observer_translate_safe_count(milliseconds, 9007199254740991)
+                            and milliseconds or 0
+                    end
                 end
                 for _, field in ipairs({
                     {"last_failure_code", 12},
@@ -2689,6 +2879,7 @@ local function initialize_probe()
             manager_for_root = function(root) return observer_add(root, 0x14498) end,
             gap = translate_layout.gap,
             verified = translate_layout.verified == true,
+            now_ms = function() return tonumber(kernel.GetTickCount64()) end,
             measure = function(row)
                 local target = ffi.cast(
                     "void (*)(void *)",
@@ -2715,10 +2906,29 @@ local function initialize_probe()
             end
         end
         local adapter = {}
-        local function protect(callback)
+        local function timing_start()
+            local ok, value = pcall(kernel.GetTickCount64)
+            if not ok then return nil end
+            value = tonumber(value)
+            if not observer_translate_safe_count(value, 9007199254740991) then return nil end
+            return value
+        end
+        local function timing_finish(name, started)
+            if started == nil then return end
+            local finished = timing_start()
+            if finished == nil or finished < started then return end
+            local elapsed = finished - started
+            local layout = translate_layout.instance
+            if type(layout) == "table" and type(layout.record_timing) == "function" then
+                pcall(layout.record_timing, name, elapsed)
+            end
+        end
+        local function protect(callback, phase_name)
             return function(...)
                 if observer_faulted then return nil end
+                local started = phase_name and timing_start() or nil
                 local ok, first, second, third = pcall(callback, ...)
+                if phase_name then timing_finish(phase_name, started) end
                 if not ok then
                     observer_faulted = true
                     error("translation adapter failure")
@@ -2735,18 +2945,20 @@ local function initialize_probe()
         end)
         -- 心跳依据当前传输方式读取对应的文件规则。
         adapter.heartbeat = protect(function() return observer_translate_heartbeat(true) end)
-        adapter.read_slot = protect(observer_translate_read_slot)
+        adapter.read_slot = protect(observer_translate_read_slot, "read_slot")
         adapter.scan_plan = function(...)
             if observer_faulted then return nil end
+            local started = timing_start()
             local ok, plan = pcall(observer_translate_scan_plan, ...)
+            timing_finish("scan_plan", started)
             if not ok then return nil end
             return plan
         end
-        adapter.submit = protect(observer_translate_publish_request)
-        adapter.response = protect(observer_translate_read_response)
-        adapter.apply = protect(observer_translate_apply)
+        adapter.submit = protect(observer_translate_publish_request, "submit")
+        adapter.response = protect(observer_translate_read_response, "response")
+        adapter.apply = protect(observer_translate_apply, "apply_total")
         adapter.cancel = protect(observer_translate_cancel)
-        adapter.output = protect(observer_translate_write_report)
+        adapter.output = protect(observer_translate_write_report, "report")
         return adapter
     end
 

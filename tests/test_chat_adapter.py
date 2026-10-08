@@ -1175,8 +1175,15 @@ class ChatTranslateAdapterTests(unittest.TestCase):
         source = (ROOT / "game" / "chat_probe.lua").read_text(encoding="utf-8")
         declaration = re.search(r"ffi\.cdef\[\[(.*?)\]\]", source, re.S)
         budget = re.search(r"local MAX_OBSERVER_READ = ([^\r\n]+)", source)
+        apply_reserve = re.search(r"local FULL_APPLY_READ_RESERVE = ([^\r\n]+)", source)
+        translated_budget = re.search(
+            r"TRANSLATE_ENABLED\s+and\s+(.+?)\s+or\s+(.+)$",
+            budget.group(1).strip() if budget else "",
+        )
         self.assertIsNotNone(declaration)
         self.assertIsNotNone(budget)
+        self.assertIsNotNone(apply_reserve)
+        self.assertIsNotNone(translated_budget)
 
         initialize_start = source.index("local function initialize_probe()")
         wide_start = source.index("    local function append_wide_ascii(", initialize_start)
@@ -1194,6 +1201,7 @@ local translate_core = dofile([[TRANSLATE_CORE_PATH]])
 local STANDALONE_ENABLED = false
 local native_transport_api
 local TRANSLATE_ENABLED = false
+local FULL_APPLY_READ_RESERVE = __FULL_APPLY_READ_RESERVE__
 local DISPLAY_TEST_ENABLED = false
 local observer_display_native_gate = false
 local DISPLAY_TARGET_RVA = 0x1441CA0
@@ -1249,10 +1257,13 @@ local function prepare_observer_paths()
     observer_session_nonce = 0x1234
 end
 '''
+        prelude = prelude.replace(
+            "__FULL_APPLY_READ_RESERVE__", apply_reserve.group(1).strip()
+        )
         script = LUA_OBSERVER_ADAPTER_HARNESS.replace(
             "__FFI_DECL__", declaration.group(1)
         ).replace(
-            "__MAX_OBSERVER_READ__", budget.group(1).strip()
+            "__MAX_OBSERVER_READ__", translated_budget.group(1).strip()
         ).replace(
             "local core = {SECTION = {rva = 4096, size = 34667155}}",
             "local core = dofile([[SCAN_CORE_PATH]])",
