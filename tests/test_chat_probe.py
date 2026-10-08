@@ -3,9 +3,18 @@
 from __future__ import annotations
 
 import json
+import sys
+import tempfile
 import unittest
+import zipfile
+from pathlib import Path
+from unittest import mock
 
 from lua_support import LUA_DLL, LuaJIT, ROOT  # noqa: E402
+
+sys.path.insert(0, str(ROOT / "tools"))
+import build_outgoing_probe  # noqa: E402
+import build_package  # noqa: E402
 
 
 LUA_CORE_HARNESS = r'''
@@ -20,7 +29,7 @@ end
 local function put_text(bytes, offset, text)
     for index = 1, #text do bytes[offset + index] = text:byte(index) end
 end
-local function make_header()
+local function make_header(config)
     local bytes = {}
     for index = 1, 4096 do bytes[index] = 0 end
     put_text(bytes, 0, "MZ")
@@ -29,7 +38,7 @@ local function make_header()
     local file = 0x84
     put16(bytes, file, 0x8664)
     put16(bytes, file + 2, 2)
-    put32(bytes, file + 4, 1790161983)
+    put32(bytes, file + 4, config and config.mode == "pemismatch" and 1790161982 or 1790161983)
     put16(bytes, file + 16, 240)
     local optional = file + 20
     put16(bytes, optional, 0x20b)
@@ -65,7 +74,7 @@ local function run_case(config)
     local section_end = section_start + core.SECTION.size
     local mapped_length = config.mapped_length or 65536
     local mapped_end = section_start + mapped_length
-    local header = make_header()
+    local header = make_header(config)
     local code
     if config.mode == "dense" then
         local pattern_groups = {
@@ -166,6 +175,7 @@ local function run_case(config)
         hash_bytes = function() return string.rep("a", 64) end,
     }
     local state = core.new(adapter)
+    if state.outgoing_probe then error("default core.new unexpectedly enabled outgoing probe") end
     local done, manifest = false, nil
     local max_frame_code_request = 0
     for _ = 1, 256 do
@@ -179,6 +189,104 @@ local function run_case(config)
     for _ in pairs(state.pattern_last_seen) do pattern_slots = pattern_slots + 1 end
     return {manifest = manifest, query_calls = query_count, read_calls = read_count,
         pattern_slots = pattern_slots, max_frame_code_request = max_frame_code_request}
+end
+local outgoing_windows = {
+    {rva = 0x1097500, size = 0x3000},
+    {rva = 0x185f000, size = 0x2000},
+    {rva = 0xbeaf00, size = 0x1800},
+    {rva = 0xbde300, size = 0x1000},
+}
+local function in_window(rva, length)
+    for index, window in ipairs(outgoing_windows) do
+        if rva >= window.rva and rva < window.rva + window.size
+            and length <= window.rva + window.size - rva then return index end
+    end
+    return nil
+end
+local function make_window_bytes(window_index, rva, length, window)
+    local output = {}
+    local first = rva - window.rva
+    for offset = 0, length - 1 do
+        output[#output + 1] = string.char((window_index * 29 + first + offset) % 256)
+    end
+    return table.concat(output)
+end
+local function expected_window_hex(window_index, window)
+    local bytes = make_window_bytes(window_index, window.rva, window.size, window)
+    return (bytes:gsub(".", function(value) return string.format("%02x", value:byte()) end))
+end
+local function run_outgoing_case(config)
+    local header = make_header(config)
+    local query_calls, read_calls, total_read_bytes = 0, 0, 0
+    local max_step_read_bytes, max_step_read_calls, max_read_request = 0, 0, 0
+    local outside_query, outside_read = false, false
+    local read_ranges = {}
+    local function query(rva)
+        query_calls = query_calls + 1
+        if rva >= 0 and rva < 4096 then
+            return {start_rva = 0, size = 4096, allocation_base = true,
+                type = 0x1000000, state = 0x1000, protect = 0x02}
+        end
+        local window_index = in_window(rva, 1)
+        if window_index then
+            if config.mode == "gapfailure" and window_index == 1 then
+                return {start_rva = rva + 1, size = outgoing_windows[window_index].size - 1,
+                    allocation_base = true, type = 0x1000000, state = 0x1000, protect = 0x20}
+            end
+            local state = config.mode == "regionfailure" and window_index == 2 and 0x2000 or 0x1000
+            return {start_rva = outgoing_windows[window_index].rva,
+                size = outgoing_windows[window_index].size, allocation_base = true,
+                type = 0x1000000, state = state, protect = 0x20}
+        end
+        outside_query = true
+        return nil
+    end
+    local adapter = {
+        hash_file = function()
+            if config.mode == "hashmismatch" then return string.rep("0", 64), core.SOURCE.disk_size end
+            return core.SOURCE.sha256, core.SOURCE.disk_size
+        end,
+        query = query,
+        read = function(rva, length, executable)
+            read_calls = read_calls + 1
+            total_read_bytes = total_read_bytes + length
+            max_read_request = math.max(max_read_request, length)
+            read_ranges[#read_ranges + 1] = {rva = rva, size = length, executable = executable}
+            if length > 1024 then outside_read = true end
+            if not executable and rva + length <= 4096 and length <= 1024 then
+                return header:sub(rva + 1, rva + length)
+            end
+            local window_index = in_window(rva, length)
+            if not window_index then outside_read = true; return nil end
+            local region, rechecked = query(rva), query(rva)
+            if not same(region, rechecked) or not executable then return nil end
+            if config.mode == "shortread" and window_index == 1 and rva == outgoing_windows[1].rva + 4096 then
+                return make_window_bytes(window_index, rva, length - 1, outgoing_windows[window_index])
+            end
+            return make_window_bytes(window_index, rva, length, outgoing_windows[window_index])
+        end,
+        hash_bytes = function() return string.rep("a", 64) end,
+    }
+    local state = core.new(adapter, {outgoing_probe = true})
+    local done, manifest = false, nil
+    for _ = 1, 64 do
+        local before = total_read_bytes
+        local calls_before = read_calls
+        done, manifest = core.step(state, 16 * 1024)
+        max_step_read_bytes = math.max(max_step_read_bytes, total_read_bytes - before)
+        max_step_read_calls = math.max(max_step_read_calls, read_calls - calls_before)
+        if done then break end
+    end
+    if not done then error("outgoing probe exceeded frame cap: " .. config.name) end
+    local expected = {}
+    for index, window in ipairs(outgoing_windows) do
+        expected[index] = expected_window_hex(index, window)
+    end
+    return {manifest = manifest, query_calls = query_calls, read_calls = read_calls,
+        total_read_bytes = total_read_bytes, max_step_read_bytes = max_step_read_bytes,
+        max_step_read_calls = max_step_read_calls, max_read_request = max_read_request,
+        outside_query = outside_query, outside_read = outside_read,
+        read_ranges = read_ranges, expected_hex = expected}
 end
 local cases = {
     {name = "cross_block", mapped_length = 65536, signature_offset = 16384 - 6},
@@ -195,6 +303,16 @@ local cases = {
 }
 local results = {}
 for _, config in ipairs(cases) do results[config.name] = run_case(config) end
+local outgoing_cases = {
+    {name = "success"},
+    {name = "hashmismatch", mode = "hashmismatch"},
+    {name = "pemismatch", mode = "pemismatch"},
+    {name = "regionfailure", mode = "regionfailure"},
+    {name = "gapfailure", mode = "gapfailure"},
+    {name = "shortread", mode = "shortread"},
+}
+results.outgoing = {}
+for _, config in ipairs(outgoing_cases) do results.outgoing[config.name] = run_outgoing_case(config) end
 RESULT = core.encode_json(results)
 '''
 
@@ -240,6 +358,11 @@ class LuaCoreTests(unittest.TestCase):
         self.assertGreater(dense["scan"]["truncation"]["patterns"]["imm_le32_9590"], 0)
         self.assertLessEqual(dense["scan"]["candidate_bytes"], 128 * 1024)
         self.assertEqual(result["dense"]["pattern_slots"], 4)
+        known_rvas = {0x1097560, 0x186025D, 0x1097A7C, 0xBEB103, 0x143BF90, 0x143C950}
+        self.assertEqual(
+            {item["rva"] for item in cross["known_signatures"]},
+            known_rvas,
+        )
 
         mismatch = result["hashmismatch"]
         self.assertEqual(mismatch["manifest"]["status"], "hash_mismatch")
@@ -249,6 +372,142 @@ class LuaCoreTests(unittest.TestCase):
         wrong_size = result["sizemismatch"]
         self.assertEqual(wrong_size["manifest"]["status"], "disk_size_mismatch")
         self.assertEqual(wrong_size["read_calls"], 0)
+
+        outgoing = result["outgoing"]
+        success = outgoing["success"]
+        success_manifest = success["manifest"]
+        self.assertEqual(success_manifest["mode"], "outgoing_send_code_probe")
+        self.assertEqual(success_manifest["status"], "outgoing_probe_complete")
+        self.assertEqual(success_manifest["function_verification"], "unverified")
+        self.assertEqual(success_manifest["read_limits"], {
+            "max_memory_read_bytes_per_step": 4096,
+            "max_memory_read_bytes_per_call": 1024,
+            "disk_hash_bytes_excluded_from_memory_budget": True,
+        })
+        expected_windows = [
+            (0x1097500, 0x3000),
+            (0x185F000, 0x2000),
+            (0xBEAF00, 0x1800),
+            (0xBDE300, 0x1000),
+        ]
+        self.assertEqual(
+            [(item["rva"], item["size"]) for item in success_manifest["windows"]],
+            expected_windows,
+        )
+        for index, window in enumerate(success_manifest["windows"]):
+            with self.subTest(window=index):
+                self.assertEqual(set(window), {"rva", "size", "status", "hex"})
+                self.assertEqual(window["status"], "complete")
+                self.assertEqual(window["hex"], success["expected_hex"][index])
+                self.assertEqual(len(window["hex"]), window["size"] * 2)
+        self.assertLessEqual(success["max_step_read_bytes"], 4096)
+        self.assertLessEqual(success["max_step_read_calls"], 4)
+        self.assertLessEqual(success["max_read_request"], 1024)
+        self.assertFalse(success["outside_query"])
+        self.assertFalse(success["outside_read"])
+        self.assertEqual(success["total_read_bytes"], 4096 + sum(size for _, size in expected_windows))
+        self.assertEqual(
+            [(item["rva"], item["size"], item["executable"]) for item in success["read_ranges"][:4]],
+            [(offset, 1024, False) for offset in (0, 1024, 2048, 3072)],
+        )
+        self.assertEqual(success["read_ranges"][4]["rva"], expected_windows[0][0])
+
+        outgoing_hash = outgoing["hashmismatch"]
+        self.assertEqual(outgoing_hash["manifest"]["status"], "hash_mismatch")
+        self.assertEqual(outgoing_hash["read_calls"], 0)
+        self.assertTrue(all(window["status"] == "not_attempted"
+                            for window in outgoing_hash["manifest"]["windows"]))
+        outgoing_pe = outgoing["pemismatch"]
+        self.assertEqual(outgoing_pe["manifest"]["status"], "pe_mismatch")
+        self.assertEqual(outgoing_pe["read_calls"], 4)
+        self.assertTrue(all(window["status"] == "not_attempted"
+                            for window in outgoing_pe["manifest"]["windows"]))
+
+        region_failure = outgoing["regionfailure"]["manifest"]
+        self.assertEqual(region_failure["status"], "outgoing_probe_failed")
+        self.assertEqual([window["status"] for window in region_failure["windows"]],
+                         ["complete", "failed", "not_attempted", "not_attempted"])
+        self.assertNotEqual(region_failure["windows"][1]["status"], "complete")
+        gap_failure = outgoing["gapfailure"]["manifest"]
+        self.assertEqual(gap_failure["status"], "outgoing_probe_failed")
+        self.assertEqual([window["status"] for window in gap_failure["windows"]],
+                         ["failed", "not_attempted", "not_attempted", "not_attempted"])
+        partial = outgoing["shortread"]["manifest"]
+        self.assertEqual(partial["status"], "outgoing_probe_partial")
+        self.assertEqual([window["status"] for window in partial["windows"]],
+                         ["partial", "not_attempted", "not_attempted", "not_attempted"])
+        self.assertEqual(len(partial["windows"][0]["hex"]), 4096 * 2)
+
+        entry_path = ROOT / "game" / "chat_probe.lua"
+        core_path = ROOT / "game" / "chat_probe_core.lua"
+        normal_entry = build_package.entry_source(entry_path.read_bytes(), core_path.read_bytes())
+        diagnostic_entry = build_outgoing_probe._diagnostic_entry()
+        outgoing_flag = build_outgoing_probe.OUTGOING_PROBE_FLAG
+        self.assertEqual(normal_entry.count(outgoing_flag), 1)
+        self.assertIn(outgoing_flag, normal_entry)
+        self.assertIn(outgoing_flag.replace(b"= false", b"= true"), diagnostic_entry)
+        for disabled_flag in build_outgoing_probe.DISABLED_FLAGS:
+            self.assertIn(disabled_flag, diagnostic_entry)
+            self.assertNotIn(disabled_flag.replace(b"= false", b"= true"), diagnostic_entry)
+        lua_literal = json.dumps(diagnostic_entry.decode("utf-8"), ensure_ascii=False)
+        self.assertEqual(self.lua.run(
+            "local chunk, compile_error = loadstring(" + lua_literal + ")\n"
+            "assert(chunk, compile_error)\nRESULT = 'compiled without execution'\n"
+        ), "compiled without execution")
+
+        archive_name = "Addon/" + build_package.ARCHIVE_NAME
+        member_names = (
+            "manifest.json",
+            archive_name,
+            archive_name + ".stream",
+            archive_name + ".gpu_resources",
+            "LICENSE",
+            "LICENSES/cJSON-LICENSE.txt",
+            "LICENSES/BingusSharedLoader-README.txt",
+            "LICENSES/BingusSharedLoader-manifest.json",
+            "LICENSES/BingusSharedLoader-SOURCE.txt",
+            "LICENSES/ModOptionsMenu-LICENSE.txt",
+            "LICENSES/ModOptionsMenu-SOURCE.txt",
+        )
+        base_manifest = {
+            "Version": 1,
+            "Guid": build_package.ADDON_GUID,
+            "Name": "existing",
+            "Description": "existing",
+            "Options": [{"Name": "existing", "Description": "existing", "Include": ["Addon"]}],
+        }
+        captured_entry = {}
+
+        def fake_addon_files(entry, *, loader_zip=None, menu_zip=None):
+            captured_entry["bytes"] = entry
+            captured_entry["loader_zip"] = loader_zip
+            captured_entry["menu_zip"] = menu_zip
+            return {
+                name: (json.dumps(base_manifest).encode("utf-8") if name == "manifest.json" else b"test")
+                for name in member_names
+            }
+
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            temporary_root = Path(temporary_directory)
+            package_path = temporary_root / "diagnostic.zip"
+            loader_path = temporary_root / "loader.zip"
+            menu_path = temporary_root / "menu.zip"
+            with mock.patch.object(build_outgoing_probe.builder, "addon_files", side_effect=fake_addon_files):
+                built_path = build_outgoing_probe.build_artifact(
+                    package_path,
+                    loader_zip=loader_path,
+                    menu_zip=menu_path,
+                )
+            self.assertEqual(built_path, package_path)
+            self.assertEqual(captured_entry["loader_zip"], loader_path)
+            self.assertEqual(captured_entry["menu_zip"], menu_path)
+            with zipfile.ZipFile(package_path) as package:
+                self.assertEqual(set(package.namelist()), set(member_names))
+                package_manifest = json.loads(package.read("manifest.json"))
+                self.assertEqual(package_manifest["Guid"], build_package.ADDON_GUID)
+                self.assertEqual(package_manifest["Name"], "HD2 Chat Outgoing Code Probe")
+                self.assertIn("暂时替换同 GUID", package_manifest["Description"])
+                self.assertIn(outgoing_flag.replace(b"= false", b"= true"), captured_entry["bytes"])
 
 
 

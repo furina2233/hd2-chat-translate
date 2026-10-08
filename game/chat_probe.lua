@@ -205,6 +205,7 @@ local OBSERVE_ENABLED = false --[[HD2_CHAT_OBSERVER_ENABLED]]
 local DISPLAY_TEST_ENABLED = false --[[HD2_CHAT_DISPLAY_TEST_ENABLED]]
 local TRANSLATE_ENABLED = false --[[HD2_CHAT_TRANSLATE_ENABLED]]
 local STANDALONE_ENABLED = false --[[HD2_CHAT_STANDALONE_ENABLED]]
+local OUTGOING_PROBE_ENABLED = false --[[HD2_CHAT_OUTGOING_PROBE_ENABLED]]
 local observer_core = (function()
 --[[HD2_CHAT_OBSERVER_CORE]]
 end)()
@@ -2969,7 +2970,7 @@ local function initialize_probe()
         hash_bytes = hash_bytes,
         output = output_manifest,
     }
-    local state = core.new(adapter)
+    local state = core.new(adapter, {outgoing_probe = OUTGOING_PROBE_ENABLED})
     local code_manifest_written = false
     local code_scan_done = false
     local observer_state = nil
