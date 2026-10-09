@@ -8,10 +8,9 @@ The currently compatible versions are Steam build 25480438 and game EXE 1.8.4601
 
 ## Installation and updates
 
-1. Close the game normally. Import `HD2ChatTranslateYYYYMMDDHHMMSS.zip` into HD2Arsenal, update the mod with the same name, and enable it.
-2. By default, place it at the bottom of the priority list. When “Prioritize first mod” is enabled, place it at the top.
-3. Click Deploy, then launch the game. Bingus Shared Loader v18 is already bundled in the package; you do not need to import it separately.
-4. To update the mod, close the game, import the new ZIP, update the mod with the same name, and deploy again.
+1. Close the game normally. In HD2Arsenal, import either `HD2ChatTranslateNoDependenciesYYYYMMDDHHMMSS.zip` or `HD2ChatTranslateIncludeDependenciesYYYYMMDDHHMMSS.zip`, then enable the mod.
+2. Click Deploy, then launch the game. The NoDependencies package requires Bingus Shared Loader and Mod Options Menu to be installed separately. The IncludeDependencies package already contains both prerequisites.
+3. To update the mod, close the game, import the new ZIP, update the mod with the same name, and deploy again.
 
 ## Configuration
 
@@ -95,4 +94,4 @@ Set `HD2CT_ENABLED` to `0` and restart the game to disable translation. To unins
 
 ## License
 
-Original code in this project is licensed under GNU GPL v3.0 only (SPDX: GPL-3.0-only); see [LICENSE](../LICENSE) for the full text. Third-party cJSON remains under the MIT License. Bingus Shared Loader v18 in the bundled package follows its upstream license and source notices; this project does not relicense that upstream content.
+Original code in this project is licensed under GNU GPL v3.0 only (SPDX: GPL-3.0-only); see [LICENSE](../LICENSE) for the full text. Third-party cJSON remains under the MIT License. Bingus Shared Loader v18 bundled in the IncludeDependencies package follows its upstream license and source notices; this project does not relicense that upstream content.
