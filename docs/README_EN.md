@@ -6,8 +6,6 @@ The currently compatible versions are Steam build 25480438 and game EXE 1.8.4601
 
 > **Usage risk:** The plugin injects into the game process, executes code, and calls internal game functions to update the chat display. This behavior may violate the game’s or anti-cheat rules and may result in account penalties or a ban.
 
-Chinese documentation: [README.md](../README.md)
-
 ## Installation and updates
 
 1. Close the game normally. Import `HD2ChatTranslateYYYYMMDDHHMMSS.zip` into HD2Arsenal, update the mod with the same name, and enable it.
