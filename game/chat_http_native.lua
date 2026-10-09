@@ -310,11 +310,8 @@ return function(ffi, kernel, bcrypt, hash_bytes, u16_ascii)
         local accepted_count = 0
         local pending_cancels = {}
         local pending_cancel_set = {}
-        local outgoing_pump_token = "__hd2ct_outgoing_pump_v1"
         local response_buffer = ffi.new("char[16388]")
         local response_written = ffi.new("HD2Probe_U32[1]")
-        local outgoing_pump_buffer = ffi.new("char[6]")
-        local outgoing_pump_written = ffi.new("HD2Probe_U32[1]")
 
         local function safe_token(token)
             return type(token) == "string" and #token >= 3 and #token <= 128
@@ -359,8 +356,7 @@ return function(ffi, kernel, bcrypt, hash_bytes, u16_ascii)
 
         function api.submit(token, body)
             retry_cancels(4)
-            if token == outgoing_pump_token or not safe_token(token)
-                or type(body) ~= "string" or #body < 1 or #body > 1023
+            if not safe_token(token) or type(body) ~= "string" or #body < 1 or #body > 1023
                 or accepted[token] or accepted_count >= 64 then
                 return false
             end
@@ -374,57 +370,30 @@ return function(ffi, kernel, bcrypt, hash_bytes, u16_ascii)
         end
 
         function api.response(token)
-            local outgoing_pump = token == outgoing_pump_token
-            if outgoing_pump then
-                if not safe_token(token) then return nil end
-            else
-                retry_cancels(4)
-                if not accepted[token] or not safe_token(token) then return nil end
-            end
-            local output_buffer = outgoing_pump and outgoing_pump_buffer or response_buffer
-            local output_written = outgoing_pump and outgoing_pump_written or response_written
-            local output_capacity = outgoing_pump and 6 or 16388
-            output_written[0] = 0
-            local ok, result = pcall(c_poll, token, output_buffer, output_capacity,
-                                     output_written)
+            retry_cancels(4)
+            if not accepted[token] or not safe_token(token) then return nil end
+            local buffer = response_buffer
+            local written = response_written
+            written[0] = 0
+            local ok, result = pcall(c_poll, token, buffer, 16388, written)
             if not ok then return "ERR\nRESPONSE_EXCEPTION" end
             if tonumber(result) ~= 1 then return nil end
-            local length = tonumber(output_written[0])
-            local maximum = outgoing_pump and 5 or 16387
-            if not length or length < 1 or length > maximum or length ~= math.floor(length) then
+            local length = tonumber(written[0])
+            if not length or length < 1 or length > 16387 or length ~= math.floor(length) then
                 return "ERR\nBAD_RESPONSE"
             end
-            return ffi.string(output_buffer, length)
+            return ffi.string(buffer, length)
         end
 
         function api.cancel(token)
             if token == nil then
-                local tokens = {}
-                for accepted_token in pairs(accepted) do
-                    tokens[#tokens + 1] = accepted_token
-                end
-                local all_ok, all_result = pcall(c_cancel, nil)
-                if all_ok and tonumber(all_result) == 1 then
-                    for _, accepted_token in ipairs(tokens) do
-                        forget_token(accepted_token)
-                    end
-                    return true
-                end
-                local all_cancelled = true
-                for _, accepted_token in ipairs(tokens) do
-                    local ok, result = pcall(c_cancel, accepted_token)
-                    if ok and tonumber(result) == 1 then
-                        forget_token(accepted_token)
-                    else
-                        all_cancelled = false
-                        if not pending_cancel_set[accepted_token]
-                            and #pending_cancels < 32 then
-                            pending_cancel_set[accepted_token] = true
-                            pending_cancels[#pending_cancels + 1] = accepted_token
-                        end
-                    end
-                end
-                return all_cancelled
+                local ok, result = pcall(c_cancel, nil)
+                if not ok or tonumber(result) ~= 1 then return false end
+                accepted = {}
+                accepted_count = 0
+                pending_cancels = {}
+                pending_cancel_set = {}
+                return true
             end
             if not safe_token(token) then return false end
             if not accepted[token] then return true end

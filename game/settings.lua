@@ -108,29 +108,6 @@ local function new_registration_step()
                 description = text_callback("timeout_description"),
             },
         },
-        {
-            option_id = catalogue.menu_options.outgoing_enabled.option_id,
-            spec = {
-                type = catalogue.menu_options.outgoing_enabled.type,
-                label = text_callback("outgoing_enabled_label"),
-                mod = "HD2 Chat Translate",
-                mod_id = catalogue.mod_id,
-                default = catalogue.menu_options.outgoing_enabled.default,
-                description = text_callback("outgoing_enabled_description"),
-            },
-        },
-        {
-            option_id = catalogue.menu_options.outgoing_target.option_id,
-            spec = {
-                type = catalogue.menu_options.outgoing_target.type,
-                label = text_callback("outgoing_target_label"),
-                mod = "HD2 Chat Translate",
-                mod_id = catalogue.mod_id,
-                default = catalogue.menu_options.outgoing_target.default_index,
-                choices = language_choices,
-                description = text_callback("outgoing_target_description"),
-            },
-        },
     }
     local registered = false
     local next_option = 1

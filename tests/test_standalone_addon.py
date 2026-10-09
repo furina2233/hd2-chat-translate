@@ -579,76 +579,6 @@ class StandaloneBuilderTests(unittest.TestCase):
 
             catalogue = builder.target_languages.load_catalogue()
             localizations = menu_locales.load_catalogue()
-            self.assertEqual(catalogue["schema_version"], 3)
-            self.assertEqual(catalogue["option_id"], "hd2chattranslate.target_language")
-            self.assertEqual(catalogue["default_index"], 1)
-            self.assertEqual(
-                [language["id"] for language in catalogue["languages"]],
-                ["zh_cn", "zh_tw", "en", "ja", "ko", "fr", "de", "es", "pt", "it"],
-            )
-            menu_options = catalogue["menu_options"]
-            self.assertEqual(
-                set(menu_options), {"enabled", "timeout", "outgoing_enabled", "outgoing_target"}
-            )
-            self.assertEqual(menu_options["enabled"]["default"], True)
-            self.assertEqual(
-                menu_options["enabled"]["description"],
-                "无论是否启用，都会监听聊天框。要想完全移除，请在模组管理器中卸载模组。",
-            )
-            self.assertEqual(menu_options["timeout"]["default_index"], 2)
-            self.assertEqual(menu_options["timeout"]["choices"], [
-                {"label": "10秒", "seconds": 10},
-                {"label": "20秒", "seconds": 20},
-                {"label": "30秒", "seconds": 30},
-            ])
-            self.assertEqual(menu_options["outgoing_enabled"]["default"], False)
-            self.assertEqual(menu_options["outgoing_target"]["default_index"], 3)
-            self.assertEqual(
-                menu_options["outgoing_enabled"]["option_id"],
-                "hd2chattranslate.outgoing_enabled",
-            )
-            self.assertEqual(
-                menu_options["outgoing_target"]["option_id"],
-                "hd2chattranslate.outgoing_target_language",
-            )
-            menu_ids = [catalogue["option_id"]] + [
-                menu_options[key]["option_id"]
-                for key in ("enabled", "timeout", "outgoing_enabled", "outgoing_target")
-            ]
-            self.assertEqual(len(menu_ids), len(set(menu_ids)))
-            generated_header = builder.target_languages.c_header_text(catalogue)
-            for definition in (
-                '#define HD2CT_ENABLED_DEFAULT 1u',
-                '#define HD2CT_OUTGOING_ENABLED_OPTION_ID "hd2chattranslate.outgoing_enabled"',
-                '#define HD2CT_OUTGOING_ENABLED_DEFAULT 0u',
-                '#define HD2CT_OUTGOING_TARGET_OPTION_ID "hd2chattranslate.outgoing_target_language"',
-                '#define HD2CT_DEFAULT_OUTGOING_TARGET_LANGUAGE 3u',
-            ):
-                self.assertIn(definition, generated_header)
-
-            invalid_catalogue = copy.deepcopy(catalogue)
-            invalid_catalogue["menu_options"]["outgoing_enabled"]["default"] = True
-            with self.assertRaisesRegex(ValueError, "默认关闭"):
-                builder.target_languages.validate_catalogue(invalid_catalogue)
-            invalid_catalogue = copy.deepcopy(catalogue)
-            invalid_catalogue["menu_options"]["outgoing_enabled"]["type"] = "choice"
-            with self.assertRaisesRegex(ValueError, "默认关闭.*toggle"):
-                builder.target_languages.validate_catalogue(invalid_catalogue)
-            invalid_catalogue = copy.deepcopy(catalogue)
-            invalid_catalogue["menu_options"]["outgoing_target"]["default_index"] = 2
-            with self.assertRaisesRegex(ValueError, "默认索引3"):
-                builder.target_languages.validate_catalogue(invalid_catalogue)
-            invalid_catalogue = copy.deepcopy(catalogue)
-            invalid_catalogue["menu_options"]["outgoing_target"]["unexpected"] = "value"
-            with self.assertRaisesRegex(ValueError, "字段不符合schema"):
-                builder.target_languages.validate_catalogue(invalid_catalogue)
-            invalid_catalogue = copy.deepcopy(catalogue)
-            invalid_catalogue["menu_options"]["outgoing_target"]["option_id"] = menu_options[
-                "enabled"
-            ]["option_id"]
-            with self.assertRaisesRegex(ValueError, "互不重复"):
-                builder.target_languages.validate_catalogue(invalid_catalogue)
-
             settings_source = builder.target_language_settings_source(
                 (ROOT / "game" / "settings.lua").read_bytes(), catalogue, localizations
             ).decode("utf-8")
@@ -659,16 +589,6 @@ class StandaloneBuilderTests(unittest.TestCase):
             english_values = [english[key] for key in menu_locales.TEXT_KEYS]
             english_values.extend(english["target_languages"].values())
             self.assertTrue(all(value.isascii() for value in english_values))
-            simplified_chinese = localizations["locales"]["zh-Hans"]
-            self.assertEqual(simplified_chinese["outgoing_enabled_label"], "翻译我的消息再发送")
-            self.assertEqual(
-                simplified_chinese["outgoing_enabled_description"],
-                "发送前先翻译自己的聊天消息。失败或超时时自动发送原文。",
-            )
-            self.assertEqual(simplified_chinese["outgoing_target_label"], "将我的话翻译为")
-            self.assertEqual(
-                simplified_chinese["outgoing_target_description"], "选择自己发送消息的目标语言。"
-            )
 
             with self.assertRaisesRegex(ValueError, "重复JSON键"):
                 menu_locales.parse_catalogue(
@@ -684,14 +604,6 @@ class StandaloneBuilderTests(unittest.TestCase):
                 menu_locales.validate_catalogue(invalid_locales)
             invalid_locales = copy.deepcopy(localizations)
             invalid_locales["locales"]["en"]["target_language_description"] = "x" * 401
-            with self.assertRaisesRegex(ValueError, "400字符上限"):
-                menu_locales.validate_catalogue(invalid_locales)
-            invalid_locales = copy.deepcopy(localizations)
-            invalid_locales["locales"]["en"]["outgoing_enabled_label"] = "x" * 65
-            with self.assertRaisesRegex(ValueError, "64字符上限"):
-                menu_locales.validate_catalogue(invalid_locales)
-            invalid_locales = copy.deepcopy(localizations)
-            invalid_locales["locales"]["en"]["outgoing_target_description"] = "x" * 401
             with self.assertRaisesRegex(ValueError, "400字符上限"):
                 menu_locales.validate_catalogue(invalid_locales)
             invalid_locales = copy.deepcopy(localizations)
@@ -713,28 +625,14 @@ class StandaloneBuilderTests(unittest.TestCase):
                     + builder._lua_string_literal(translated["enabled_label"]) + ")\n",
                     "assert(enabled_spec.description() == "
                     + builder._lua_string_literal(translated["enabled_description"]) + ")\n",
-                    "assert(outgoing_enabled_spec.label() == "
-                    + builder._lua_string_literal(translated["outgoing_enabled_label"]) + ")\n",
-                    "assert(outgoing_enabled_spec.description() == "
-                    + builder._lua_string_literal(translated["outgoing_enabled_description"]) + ")\n",
                     "assert(timeout_spec.label() == "
                     + builder._lua_string_literal(translated["timeout_label"]) + ")\n",
                     "assert(timeout_spec.description() == "
                     + builder._lua_string_literal(translated["timeout_description"]) + ")\n",
-                    "assert(outgoing_target_spec.label() == "
-                    + builder._lua_string_literal(translated["outgoing_target_label"]) + ")\n",
-                    "assert(outgoing_target_spec.description() == "
-                    + builder._lua_string_literal(translated["outgoing_target_description"]) + ")\n",
                 ))
                 for index, language in enumerate(catalogue["languages"], start=1):
                     locale_assertions.append(
                         f"assert(language_spec.choices[{index}]() == "
-                        + builder._lua_string_literal(
-                            translated["target_languages"][language["id"]]
-                        ) + ")\n"
-                    )
-                    locale_assertions.append(
-                        f"assert(outgoing_target_spec.choices[{index}]() == "
                         + builder._lua_string_literal(
                             translated["target_languages"][language["id"]]
                         ) + ")\n"
@@ -762,18 +660,16 @@ class StandaloneBuilderTests(unittest.TestCase):
                 "assert(step(1000) == false and #calls == 0)\n"
                 "_G.ModOptionsMenu.version = 4\n"
                 "assert(step(1999) == false and #calls == 0)\n"
-                "local fail_target = true\n"
+                "local fail_enabled = true\n"
                 "_G.ModOptionsMenu.register_option = function(id, spec) calls[#calls + 1] = id; "
-                "if id == 'hd2chattranslate.target_language' and fail_target then fail_target = false; return false end; "
+                "if id == 'hd2chattranslate.enabled' and fail_enabled then fail_enabled = false; return false end; "
                 "saved_specs[id] = spec; return true end\n"
-                "assert(step(2000) == false and #calls == 1)\n"
-                "assert(calls[1] == 'hd2chattranslate.target_language')\n"
-                "assert(step(2500) == false and #calls == 1)\n"
-                "assert(step(3000) == true and #calls == 6)\n"
-                "assert(calls[2] == 'hd2chattranslate.target_language' and calls[3] == 'hd2chattranslate.enabled')\n"
-                "assert(calls[4] == 'hd2chattranslate.timeout' and calls[5] == 'hd2chattranslate.outgoing_enabled')\n"
-                "assert(calls[6] == 'hd2chattranslate.outgoing_target_language')\n"
-                "assert(step(4000) == true and #calls == 6)\n"
+                "assert(step(2000) == false and #calls == 2)\n"
+                "assert(calls[1] == 'hd2chattranslate.target_language' and calls[2] == 'hd2chattranslate.enabled')\n"
+                "assert(step(2500) == false and #calls == 2)\n"
+                "assert(step(3000) == true and #calls == 4)\n"
+                "assert(calls[3] == 'hd2chattranslate.enabled' and calls[4] == 'hd2chattranslate.timeout')\n"
+                "assert(step(4000) == true and #calls == 4)\n"
                 "local language_spec = saved_specs['hd2chattranslate.target_language']\n"
                 "assert(language_spec.type == 'choice' and type(language_spec.label) == 'function')\n"
                 "assert(language_spec.mod == 'HD2 Chat Translate' and language_spec.mod_id == 'hd2chattranslate')\n"
@@ -788,28 +684,16 @@ class StandaloneBuilderTests(unittest.TestCase):
                 "assert(type(timeout_spec.label) == 'function' and type(timeout_spec.description) == 'function')\n"
                 "assert(#timeout_spec.choices == 3)\n"
                 "for i = 1, #timeout_spec.choices do assert(type(timeout_spec.choices[i]) == 'function') end\n"
-                "local outgoing_enabled_spec = saved_specs['hd2chattranslate.outgoing_enabled']\n"
-                "assert(outgoing_enabled_spec.type == 'toggle' and outgoing_enabled_spec.default == false)\n"
-                "assert(type(outgoing_enabled_spec.label) == 'function' and type(outgoing_enabled_spec.description) == 'function')\n"
-                "assert(outgoing_enabled_spec.mod_id == 'hd2chattranslate')\n"
-                "local outgoing_target_spec = saved_specs['hd2chattranslate.outgoing_target_language']\n"
-                "assert(outgoing_target_spec.type == 'choice' and outgoing_target_spec.default == 3)\n"
-                "assert(type(outgoing_target_spec.label) == 'function' and type(outgoing_target_spec.description) == 'function')\n"
-                "assert(outgoing_target_spec.mod_id == 'hd2chattranslate' and #outgoing_target_spec.choices == 10)\n"
-                "for i = 1, #outgoing_target_spec.choices do assert(type(outgoing_target_spec.choices[i]) == 'function') end\n"
                 "_G.BingusTranslations = nil\n"
                 "assert(language_spec.label() == 'Target language')\n"
                 "assert(enabled_spec.description() == 'The chat box is monitored whether this is enabled or not. To remove the mod completely, uninstall it in the mod manager.')\n"
                 "assert(timeout_spec.choices[2]() == '20 seconds')\n"
-                "assert(outgoing_enabled_spec.label() == 'Translate my messages before sending')\n"
-                "assert(outgoing_target_spec.label() == 'Translate my messages to')\n"
-                "assert(outgoing_target_spec.choices[3]() == language_spec.choices[3]())\n"
                 "_G.BingusTranslations = {version = 1, game_language = 'en'}\n"
                 "local language_registry = _G.BingusTranslations\n"
                 + "".join(locale_assertions)
                 + "assert(_G.BingusTranslations == language_registry and language_registry.version == 1)\n"
-                + "assert(#calls == 6 and calls[1] == 'hd2chattranslate.target_language' and calls[6] == 'hd2chattranslate.outgoing_target_language')\n"
-                + "assert(language_spec.default == 1 and timeout_spec.default == 2 and outgoing_enabled_spec.default == false and outgoing_target_spec.default == 3 and #language_spec.choices == 10)\n"
+                + "assert(#calls == 4 and calls[1] == 'hd2chattranslate.target_language' and calls[4] == 'hd2chattranslate.timeout')\n"
+                + "assert(language_spec.default == 1 and timeout_spec.default == 2 and #language_spec.choices == 10)\n"
                 + "_G.BingusTranslations.game_language = 'fr-CA'; assert(language_spec.label() == "
                 + builder._lua_string_literal(localizations["locales"]["fr"]["target_language_label"]) + ")\n"
                 + "_G.BingusTranslations.game_language = 'es-MX'; assert(language_spec.label() == "
@@ -822,20 +706,19 @@ class StandaloneBuilderTests(unittest.TestCase):
                 + "_G.BingusTranslations = setmetatable({}, {__index = function() error('registry metamethod called') end})\n"
                 + "assert(language_spec.label() == 'Target language')\n"
                 + "_G.BingusTranslations = 'invalid'; assert(language_spec.label() == 'Target language')\n"
-                + "assert(#calls == 6 and language_spec.default == 1 and timeout_spec.default == 2 and outgoing_target_spec.default == 3)\n"
+                + "assert(#calls == 4 and language_spec.default == 1 and timeout_spec.default == 2)\n"
                 "local logs, failed_step = {}, module.new()\n"
                 "_G.print = function(message) logs[#logs + 1] = message end\n"
                 "local failed_calls, failed_once = {}, true\n"
                 "_G.ModOptionsMenu = {api = 1, version = 3, register_option = function(id, spec) "
                 "failed_calls[#failed_calls + 1] = id; "
-                "if id == 'hd2chattranslate.target_language' and failed_once then failed_once = false; return false end; "
+                "if id == 'hd2chattranslate.enabled' and failed_once then failed_once = false; return false end; "
                 "return true end}\n"
-                "assert(failed_step(0) == false and #failed_calls == 1 and #logs == 1)\n"
-                "assert(failed_step(500) == false and #failed_calls == 1 and #logs == 1)\n"
-                "assert(failed_step(1000) == true and #failed_calls == 6 and #logs == 1)\n"
-                "assert(failed_calls[1] == 'hd2chattranslate.target_language' and failed_calls[2] == 'hd2chattranslate.target_language')\n"
-                "assert(failed_calls[3] == 'hd2chattranslate.enabled' and failed_calls[4] == 'hd2chattranslate.timeout')\n"
-                "assert(failed_calls[5] == 'hd2chattranslate.outgoing_enabled' and failed_calls[6] == 'hd2chattranslate.outgoing_target_language')\n"
+                "assert(failed_step(0) == false and #failed_calls == 2 and #logs == 1)\n"
+                "assert(failed_step(500) == false and #failed_calls == 2 and #logs == 1)\n"
+                "assert(failed_step(1000) == true and #failed_calls == 4 and #logs == 1)\n"
+                "assert(failed_calls[1] == 'hd2chattranslate.target_language' and failed_calls[3] == 'hd2chattranslate.enabled')\n"
+                "assert(failed_calls[4] == 'hd2chattranslate.timeout')\n"
                 "local clock_calls, step_calls, game_calls, now = 0, 0, 0, 0\n"
                 "local wrapped = module.wrap_update(function(...) game_calls = game_calls + 1; return 'game', nil, ... end, "
                 "function(time) step_calls = step_calls + 1; return time >= 10 end, "

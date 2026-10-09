@@ -16,11 +16,7 @@ M.SECTION = {
 }
 
 M.BUDGET_PER_STEP = 16 * 1024
-M.OUTGOING_BUDGET_PER_STEP = 4 * 1024
-M.OUTGOING_READ_CHUNK = 1024
-M.OUTGOING_HEADER_READ_BYTES = 4 * 1024
 M.MAX_ITERATIONS_PER_STEP = 64
-M.MAX_OUTGOING_ITERATIONS_PER_STEP = 4
 M.MAX_HITS_PER_PATTERN = 32
 M.MAX_CANDIDATES = 128
 M.MAX_CANDIDATE_BYTES = 128 * 1024
@@ -260,31 +256,6 @@ local KNOWN = {
     {label = "set_string_arg_143c950", rva = 0x143c950, hex = "40534883ec20488bd94881c110010000"},
 }
 
-local OUTGOING_WINDOWS = {
-    {rva = 0x1097500, size = 0x3000},
-    {rva = 0x185f000, size = 0x2000},
-    {rva = 0xbeaf00, size = 0x1800},
-    {rva = 0xbde300, size = 0x1000},
-    {rva = 0x1327f00, size = 0x2000},
-    {rva = 0x174fa00, size = 0x800},
-    {rva = 0x20bba00, size = 0x1800},
-    {rva = 0x18f2d00, size = 0x1800},
-}
-
-local function new_outgoing_windows()
-    local windows = new_array()
-    for _, window in ipairs(OUTGOING_WINDOWS) do
-        windows[#windows + 1] = {
-            rva = window.rva,
-            size = window.size,
-            offset = 0,
-            status = "pending",
-            hex = "",
-        }
-    end
-    return windows
-end
-
 -- 已采集指令的直接 call 目标是 0x12f2f60、0x20bba88、0x143a1b0。
 -- 前四个候选的窗口从 0x10976e0、0x10978e0、0x1097c20、0x1097e20 开始，接续发送/历史区域。
 -- 后三组中的第二项分别是直接 call 目标后移 0x200 的窗口续段。
@@ -364,52 +335,9 @@ end
 local function fail(state, status, detail)
     state.done = true
     state.status = status
-    state.detail = state.outgoing_probe and status or detail
+    state.detail = detail
     state.result = M.manifest(state)
     return true, state.result
-end
-
-local function prepare_header(state, header)
-    local pe, pe_error = parse_pe(header)
-    if not pe then return nil, "invalid_pe", pe_error end
-    state.pe = pe
-    if pe.timestamp ~= M.SOURCE.timestamp or pe.size_of_image ~= M.SOURCE.size_of_image then
-        return nil, "pe_mismatch", "PE timestamp or SizeOfImage does not match the approved build"
-    end
-    if pe.section.rva ~= M.SECTION.rva or pe.section.size ~= M.SECTION.size
-        or pe.section.flags ~= M.SECTION.flags or not has_flag(pe.section.flags, IMAGE_SCN_MEM_EXECUTE) then
-        return nil, "section_mismatch", "first blank-name section does not match the approved code section"
-    end
-    state.section = pe.section
-
-    if state.outgoing_probe then
-        for _, window in ipairs(state.outgoing_windows) do
-            if window.rva < state.section.rva or window.rva >= state.section.rva + state.section.size
-                or window.size > state.section.rva + state.section.size - window.rva then
-                return nil, "probe_window_invalid", "approved code window is outside the executable section"
-            end
-        end
-        state.outgoing_window_phase_started = true
-        state.outgoing_window_index = 1
-        state.phase = "outgoing_windows"
-        return true
-    end
-
-    for _, known in ipairs(KNOWN) do
-        local expected = from_hex(known.hex)
-        add_candidate(state, known.rva, "known RVA lead " .. known.label .. "; not a verified function", #expected)
-    end
-    for _, lead in ipairs(FOLLOWUP) do
-        add_candidate(
-            state,
-            lead.rva,
-            "follow-up code window " .. lead.label .. "; not a verified function",
-            1
-        )
-    end
-    state.known_index = 1
-    state.phase = "known"
-    return true
 end
 
 local function prepare(state)
@@ -430,17 +358,37 @@ local function prepare(state)
         return nil, "hash_mismatch", "game.dll SHA-256 does not match the approved build"
     end
 
-    if state.outgoing_probe then
-        state.outgoing_header = ""
-        state.outgoing_header_offset = 0
-        state.phase = "outgoing_header"
-        return true
-    end
     local header, header_error = checked_read(state.adapter, 0, 4096, false)
     if not header then
         return nil, "headers_unreadable", header_error
     end
-    return prepare_header(state, header)
+    local pe, pe_error = parse_pe(header)
+    if not pe then return nil, "invalid_pe", pe_error end
+    state.pe = pe
+    if pe.timestamp ~= M.SOURCE.timestamp or pe.size_of_image ~= M.SOURCE.size_of_image then
+        return nil, "pe_mismatch", "PE timestamp or SizeOfImage does not match the approved build"
+    end
+    if pe.section.rva ~= M.SECTION.rva or pe.section.size ~= M.SECTION.size
+        or pe.section.flags ~= M.SECTION.flags or not has_flag(pe.section.flags, IMAGE_SCN_MEM_EXECUTE) then
+        return nil, "section_mismatch", "first blank-name section does not match the approved code section"
+    end
+    state.section = pe.section
+
+    for _, known in ipairs(KNOWN) do
+        local expected = from_hex(known.hex)
+        add_candidate(state, known.rva, "known RVA lead " .. known.label .. "; not a verified function", #expected)
+    end
+    for _, lead in ipairs(FOLLOWUP) do
+        add_candidate(
+            state,
+            lead.rva,
+            "follow-up code window " .. lead.label .. "; not a verified function",
+            1
+        )
+    end
+    state.known_index = 1
+    state.phase = "known"
+    return true
 end
 
 local function compare_known_signatures(state)
@@ -577,23 +525,14 @@ local function capture_one(state, budget)
     return candidate.window_length, true
 end
 
-function M.new(adapter, options)
+function M.new(adapter)
     assert(type(adapter) == "table", "adapter required")
     assert(type(adapter.hash_file) == "function", "adapter.hash_file required")
     assert(type(adapter.query) == "function", "adapter.query required")
     assert(type(adapter.read) == "function", "adapter.read required")
     assert(type(adapter.hash_bytes) == "function", "adapter.hash_bytes required")
-    options = options or {}
-    assert(type(options) == "table", "options must be a table")
-    local outgoing_probe = options.outgoing_probe == true
     return {
         adapter = adapter,
-        outgoing_probe = outgoing_probe,
-        outgoing_windows = outgoing_probe and new_outgoing_windows() or nil,
-        outgoing_header = "",
-        outgoing_header_offset = 0,
-        outgoing_window_phase_started = false,
-        outgoing_window_index = nil,
         phase = "prepare",
         done = false,
         candidates = new_array(),
@@ -647,9 +586,6 @@ function M.step(state, frame_budget)
     end
     if frame_budget < 0 then frame_budget = 0 end
     frame_budget = math.min(math.floor(frame_budget), M.BUDGET_PER_STEP)
-    if state.outgoing_probe then
-        frame_budget = math.min(frame_budget, M.OUTGOING_BUDGET_PER_STEP)
-    end
     local initial_budget = frame_budget
     state.frame_read_budget = frame_budget
     if state.phase == "prepare" then
@@ -658,71 +594,9 @@ function M.step(state, frame_budget)
     end
 
     local while_guard = 0
-    local iteration_limit = state.outgoing_probe
-        and M.MAX_OUTGOING_ITERATIONS_PER_STEP or M.MAX_ITERATIONS_PER_STEP
-    while state.frame_read_budget > 0 and while_guard < iteration_limit do
+    while state.frame_read_budget > 0 and while_guard < M.MAX_ITERATIONS_PER_STEP do
         while_guard = while_guard + 1
-        if state.phase == "outgoing_header" then
-            local amount = math.min(
-                M.OUTGOING_HEADER_READ_BYTES - state.outgoing_header_offset,
-                M.OUTGOING_READ_CHUNK,
-                state.frame_read_budget
-            )
-            if amount <= 0 then break end
-            local data = checked_read(
-                state.adapter,
-                state.outgoing_header_offset,
-                amount,
-                false
-            )
-            state.frame_read_budget = state.frame_read_budget - amount
-            if not data then return fail(state, "headers_unreadable", "PE header read failed") end
-            state.outgoing_header = state.outgoing_header .. data
-            state.outgoing_header_offset = state.outgoing_header_offset + #data
-            if state.outgoing_header_offset == M.OUTGOING_HEADER_READ_BYTES then
-                local ok, status, detail = prepare_header(state, state.outgoing_header)
-                if not ok then return fail(state, status, detail) end
-            end
-        elseif state.phase == "outgoing_windows" then
-            local window = state.outgoing_windows[state.outgoing_window_index]
-            if not window then
-                state.done = true
-                state.status = "outgoing_probe_complete"
-                state.phase = "complete"
-                state.result = M.manifest(state)
-                return true, state.result
-            end
-            local amount = math.min(
-                window.size - window.offset,
-                M.OUTGOING_READ_CHUNK,
-                state.frame_read_budget
-            )
-            if amount <= 0 then break end
-            local data = checked_read(state.adapter, window.rva + window.offset, amount, true)
-            state.frame_read_budget = state.frame_read_budget - amount
-            if not data then
-                window.status = window.offset > 0 and "partial" or "failed"
-                state.done = true
-                state.status = window.offset > 0 and "outgoing_probe_partial" or "outgoing_probe_failed"
-                state.detail = "window_read_failed"
-                state.phase = "outgoing_failed"
-                state.result = M.manifest(state)
-                return true, state.result
-            end
-            window.hex = window.hex .. to_hex(data)
-            window.offset = window.offset + #data
-            if window.offset == window.size then
-                window.status = "complete"
-                state.outgoing_window_index = state.outgoing_window_index + 1
-                if state.outgoing_window_index > #state.outgoing_windows then
-                    state.done = true
-                    state.status = "outgoing_probe_complete"
-                    state.phase = "complete"
-                    state.result = M.manifest(state)
-                    return true, state.result
-                end
-            end
-        elseif state.phase == "known" then
+        if state.phase == "known" then
             compare_known_signatures(state)
         elseif state.phase == "scanning" and state.capture_index <= #state.capture_queue then
             capture_one(state, state.frame_read_budget)
@@ -790,52 +664,6 @@ function M.step(state, frame_budget)
 end
 
 function M.manifest(state)
-    if state.outgoing_probe then
-        local windows = new_array()
-        for index, window in ipairs(state.outgoing_windows) do
-            local status = window.status
-            if status == "pending" and state.done then
-                if state.outgoing_window_phase_started and index == state.outgoing_window_index then
-                    status = window.offset > 0 and "partial" or "failed"
-                else
-                    status = "not_attempted"
-                end
-            end
-            windows[#windows + 1] = {
-                rva = window.rva,
-                size = window.size,
-                status = status,
-                hex = window.hex,
-            }
-        end
-        return {
-            schema_version = 1,
-            mode = "outgoing_send_code_probe",
-            status = state.status or "running",
-            detail = state.detail,
-            function_verification = "unverified",
-            read_limits = {
-                max_memory_read_bytes_per_step = M.OUTGOING_BUDGET_PER_STEP,
-                max_memory_read_bytes_per_call = M.OUTGOING_READ_CHUNK,
-                disk_hash_bytes_excluded_from_memory_budget = true,
-            },
-            source_build = {
-                module = M.SOURCE.module,
-                game_dll_sha256_expected = M.SOURCE.sha256,
-                game_dll_sha256_observed = state.disk_sha256,
-                game_dll_size_expected = M.SOURCE.disk_size,
-                game_dll_size_observed = state.disk_size,
-                pe_timestamp_expected = M.SOURCE.timestamp,
-                pe_timestamp_observed = state.pe and state.pe.timestamp or nil,
-                size_of_image_expected = M.SOURCE.size_of_image,
-                size_of_image_observed = state.pe and state.pe.size_of_image or nil,
-                code_section_rva = M.SECTION.rva,
-                code_section_size = M.SECTION.size,
-                code_section_flags = M.SECTION.flags,
-            },
-            windows = windows,
-        }
-    end
     return {
         schema_version = 1,
         status = state.status or "running",

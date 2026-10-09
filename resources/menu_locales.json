@@ -20,11 +20,7 @@
         "es": "Spanish",
         "pt": "Portuguese",
         "it": "Italian"
-      },
-      "outgoing_enabled_label": "Translate my messages before sending",
-      "outgoing_enabled_description": "Translate your chat messages before sending. If translation fails or times out, send the original text.",
-      "outgoing_target_label": "Translate my messages to",
-      "outgoing_target_description": "Choose the target language for messages you send."
+      }
     },
     "en-GB": {
       "target_language_label": "Target language",
@@ -45,11 +41,7 @@
         "es": "Spanish",
         "pt": "Portuguese",
         "it": "Italian"
-      },
-      "outgoing_enabled_label": "Translate my messages before sending",
-      "outgoing_enabled_description": "Translate your chat messages before sending. If translation fails or times out, send the original text.",
-      "outgoing_target_label": "Translate my messages to",
-      "outgoing_target_description": "Choose the target language for messages you send."
+      }
     },
     "fr": {
       "target_language_label": "Langue cible",
@@ -70,11 +62,7 @@
         "es": "Espagnol",
         "pt": "Portugais",
         "it": "Italien"
-      },
-      "outgoing_enabled_label": "Traduire mes messages avant envoi",
-      "outgoing_enabled_description": "Traduit vos messages de chat avant leur envoi. En cas d’échec ou de délai dépassé, le texte original est envoyé.",
-      "outgoing_target_label": "Traduire mes messages vers",
-      "outgoing_target_description": "Choisissez la langue cible de vos messages de chat."
+      }
     },
     "it": {
       "target_language_label": "Lingua di destinazione",
@@ -95,11 +83,7 @@
         "es": "Spagnolo",
         "pt": "Portoghese",
         "it": "Italiano"
-      },
-      "outgoing_enabled_label": "Traduci i miei messaggi prima di inviarli",
-      "outgoing_enabled_description": "Traduci i tuoi messaggi di chat prima di inviarli. Se la traduzione non riesce o scade, invia il testo originale.",
-      "outgoing_target_label": "Traduci i miei messaggi in",
-      "outgoing_target_description": "Scegli la lingua di destinazione dei messaggi che invii."
+      }
     },
     "de": {
       "target_language_label": "Zielsprache",
@@ -120,11 +104,7 @@
         "es": "Spanisch",
         "pt": "Portugiesisch",
         "it": "Italienisch"
-      },
-      "outgoing_enabled_label": "Meine Nachrichten vor dem Senden übersetzen",
-      "outgoing_enabled_description": "Übersetzt deine Chatnachrichten vor dem Senden. Bei einem Fehler oder Zeitüberschreitung wird der Originaltext gesendet.",
-      "outgoing_target_label": "Meine Nachrichten übersetzen in",
-      "outgoing_target_description": "Wähle die Zielsprache für deine Chatnachrichten."
+      }
     },
     "es": {
       "target_language_label": "Idioma de destino",
@@ -145,11 +125,7 @@
         "es": "Español",
         "pt": "Portugués",
         "it": "Italiano"
-      },
-      "outgoing_enabled_label": "Traducir mis mensajes antes de enviarlos",
-      "outgoing_enabled_description": "Traduce tus mensajes de chat antes de enviarlos. Si la traducción falla o se agota el tiempo, se envía el texto original.",
-      "outgoing_target_label": "Traducir mis mensajes al",
-      "outgoing_target_description": "Elige el idioma de destino de los mensajes que envías."
+      }
     },
     "es-419": {
       "target_language_label": "Idioma de destino",
@@ -170,11 +146,7 @@
         "es": "Español",
         "pt": "Portugués",
         "it": "Italiano"
-      },
-      "outgoing_enabled_label": "Traducir mis mensajes antes de enviarlos",
-      "outgoing_enabled_description": "Traduce tus mensajes de chat antes de enviarlos. Si la traducción falla o se agota el tiempo, se envía el texto original.",
-      "outgoing_target_label": "Traducir mis mensajes al",
-      "outgoing_target_description": "Elige el idioma de destino de los mensajes que envías."
+      }
     },
     "ja": {
       "target_language_label": "翻訳先の言語",
@@ -195,11 +167,7 @@
         "es": "スペイン語",
         "pt": "ポルトガル語",
         "it": "イタリア語"
-      },
-      "outgoing_enabled_label": "自分のメッセージを送信前に翻訳",
-      "outgoing_enabled_description": "チャットメッセージを送信前に翻訳します。翻訳に失敗した場合やタイムアウトした場合は、元のテキストを送信します。",
-      "outgoing_target_label": "自分のメッセージの翻訳先",
-      "outgoing_target_description": "送信するチャットメッセージの翻訳先言語を選択します。"
+      }
     },
     "ko": {
       "target_language_label": "대상 언어",
@@ -220,11 +188,7 @@
         "es": "스페인어",
         "pt": "포르투갈어",
         "it": "이탈리아어"
-      },
-      "outgoing_enabled_label": "내 메시지를 보내기 전에 번역",
-      "outgoing_enabled_description": "채팅 메시지를 보내기 전에 번역합니다. 번역에 실패하거나 시간이 초과되면 원문을 보냅니다.",
-      "outgoing_target_label": "내 메시지를 번역할 언어",
-      "outgoing_target_description": "보내는 채팅 메시지의 대상 언어를 선택합니다."
+      }
     },
     "pt-BR": {
       "target_language_label": "Idioma de destino",
@@ -245,11 +209,7 @@
         "es": "Espanhol",
         "pt": "Português",
         "it": "Italiano"
-      },
-      "outgoing_enabled_label": "Traduzir minhas mensagens antes de enviar",
-      "outgoing_enabled_description": "Traduz suas mensagens de chat antes do envio. Se a tradução falhar ou expirar, o texto original será enviado.",
-      "outgoing_target_label": "Traduzir minhas mensagens para",
-      "outgoing_target_description": "Escolha o idioma de destino das mensagens que você envia."
+      }
     },
     "pt": {
       "target_language_label": "Idioma de destino",
@@ -270,11 +230,7 @@
         "es": "Espanhol",
         "pt": "Português",
         "it": "Italiano"
-      },
-      "outgoing_enabled_label": "Traduzir as minhas mensagens antes de enviar",
-      "outgoing_enabled_description": "Traduz as suas mensagens de chat antes do envio. Se a tradução falhar ou expirar, o texto original será enviado.",
-      "outgoing_target_label": "Traduzir as minhas mensagens para",
-      "outgoing_target_description": "Escolha o idioma de destino das mensagens que envia."
+      }
     },
     "pl": {
       "target_language_label": "Język docelowy",
@@ -295,11 +251,7 @@
         "es": "Hiszpański",
         "pt": "Portugalski",
         "it": "Włoski"
-      },
-      "outgoing_enabled_label": "Tłumacz moje wiadomości przed wysłaniem",
-      "outgoing_enabled_description": "Tłumaczy wiadomości czatu przed wysłaniem. Jeśli tłumaczenie się nie powiedzie lub upłynie limit czasu, wysyłany jest oryginalny tekst.",
-      "outgoing_target_label": "Tłumacz moje wiadomości na",
-      "outgoing_target_description": "Wybierz język docelowy wysyłanych wiadomości czatu."
+      }
     },
     "ru": {
       "target_language_label": "Целевой язык",
@@ -320,11 +272,7 @@
         "es": "Испанский",
         "pt": "Португальский",
         "it": "Итальянский"
-      },
-      "outgoing_enabled_label": "Переводить мои сообщения перед отправкой",
-      "outgoing_enabled_description": "Переводит ваши сообщения в чате перед отправкой. Если перевод не удался или истекло время ожидания, отправляется исходный текст.",
-      "outgoing_target_label": "Переводить мои сообщения на",
-      "outgoing_target_description": "Выберите целевой язык отправляемых сообщений в чате."
+      }
     },
     "zh-Hans": {
       "target_language_label": "目标语言",
@@ -345,11 +293,7 @@
         "es": "西班牙语",
         "pt": "葡萄牙语",
         "it": "意大利语"
-      },
-      "outgoing_enabled_label": "翻译我的消息再发送",
-      "outgoing_enabled_description": "发送前先翻译自己的聊天消息。失败或超时时自动发送原文。",
-      "outgoing_target_label": "将我的话翻译为",
-      "outgoing_target_description": "选择自己发送消息的目标语言。"
+      }
     },
     "zh-Hant": {
       "target_language_label": "目標語言",
@@ -370,11 +314,7 @@
         "es": "西班牙語",
         "pt": "葡萄牙語",
         "it": "義大利語"
-      },
-      "outgoing_enabled_label": "傳送前翻譯我的訊息",
-      "outgoing_enabled_description": "傳送前先翻譯自己的聊天訊息。翻譯失敗或逾時時會自動傳送原文。",
-      "outgoing_target_label": "將我的話翻譯為",
-      "outgoing_target_description": "選擇自己傳送訊息的目標語言。"
+      }
     }
   }
 }

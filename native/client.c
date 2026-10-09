@@ -1,6 +1,4 @@
 #include "internal.h"
-#include "outgoing.h"
-#include "target_languages.generated.h"
 
 #include <process.h>
 #include <stdio.h>
@@ -18,10 +16,6 @@ typedef struct HD2CT_JobSlot {
     char token[HD2CT_MAX_TOKEN + 1u];
     char source[HD2CT_MAX_SOURCE + 1u];
     uint32_t source_bytes;
-    uint32_t kind;
-    uint32_t settings_snapshot_valid;
-    uint32_t target_language_snapshot;
-    uint32_t timeout_seconds_snapshot;
     char result[HD2CT_MAX_RESULT + 1u];
     uint32_t result_bytes;
 } HD2CT_JobSlot;
@@ -157,11 +151,6 @@ static void hd2ct_apply_cancel_all_locked(void)
     uint32_t i;
     if (InterlockedExchange(&g_cancel_all_pending, 0) == 0) return;
     for (i = 0; i < HD2CT_JOB_COUNT; ++i) {
-        /* 公开的全量取消只覆盖入站提交，出站任务由私有 FIFO 管理。 */
-        if (g_jobs[i].state == HD2CT_SLOT_FREE ||
-            g_jobs[i].kind != HD2CT_JOB_INCOMING) {
-            continue;
-        }
         if (g_jobs[i].state == HD2CT_SLOT_ACTIVE) {
             g_jobs[i].cancelled = 1;
             g_jobs[i].timeout_reported = 0;
@@ -419,10 +408,6 @@ static int hd2ct_take_next_job_locked(HD2CT_WorkerJob *copy)
     memcpy(copy->token, g_jobs[selected].token, sizeof(copy->token));
     memcpy(copy->source, g_jobs[selected].source, sizeof(copy->source));
     copy->source_bytes = g_jobs[selected].source_bytes;
-    copy->kind = g_jobs[selected].kind;
-    copy->settings_snapshot_valid = g_jobs[selected].settings_snapshot_valid;
-    copy->target_language_snapshot = g_jobs[selected].target_language_snapshot;
-    copy->timeout_seconds_snapshot = g_jobs[selected].timeout_seconds_snapshot;
     memcpy(copy->url, g_url, sizeof(copy->url));
     memcpy(copy->model, g_model, sizeof(copy->model));
     memcpy(copy->api_key, g_api_key, sizeof(copy->api_key));
@@ -449,15 +434,9 @@ static void hd2ct_process_job(HINTERNET session, HD2CT_WorkerJob *job)
         return;
     }
     hd2ct_read_applied_settings(&settings);
-    job->target_language = job->kind == HD2CT_JOB_OUTGOING &&
-        job->settings_snapshot_valid ? job->target_language_snapshot :
-        (job->kind == HD2CT_JOB_OUTGOING ? settings.outgoing_target_language :
-         settings.target_language);
-    job->timeout_seconds = job->kind == HD2CT_JOB_OUTGOING &&
-        job->settings_snapshot_valid ? job->timeout_seconds_snapshot :
-        settings.timeout_seconds;
-    job->menu_enabled = settings.enabled &&
-        (job->kind != HD2CT_JOB_OUTGOING || settings.outgoing_enabled);
+    job->target_language = settings.target_language;
+    job->timeout_seconds = settings.timeout_seconds;
+    job->menu_enabled = settings.enabled;
     if (job->menu_enabled == 0u) {
         hd2ct_complete_job(job, "SKIP\n", 5u, 0, 0);
         return;
@@ -747,8 +726,6 @@ configure_workers:
     if (InterlockedCompareExchange(&g_status, 0, 0) != HD2CT_STATUS_WORKER_FAILURE) {
         InterlockedExchange(&g_initialized, 2);
         WakeAllConditionVariable(&g_work_available);
-        hd2ct_outgoing_controller_start(
-            service_status == HD2CT_STATUS_READY ? 1 : 0);
     }
 
 done:
@@ -784,10 +761,7 @@ static void hd2ct_start_bootstrap(void)
     CloseHandle((HANDLE)thread);
 }
 
-static uint32_t hd2ct_submit_kind(const char *token, const char *body,
-                                  uint32_t bytes, uint32_t kind,
-                                  uint32_t target_language,
-                                  uint32_t timeout_seconds)
+uint32_t HD2CT_Submit(const char *token, const char *body, uint32_t bytes)
 {
     size_t token_length;
     uint32_t i;
@@ -796,10 +770,6 @@ static uint32_t hd2ct_submit_kind(const char *token, const char *body,
     if (body == NULL || bytes == 0 ||
         bytes > HD2CT_MAX_SOURCE || !hd2ct_valid_token(token, &token_length) ||
         !hd2ct_valid_utf8((const unsigned char *)body, bytes, 1)) {
-        return 0u;
-    }
-    if (token_length == sizeof(HD2CT_OUTGOING_PUMP_TOKEN) - 1u &&
-        memcmp(token, HD2CT_OUTGOING_PUMP_TOKEN, token_length) == 0) {
         return 0u;
     }
     if (!TryAcquireSRWLockExclusive(&g_lock)) {
@@ -837,37 +807,13 @@ static uint32_t hd2ct_submit_kind(const char *token, const char *body,
     memcpy(g_jobs[free_slot].source, body, bytes);
     g_jobs[free_slot].source[bytes] = '\0';
     g_jobs[free_slot].source_bytes = bytes;
-    g_jobs[free_slot].kind = kind;
-    if (kind == HD2CT_JOB_OUTGOING) {
-        g_jobs[free_slot].settings_snapshot_valid = 1u;
-        g_jobs[free_slot].target_language_snapshot = target_language;
-        g_jobs[free_slot].timeout_seconds_snapshot = timeout_seconds;
-    }
     WakeConditionVariable(&g_work_available);
     ReleaseSRWLockExclusive(&g_lock);
     hd2ct_start_bootstrap();
     return 1u;
 }
 
-uint32_t HD2CT_Submit(const char *token, const char *body, uint32_t bytes)
-{
-    return hd2ct_submit_kind(token, body, bytes, HD2CT_JOB_INCOMING, 0u, 0u);
-}
-
-uint32_t hd2ct_submit_outgoing(const char *token, const char *body,
-                               uint32_t bytes, uint32_t target_language,
-                               uint32_t timeout_seconds)
-{
-    if (bytes > HD2CT_OUTGOING_SEND_LIMIT || target_language == 0u ||
-        target_language > HD2CT_TARGET_LANGUAGE_COUNT ||
-        (timeout_seconds != 10u && timeout_seconds != 20u &&
-         timeout_seconds != 30u)) return 0u;
-    return hd2ct_submit_kind(token, body, bytes, HD2CT_JOB_OUTGOING,
-                             target_language, timeout_seconds);
-}
-
-uint32_t hd2ct_poll_job(const char *token, char *out, uint32_t capacity,
-                        uint32_t *written)
+uint32_t HD2CT_Poll(const char *token, char *out, uint32_t capacity, uint32_t *written)
 {
     size_t token_length;
     uint32_t i;
@@ -931,36 +877,6 @@ uint32_t hd2ct_poll_job(const char *token, char *out, uint32_t capacity,
     }
     ReleaseSRWLockExclusive(&g_lock);
     return 0u;
-}
-
-uint32_t HD2CT_Poll(const char *token, char *out, uint32_t capacity,
-                    uint32_t *written)
-{
-    size_t token_length;
-    int outgoing_pump = 0;
-    static const char sent_text[] = "SENT\n";
-    static const char skip_text[] = "SKIP\n";
-    const char *response;
-    uint32_t response_bytes;
-    if (written != NULL) *written = 0u;
-    if (out == NULL || written == NULL || capacity == 0u ||
-        !hd2ct_valid_token(token, &token_length)) {
-        return 0u;
-    }
-    if (token_length != sizeof(HD2CT_OUTGOING_PUMP_TOKEN) - 1u ||
-        memcmp(token, HD2CT_OUTGOING_PUMP_TOKEN, token_length) != 0) {
-        return hd2ct_poll_job(token, out, capacity, written);
-    }
-    if (capacity <= sizeof("SENT\n") - 1u) return 0u;
-    hd2ct_start_bootstrap();
-    outgoing_pump = hd2ct_outgoing_pump();
-    response = outgoing_pump ? sent_text : skip_text;
-    response_bytes = outgoing_pump ? (uint32_t)sizeof(sent_text) - 1u :
-        (uint32_t)sizeof(skip_text) - 1u;
-    memcpy(out, response, response_bytes);
-    out[response_bytes] = '\0';
-    *written = response_bytes;
-    return 1u;
 }
 
 uint32_t HD2CT_Cancel(const char *token)

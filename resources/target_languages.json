@@ -1,5 +1,5 @@
 {
-  "schema_version": 3,
+  "schema_version": 2,
   "option_id": "hd2chattranslate.target_language",
   "mod_id": "hd2chattranslate",
   "default_index": 1,
@@ -22,20 +22,6 @@
         {"label": "20秒", "seconds": 20},
         {"label": "30秒", "seconds": 30}
       ]
-    },
-    "outgoing_enabled": {
-      "option_id": "hd2chattranslate.outgoing_enabled",
-      "type": "toggle",
-      "label": "翻译我的消息再发送",
-      "default": false,
-      "description": "发送前先翻译自己的聊天消息。失败或超时时自动发送原文。"
-    },
-    "outgoing_target": {
-      "option_id": "hd2chattranslate.outgoing_target_language",
-      "type": "choice",
-      "label": "将我的话翻译为",
-      "default_index": 3,
-      "description": "选择自己发送消息的目标语言。"
     }
   },
   "languages": [
