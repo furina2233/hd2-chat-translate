@@ -47,6 +47,21 @@ enum {
     HD2CT_OUTGOING_FAILURE_PUMP_STALE = 6
 };
 
+enum {
+    HD2CT_OUTGOING_HOOK_STAGE_NONE = 0,
+    HD2CT_OUTGOING_HOOK_STAGE_INSTALL_ALIGN = 1,
+    HD2CT_OUTGOING_HOOK_STAGE_INSTALL_READ = 2,
+    HD2CT_OUTGOING_HOOK_STAGE_INSTALL_WORD_MISMATCH = 3,
+    HD2CT_OUTGOING_HOOK_STAGE_INSTALL_PROTECT_WRITE = 4,
+    HD2CT_OUTGOING_HOOK_STAGE_INSTALL_CAS_MISMATCH = 5,
+    HD2CT_OUTGOING_HOOK_STAGE_INSTALL_PROTECT_RESTORE = 6,
+    HD2CT_OUTGOING_HOOK_STAGE_INSTALL_FLUSH = 7,
+    HD2CT_OUTGOING_HOOK_STAGE_RESTORE_PROTECT_WRITE = 8,
+    HD2CT_OUTGOING_HOOK_STAGE_RESTORE_CAS_MISMATCH = 9,
+    HD2CT_OUTGOING_HOOK_STAGE_RESTORE_PROTECT_RESTORE = 10,
+    HD2CT_OUTGOING_HOOK_STAGE_RESTORE_FLUSH = 11
+};
+
 typedef struct HD2CT_OutgoingContext {
     uint64_t root;
     uintptr_t service;
@@ -90,6 +105,8 @@ static volatile LONG g_outgoing_hook_active;
 static volatile LONG g_outgoing_hook_state;
 static volatile LONG g_outgoing_pump_active;
 static volatile LONG g_outgoing_failure_code;
+static volatile LONG g_outgoing_hook_failure_stage;
+static volatile LONG g_outgoing_hook_win32_error;
 static volatile LONG g_outgoing_gate_checked;
 static volatile LONG g_outgoing_controller_started;
 static volatile LONG g_outgoing_queue_pending;
@@ -127,6 +144,7 @@ static volatile LONG g_outgoing_test_status_root_valid;
 static volatile LONG g_outgoing_test_patch_owner_conflict;
 static volatile LONG g_outgoing_test_reenter_pump;
 static volatile LONG g_outgoing_test_fail_claim_once;
+static volatile LONG g_outgoing_test_restore_failure_once;
 #endif
 
 static void hd2ct_outgoing_clear_retry(void)
@@ -176,6 +194,21 @@ static void hd2ct_outgoing_set_failure(uint32_t code)
     InterlockedExchange(&g_outgoing_failure_code, (LONG)code);
 }
 
+static void hd2ct_outgoing_set_hook_failure(uint32_t stage, DWORD error)
+{
+    InterlockedExchange(&g_outgoing_hook_failure_stage, (LONG)stage);
+    InterlockedExchange(&g_outgoing_hook_win32_error, (LONG)error);
+    hd2ct_outgoing_set_failure(HD2CT_OUTGOING_FAILURE_PATCH_OWNER);
+}
+
+static void hd2ct_outgoing_clear_hook_failure(void)
+{
+    InterlockedExchange(&g_outgoing_hook_win32_error, 0);
+    InterlockedExchange(&g_outgoing_hook_failure_stage,
+                        HD2CT_OUTGOING_HOOK_STAGE_NONE);
+    hd2ct_outgoing_set_failure(HD2CT_OUTGOING_FAILURE_NONE);
+}
+
 static int hd2ct_outgoing_memory_protection(DWORD protection)
 {
     DWORD base = protection & 0xffu;
@@ -185,11 +218,12 @@ static int hd2ct_outgoing_memory_protection(DWORD protection)
          base == PAGE_EXECUTE_READWRITE || base == PAGE_EXECUTE_WRITECOPY);
 }
 
-static int hd2ct_outgoing_read_memory(uintptr_t address, void *output,
-                                     size_t bytes)
+static int hd2ct_outgoing_read_memory_ex(uintptr_t address, void *output,
+                                         size_t bytes, DWORD *error_out)
 {
     unsigned char *destination = (unsigned char *)output;
     size_t copied = 0u;
+    if (error_out != NULL) *error_out = ERROR_SUCCESS;
     if (address == 0u || output == NULL || bytes == 0u ||
         address > UINTPTR_MAX - bytes) return 0;
     while (copied < bytes) {
@@ -200,8 +234,15 @@ static int hd2ct_outgoing_read_memory(uintptr_t address, void *output,
         size_t available;
         size_t requested;
         SIZE_T received = 0u;
-        if (VirtualQuery((const void *)current, &before, sizeof(before)) !=
-                sizeof(before) || before.State != MEM_COMMIT ||
+        SIZE_T queried = VirtualQuery((const void *)current, &before, sizeof(before));
+        if (queried != sizeof(before)) {
+            if (queried == 0u) {
+                DWORD error = GetLastError();
+                if (error_out != NULL) *error_out = error;
+            }
+            return 0;
+        }
+        if (before.State != MEM_COMMIT ||
             !hd2ct_outgoing_memory_protection(before.Protect) ||
             (uintptr_t)before.BaseAddress > current ||
             before.RegionSize > UINTPTR_MAX - (uintptr_t)before.BaseAddress) {
@@ -210,13 +251,23 @@ static int hd2ct_outgoing_read_memory(uintptr_t address, void *output,
         region_end = (uintptr_t)before.BaseAddress + before.RegionSize;
         available = (size_t)(region_end - current);
         requested = bytes - copied < available ? bytes - copied : available;
-        if (requested == 0u ||
-            !ReadProcessMemory(GetCurrentProcess(), (const void *)current,
-                               destination + copied, requested, &received) ||
-            received != requested ||
-            VirtualQuery((const void *)current, &after, sizeof(after)) !=
-                sizeof(after) ||
-            before.BaseAddress != after.BaseAddress ||
+        if (requested == 0u) return 0;
+        if (!ReadProcessMemory(GetCurrentProcess(), (const void *)current,
+                               destination + copied, requested, &received)) {
+            DWORD error = GetLastError();
+            if (error_out != NULL) *error_out = error;
+            return 0;
+        }
+        if (received != requested) return 0;
+        queried = VirtualQuery((const void *)current, &after, sizeof(after));
+        if (queried != sizeof(after)) {
+            if (queried == 0u) {
+                DWORD error = GetLastError();
+                if (error_out != NULL) *error_out = error;
+            }
+            return 0;
+        }
+        if (before.BaseAddress != after.BaseAddress ||
             before.AllocationBase != after.AllocationBase ||
             before.RegionSize != after.RegionSize ||
             before.State != after.State || before.Protect != after.Protect ||
@@ -226,6 +277,12 @@ static int hd2ct_outgoing_read_memory(uintptr_t address, void *output,
         copied += requested;
     }
     return 1;
+}
+
+static int hd2ct_outgoing_read_memory(uintptr_t address, void *output,
+                                     size_t bytes)
+{
+    return hd2ct_outgoing_read_memory_ex(address, output, bytes, NULL);
 }
 
 static int hd2ct_outgoing_context_equal(const HD2CT_OutgoingContext *left,
@@ -497,7 +554,8 @@ static int hd2ct_outgoing_intercept(uintptr_t service, uintptr_t spaces,
         InterlockedCompareExchange(&g_outgoing_service_ready, 0, 0) == 0 ||
         InterlockedCompareExchange(&g_outgoing_master_enabled, 0, 0) == 0 ||
         InterlockedCompareExchange(&g_outgoing_enabled, 0, 0) == 0 ||
-        InterlockedCompareExchange(&g_outgoing_hook_active, 0, 0) == 0) {
+        InterlockedCompareExchange(&g_outgoing_hook_active, 0, 0) == 0 ||
+        InterlockedCompareExchange(&g_outgoing_hook_state, 0, 0) != 1) {
         return 0;
     }
     {
@@ -1006,6 +1064,187 @@ static uintptr_t hd2ct_outgoing_allocate_near(uintptr_t call_address)
     return 0u;
 }
 
+static int hd2ct_outgoing_restore_protection(uintptr_t address,
+                                             DWORD protection,
+                                             DWORD *error_out)
+{
+#ifdef HD2CT_TESTING
+    if (InterlockedExchange(&g_outgoing_test_restore_failure_once, 0) != 0) {
+        SetLastError(ERROR_ACCESS_DENIED);
+        {
+            DWORD error = GetLastError();
+            if (error_out != NULL) *error_out = error;
+        }
+        return 0;
+    }
+#endif
+    if (!VirtualProtect((void *)address, sizeof(uint64_t), protection,
+                        &protection)) {
+        DWORD error = GetLastError();
+        if (error_out != NULL) *error_out = error;
+        return 0;
+    }
+    if (error_out != NULL) *error_out = ERROR_SUCCESS;
+    return 1;
+}
+
+static int hd2ct_outgoing_page_is_writable(uintptr_t address)
+{
+    MEMORY_BASIC_INFORMATION information;
+    SIZE_T queried = VirtualQuery((const void *)address, &information,
+                                  sizeof(information));
+    if (queried != sizeof(information)) {
+        if (queried == 0u) {
+            DWORD error = GetLastError();
+            (void)error;
+        }
+        return 0;
+    }
+    if (information.State != MEM_COMMIT ||
+        (information.Protect & PAGE_GUARD) != 0u) return 0;
+    switch (information.Protect & 0xffu) {
+    case PAGE_READWRITE:
+    case PAGE_WRITECOPY:
+    case PAGE_EXECUTE_READWRITE:
+    case PAGE_EXECUTE_WRITECOPY:
+        return 1;
+    default:
+        return 0;
+    }
+}
+
+static int hd2ct_outgoing_swap_word(uintptr_t address, uint64_t expected,
+                                    uint64_t replacement, int installing,
+                                    int *replacement_present)
+{
+    DWORD old_protection = 0u;
+    DWORD error = ERROR_SUCCESS;
+    LONG64 observed;
+    uint32_t protect_write_stage = installing ?
+        HD2CT_OUTGOING_HOOK_STAGE_INSTALL_PROTECT_WRITE :
+        HD2CT_OUTGOING_HOOK_STAGE_RESTORE_PROTECT_WRITE;
+    uint32_t cas_mismatch_stage = installing ?
+        HD2CT_OUTGOING_HOOK_STAGE_INSTALL_CAS_MISMATCH :
+        HD2CT_OUTGOING_HOOK_STAGE_RESTORE_CAS_MISMATCH;
+    uint32_t protect_restore_stage = installing ?
+        HD2CT_OUTGOING_HOOK_STAGE_INSTALL_PROTECT_RESTORE :
+        HD2CT_OUTGOING_HOOK_STAGE_RESTORE_PROTECT_RESTORE;
+    uint32_t flush_stage = installing ?
+        HD2CT_OUTGOING_HOOK_STAGE_INSTALL_FLUSH :
+        HD2CT_OUTGOING_HOOK_STAGE_RESTORE_FLUSH;
+    if (replacement_present != NULL) *replacement_present = 0;
+    if (!VirtualProtect((void *)address, sizeof(uint64_t),
+                        PAGE_EXECUTE_READWRITE, &old_protection)) {
+        error = GetLastError();
+        hd2ct_outgoing_set_hook_failure(protect_write_stage, error);
+        return 0;
+    }
+    observed = InterlockedCompareExchange64((volatile LONG64 *)address,
+                                             (LONG64)replacement,
+                                             (LONG64)expected);
+    if ((uint64_t)observed == expected && replacement_present != NULL) {
+        *replacement_present = 1;
+    }
+    if (!hd2ct_outgoing_restore_protection(address, old_protection, &error)) {
+        if (installing && (uint64_t)observed == expected) {
+            if (hd2ct_outgoing_page_is_writable(address)) {
+                LONG64 rollback = InterlockedCompareExchange64(
+                    (volatile LONG64 *)address, (LONG64)expected,
+                    (LONG64)replacement);
+                if ((uint64_t)rollback == replacement) {
+                    if (replacement_present != NULL) *replacement_present = 0;
+                    if (!FlushInstructionCache(GetCurrentProcess(),
+                                               (const void *)address,
+                                               sizeof(uint64_t))) {
+                        DWORD rollback_error = GetLastError();
+                        (void)rollback_error;
+                    }
+                } else if (replacement_present != NULL) {
+                    uint64_t current_word = 0u;
+                    *replacement_present =
+                        hd2ct_outgoing_read_memory(address, &current_word,
+                                                   sizeof(current_word)) &&
+                        current_word == replacement;
+                }
+            } else if (replacement_present != NULL) {
+                uint64_t current_word = 0u;
+                *replacement_present =
+                    hd2ct_outgoing_read_memory(address, &current_word,
+                                               sizeof(current_word)) &&
+                    current_word == replacement;
+            }
+        }
+        {
+            DWORD retry_error = ERROR_SUCCESS;
+            if (!hd2ct_outgoing_restore_protection(address, old_protection,
+                                                   &retry_error)) {
+                (void)retry_error;
+            }
+        }
+        hd2ct_outgoing_set_hook_failure(protect_restore_stage, error);
+        return 0;
+    }
+    if ((uint64_t)observed != expected) {
+        hd2ct_outgoing_set_hook_failure(cas_mismatch_stage, ERROR_SUCCESS);
+        return 0;
+    }
+    if (!FlushInstructionCache(GetCurrentProcess(), (const void *)address,
+                               sizeof(uint64_t))) {
+        DWORD flush_error = GetLastError();
+        if (installing) {
+            DWORD rollback_protection = 0u;
+            LONG64 rollback;
+            DWORD restore_error = ERROR_SUCCESS;
+            if (!VirtualProtect((void *)address, sizeof(uint64_t),
+                                PAGE_EXECUTE_READWRITE,
+                                &rollback_protection)) {
+                DWORD rollback_error = GetLastError();
+                hd2ct_outgoing_set_hook_failure(protect_write_stage,
+                                                rollback_error);
+                return 0;
+            }
+            rollback = InterlockedCompareExchange64(
+                (volatile LONG64 *)address, (LONG64)expected,
+                (LONG64)replacement);
+            if ((uint64_t)rollback != replacement) {
+                int restored = hd2ct_outgoing_restore_protection(
+                    address, rollback_protection, &restore_error);
+                if (!restored) {
+                    hd2ct_outgoing_set_hook_failure(protect_restore_stage,
+                                                    restore_error);
+                } else {
+                    hd2ct_outgoing_set_hook_failure(cas_mismatch_stage,
+                                                    ERROR_SUCCESS);
+                }
+                if (replacement_present != NULL) {
+                    uint64_t current_word = 0u;
+                    *replacement_present =
+                        hd2ct_outgoing_read_memory(address, &current_word,
+                                                   sizeof(current_word)) &&
+                        current_word == replacement;
+                }
+                return 0;
+            }
+            if (replacement_present != NULL) *replacement_present = 0;
+            if (!FlushInstructionCache(GetCurrentProcess(),
+                                       (const void *)address,
+                                       sizeof(uint64_t))) {
+                flush_error = GetLastError();
+            }
+            if (!hd2ct_outgoing_restore_protection(address,
+                                                   rollback_protection,
+                                                   &restore_error)) {
+                hd2ct_outgoing_set_hook_failure(protect_restore_stage,
+                                                restore_error);
+                return 0;
+            }
+        }
+        hd2ct_outgoing_set_hook_failure(flush_stage, flush_error);
+        return 0;
+    }
+    return 1;
+}
+
 static int hd2ct_outgoing_create_relay(uintptr_t call_address)
 {
     unsigned char relay[14];
@@ -1024,9 +1263,18 @@ static int hd2ct_outgoing_create_relay(uintptr_t call_address)
     }
     memcpy((void *)allocation, relay, sizeof(relay));
     if (!VirtualProtect((void *)allocation, 4096u, PAGE_EXECUTE_READ,
-                        &old_protection) ||
-        !FlushInstructionCache(GetCurrentProcess(), (const void *)allocation,
+                        &old_protection)) {
+        DWORD error = GetLastError();
+        hd2ct_outgoing_set_hook_failure(
+            HD2CT_OUTGOING_HOOK_STAGE_INSTALL_PROTECT_WRITE, error);
+        VirtualFree((void *)allocation, 0u, MEM_RELEASE);
+        return 0;
+    }
+    if (!FlushInstructionCache(GetCurrentProcess(), (const void *)allocation,
                                sizeof(relay))) {
+        DWORD error = GetLastError();
+        hd2ct_outgoing_set_hook_failure(
+            HD2CT_OUTGOING_HOOK_STAGE_INSTALL_FLUSH, error);
         VirtualFree((void *)allocation, 0u, MEM_RELEASE);
         return 0;
     }
@@ -1039,7 +1287,9 @@ static int hd2ct_outgoing_install_hook(void)
 #ifdef HD2CT_TESTING
     if (InterlockedCompareExchange(&g_outgoing_test_patch_owner_conflict,
                                    0, 0) != 0) {
-        hd2ct_outgoing_set_failure(HD2CT_OUTGOING_FAILURE_PATCH_OWNER);
+        hd2ct_outgoing_set_hook_failure(
+            HD2CT_OUTGOING_HOOK_STAGE_INSTALL_WORD_MISMATCH,
+            ERROR_SUCCESS);
         InterlockedExchange(&g_outgoing_hook_state, 2);
         return 0;
     }
@@ -1050,6 +1300,7 @@ static int hd2ct_outgoing_install_hook(void)
     g_outgoing_patched_word = 2u;
     InterlockedExchange(&g_outgoing_hook_active, 1);
     InterlockedExchange(&g_outgoing_hook_state, 1);
+    hd2ct_outgoing_clear_hook_failure();
     return 1;
 #else
     HMODULE module = NULL;
@@ -1060,8 +1311,8 @@ static int hd2ct_outgoing_install_hook(void)
     int32_t displacement;
     uint64_t original_word;
     uint64_t patched_word;
-    DWORD old_protection = 0u;
-    LONG64 observed;
+    DWORD read_error = ERROR_SUCCESS;
+    int replacement_present = 0;
     if (InterlockedCompareExchange(&g_outgoing_gate_checked, 1, 0) == 0) {
         if (!hd2ct_outgoing_validate_target(&module, &original_send)) {
             hd2ct_outgoing_set_failure(HD2CT_OUTGOING_FAILURE_TARGET_GATE);
@@ -1096,47 +1347,36 @@ static int hd2ct_outgoing_install_hook(void)
     displacement = (int32_t)((int64_t)g_outgoing_relay -
                               (int64_t)(call_address + 5u));
     word_address = base + HD2CT_OUTGOING_CALLSITE_RVA - 2u;
-    if (((uintptr_t)word_address & 7u) != 0u ||
-        !hd2ct_outgoing_read_memory(word_address, &original_word,
-                                    sizeof(original_word)) ||
-        original_word != 0xbaff8372e9e80000ull) {
-        hd2ct_outgoing_set_failure(HD2CT_OUTGOING_FAILURE_PATCH_OWNER);
+    if (((uintptr_t)word_address & 7u) != 0u) {
+        hd2ct_outgoing_set_hook_failure(
+            HD2CT_OUTGOING_HOOK_STAGE_INSTALL_ALIGN, ERROR_SUCCESS);
+        InterlockedExchange(&g_outgoing_hook_state, 2);
+        return 0;
+    }
+    if (!hd2ct_outgoing_read_memory_ex(word_address, &original_word,
+                                       sizeof(original_word), &read_error)) {
+        hd2ct_outgoing_set_hook_failure(
+            HD2CT_OUTGOING_HOOK_STAGE_INSTALL_READ, read_error);
+        InterlockedExchange(&g_outgoing_hook_state, 2);
+        return 0;
+    }
+    if (original_word != 0xbaff8372e9e80000ull) {
+        hd2ct_outgoing_set_hook_failure(
+            HD2CT_OUTGOING_HOOK_STAGE_INSTALL_WORD_MISMATCH,
+            ERROR_SUCCESS);
         InterlockedExchange(&g_outgoing_hook_state, 2);
         return 0;
     }
     patched_word = (original_word & ~0x00ffffffff000000ull) |
         ((uint64_t)(uint32_t)displacement << 24);
-    if (!VirtualProtect((void *)word_address, sizeof(original_word),
-                        PAGE_EXECUTE_READWRITE, &old_protection)) {
-        hd2ct_outgoing_set_failure(HD2CT_OUTGOING_FAILURE_PATCH_OWNER);
-        InterlockedExchange(&g_outgoing_hook_state, 2);
-        return 0;
-    }
-    observed = InterlockedCompareExchange64((volatile LONG64 *)word_address,
-                                             (LONG64)patched_word,
-                                             (LONG64)original_word);
-    (void)VirtualProtect((void *)word_address, sizeof(original_word),
-                         old_protection, &old_protection);
-    if ((uint64_t)observed != original_word) {
-        hd2ct_outgoing_set_failure(HD2CT_OUTGOING_FAILURE_PATCH_OWNER);
-        InterlockedExchange(&g_outgoing_hook_state, 2);
-        return 0;
-    }
-    if (!FlushInstructionCache(GetCurrentProcess(), (const void *)word_address,
-                               sizeof(original_word))) {
-        DWORD protection = 0u;
-        if (VirtualProtect((void *)word_address, sizeof(original_word),
-                           PAGE_EXECUTE_READWRITE, &protection)) {
-            (void)InterlockedCompareExchange64(
-                (volatile LONG64 *)word_address, (LONG64)original_word,
-                (LONG64)patched_word);
-            (void)FlushInstructionCache(GetCurrentProcess(),
-                                        (const void *)word_address,
-                                        sizeof(original_word));
-            (void)VirtualProtect((void *)word_address, sizeof(original_word),
-                                 protection, &protection);
+    if (!hd2ct_outgoing_swap_word(word_address, original_word, patched_word,
+                                  1, &replacement_present)) {
+        if (replacement_present) {
+            g_outgoing_callsite = call_address;
+            g_outgoing_original_word = original_word;
+            g_outgoing_patched_word = patched_word;
+            InterlockedExchange(&g_outgoing_hook_active, 1);
         }
-        hd2ct_outgoing_set_failure(HD2CT_OUTGOING_FAILURE_PATCH_OWNER);
         InterlockedExchange(&g_outgoing_hook_state, 2);
         return 0;
     }
@@ -1145,7 +1385,7 @@ static int hd2ct_outgoing_install_hook(void)
     g_outgoing_patched_word = patched_word;
     InterlockedExchange(&g_outgoing_hook_active, 1);
     InterlockedExchange(&g_outgoing_hook_state, 1);
-    hd2ct_outgoing_set_failure(HD2CT_OUTGOING_FAILURE_NONE);
+    hd2ct_outgoing_clear_hook_failure();
     return 1;
 #endif
 }
@@ -1153,34 +1393,23 @@ static int hd2ct_outgoing_install_hook(void)
 static int hd2ct_outgoing_restore_hook(void)
 {
 #ifdef HD2CT_TESTING
+    if (InterlockedCompareExchange(&g_outgoing_hook_active, 0, 0) == 0) return 1;
     InterlockedExchange(&g_outgoing_hook_active, 0);
     InterlockedExchange(&g_outgoing_hook_state, 0);
+    hd2ct_outgoing_clear_hook_failure();
     return 1;
 #else
     uintptr_t word_address;
-    DWORD old_protection = 0u;
-    LONG64 observed;
     if (InterlockedCompareExchange(&g_outgoing_hook_active, 0, 0) == 0) return 1;
     word_address = g_outgoing_module_base + HD2CT_OUTGOING_CALLSITE_RVA - 2u;
-    if (!VirtualProtect((void *)word_address, sizeof(uint64_t),
-                        PAGE_EXECUTE_READWRITE, &old_protection)) {
-        hd2ct_outgoing_set_failure(HD2CT_OUTGOING_FAILURE_PATCH_OWNER);
-        return 0;
-    }
-    observed = InterlockedCompareExchange64((volatile LONG64 *)word_address,
-                                             (LONG64)g_outgoing_original_word,
-                                             (LONG64)g_outgoing_patched_word);
-    (void)VirtualProtect((void *)word_address, sizeof(uint64_t),
-                         old_protection, &old_protection);
-    if ((uint64_t)observed != g_outgoing_patched_word ||
-        !FlushInstructionCache(GetCurrentProcess(), (const void *)word_address,
-                               sizeof(uint64_t))) {
-        hd2ct_outgoing_set_failure(HD2CT_OUTGOING_FAILURE_PATCH_OWNER);
+    if (!hd2ct_outgoing_swap_word(word_address, g_outgoing_patched_word,
+                                  g_outgoing_original_word, 0, NULL)) {
         InterlockedExchange(&g_outgoing_hook_state, 2);
         return 0;
     }
     InterlockedExchange(&g_outgoing_hook_active, 0);
     InterlockedExchange(&g_outgoing_hook_state, 0);
+    hd2ct_outgoing_clear_hook_failure();
     return 1;
 #endif
 }
@@ -1313,7 +1542,8 @@ static void hd2ct_outgoing_write_status(void)
         "\"intercepted\":%lld,\"called_translated\":%lld,"
         "\"called_original\":%lld,\"passthrough\":%lld,"
         "\"queue_pending\":%u,\"context_cancelled\":%lld,"
-        "\"timeouts\":%lld,\"last_failure_code\":%ld}\n",
+        "\"timeouts\":%lld,\"last_failure_code\":%ld,"
+        "\"hook_failure_stage\":%ld,\"hook_win32_error\":%lu}\n",
         (long)(InterlockedCompareExchange(&g_outgoing_master_enabled, 0, 0) &&
                InterlockedCompareExchange(&g_outgoing_enabled, 0, 0)),
         (long)InterlockedCompareExchange(&g_outgoing_hook_active, 0, 0),
@@ -1324,7 +1554,10 @@ static void hd2ct_outgoing_write_status(void)
         hd2ct_outgoing_queue_count(),
         (long long)InterlockedCompareExchange64(&g_outgoing_context_cancelled, 0, 0),
         (long long)InterlockedCompareExchange64(&g_outgoing_timeouts, 0, 0),
-        (long)InterlockedCompareExchange(&g_outgoing_failure_code, 0, 0));
+        (long)InterlockedCompareExchange(&g_outgoing_failure_code, 0, 0),
+        (long)InterlockedCompareExchange(&g_outgoing_hook_failure_stage, 0, 0),
+        (unsigned long)InterlockedCompareExchange(
+            &g_outgoing_hook_win32_error, 0, 0));
     if (length <= 0 || (size_t)length >= sizeof(json)) goto cleanup;
     file = CreateFileW(temporary, GENERIC_WRITE, FILE_SHARE_READ, NULL,
                        CREATE_ALWAYS,
@@ -1484,6 +1717,9 @@ void hd2ct_outgoing_test_reset(void)
     InterlockedExchange(&g_outgoing_hook_state, 0);
     InterlockedExchange(&g_outgoing_failure_code,
                         HD2CT_OUTGOING_FAILURE_NONE);
+    InterlockedExchange(&g_outgoing_hook_failure_stage,
+                        HD2CT_OUTGOING_HOOK_STAGE_NONE);
+    InterlockedExchange(&g_outgoing_hook_win32_error, ERROR_SUCCESS);
     InterlockedExchange(&g_outgoing_service_ready, 0);
     InterlockedExchange(&g_outgoing_master_enabled, 1);
     InterlockedExchange(&g_outgoing_enabled, 0);
@@ -1492,6 +1728,7 @@ void hd2ct_outgoing_test_reset(void)
     InterlockedExchange(&g_outgoing_timeout_seconds,
                         HD2CT_DEFAULT_TIMEOUT_SECONDS);
     InterlockedExchange(&g_outgoing_test_patch_owner_conflict, 0);
+    InterlockedExchange(&g_outgoing_test_restore_failure_once, 0);
     InterlockedExchange(&g_outgoing_test_reenter_pump, 0);
     InterlockedExchange(&g_outgoing_test_fail_claim_once, 0);
     InterlockedExchange(&g_outgoing_pump_active, 0);
@@ -1614,6 +1851,146 @@ uint32_t hd2ct_outgoing_test_hook_active(void)
 uint32_t hd2ct_outgoing_test_failure_code(void)
 {
     return (uint32_t)InterlockedCompareExchange(&g_outgoing_failure_code, 0, 0);
+}
+
+uint32_t hd2ct_outgoing_test_hook_failure_stage(void)
+{
+    return (uint32_t)InterlockedCompareExchange(
+        &g_outgoing_hook_failure_stage, 0, 0);
+}
+
+uint32_t hd2ct_outgoing_test_hook_win32_error(void)
+{
+    return (uint32_t)InterlockedCompareExchange(
+        &g_outgoing_hook_win32_error, 0, 0);
+}
+
+static DWORD hd2ct_outgoing_test_page_protection(uintptr_t address)
+{
+    MEMORY_BASIC_INFORMATION information;
+    SIZE_T queried = VirtualQuery((const void *)address, &information,
+                                  sizeof(information));
+    if (queried != sizeof(information)) {
+        if (queried == 0u) {
+            DWORD error = GetLastError();
+            (void)error;
+        }
+        return 0u;
+    }
+    return information.Protect & 0xffu;
+}
+
+uint32_t hd2ct_outgoing_test_hook_page(uint32_t scenario)
+{
+    SYSTEM_INFO system_information;
+    uint64_t original_word = 0x1122334455667788ull;
+    uint64_t patched_word = 0x8877665544332211ull;
+    uint64_t foreign_word = 0x123456789abcdef0ull;
+    uint64_t *word;
+    uintptr_t address;
+    void *page;
+    DWORD old_protection = 0u;
+    DWORD error;
+    uint32_t result = 0u;
+    int replacement_present = 0;
+    GetSystemInfo(&system_information);
+    if (system_information.dwPageSize == 0u) return 0u;
+    page = VirtualAlloc(NULL, system_information.dwPageSize,
+                        MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
+    if (page == NULL) {
+        error = GetLastError();
+        (void)error;
+        return 0u;
+    }
+    word = (uint64_t *)((uintptr_t)page + 8u);
+    address = (uintptr_t)word;
+    *word = original_word;
+    if (!VirtualProtect(page, system_information.dwPageSize,
+                        PAGE_EXECUTE_READ, &old_protection)) {
+        error = GetLastError();
+        (void)error;
+        goto cleanup;
+    }
+    if (scenario == HD2CT_OUTGOING_TEST_HOOK_RESTORE_FAILURE) {
+        hd2ct_outgoing_clear_hook_failure();
+        InterlockedExchange(&g_outgoing_test_restore_failure_once, 1);
+        if (!hd2ct_outgoing_swap_word(address, original_word, patched_word,
+                                      1, &replacement_present) &&
+            hd2ct_outgoing_test_hook_failure_stage() ==
+                HD2CT_OUTGOING_HOOK_STAGE_INSTALL_PROTECT_RESTORE &&
+            hd2ct_outgoing_test_hook_win32_error() == ERROR_ACCESS_DENIED &&
+            hd2ct_outgoing_test_failure_code() ==
+                HD2CT_OUTGOING_FAILURE_PATCH_OWNER &&
+            *word == original_word && replacement_present == 0 &&
+            hd2ct_outgoing_test_page_protection(address) == PAGE_EXECUTE_READ) {
+            result = 1u;
+        }
+    } else if (scenario == HD2CT_OUTGOING_TEST_HOOK_OWNER_MISMATCH) {
+        if (!VirtualProtect(page, system_information.dwPageSize,
+                            PAGE_READWRITE, &old_protection)) {
+            error = GetLastError();
+            (void)error;
+            goto cleanup;
+        }
+        *word = foreign_word;
+        if (!VirtualProtect(page, system_information.dwPageSize,
+                            PAGE_EXECUTE_READ, &old_protection)) {
+            error = GetLastError();
+            (void)error;
+            goto cleanup;
+        }
+        hd2ct_outgoing_clear_hook_failure();
+        if (!hd2ct_outgoing_swap_word(address, original_word, patched_word,
+                                      1, &replacement_present) &&
+            hd2ct_outgoing_test_hook_failure_stage() ==
+                HD2CT_OUTGOING_HOOK_STAGE_INSTALL_CAS_MISMATCH &&
+            hd2ct_outgoing_test_hook_win32_error() == ERROR_SUCCESS &&
+            hd2ct_outgoing_test_failure_code() ==
+                HD2CT_OUTGOING_FAILURE_PATCH_OWNER &&
+            *word == foreign_word && replacement_present == 0 &&
+            hd2ct_outgoing_test_page_protection(address) == PAGE_EXECUTE_READ) {
+            result = 1u;
+        }
+    } else if (scenario == HD2CT_OUTGOING_TEST_HOOK_SUCCESS_RESET) {
+        hd2ct_outgoing_set_hook_failure(
+            HD2CT_OUTGOING_HOOK_STAGE_INSTALL_READ, ERROR_INVALID_DATA);
+        if (hd2ct_outgoing_swap_word(address, original_word, patched_word,
+                                     1, &replacement_present)) {
+            hd2ct_outgoing_clear_hook_failure();
+            if (*word == patched_word && replacement_present != 0 &&
+                hd2ct_outgoing_test_hook_failure_stage() ==
+                    HD2CT_OUTGOING_HOOK_STAGE_NONE &&
+                hd2ct_outgoing_test_hook_win32_error() == ERROR_SUCCESS &&
+                hd2ct_outgoing_test_failure_code() ==
+                    HD2CT_OUTGOING_FAILURE_NONE &&
+                hd2ct_outgoing_test_page_protection(address) ==
+                    PAGE_EXECUTE_READ) {
+                result |= 1u;
+            }
+            if (hd2ct_outgoing_swap_word(address, patched_word, original_word,
+                                         0, NULL)) {
+                hd2ct_outgoing_clear_hook_failure();
+                if (*word == original_word &&
+                    hd2ct_outgoing_test_hook_failure_stage() ==
+                        HD2CT_OUTGOING_HOOK_STAGE_NONE &&
+                    hd2ct_outgoing_test_hook_win32_error() == ERROR_SUCCESS &&
+                    hd2ct_outgoing_test_failure_code() ==
+                        HD2CT_OUTGOING_FAILURE_NONE &&
+                    hd2ct_outgoing_test_page_protection(address) ==
+                        PAGE_EXECUTE_READ) {
+                    result |= 2u;
+                }
+            }
+        }
+    }
+
+cleanup:
+    if (!VirtualFree(page, 0u, MEM_RELEASE)) {
+        error = GetLastError();
+        (void)error;
+        result = 0u;
+    }
+    return result;
 }
 
 uint32_t hd2ct_outgoing_test_send_count(void)

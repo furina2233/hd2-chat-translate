@@ -8,6 +8,12 @@ void hd2ct_outgoing_controller_start(int service_ready);
 int hd2ct_outgoing_pump(void);
 
 #ifdef HD2CT_TESTING
+enum {
+    HD2CT_OUTGOING_TEST_HOOK_RESTORE_FAILURE = 1u,
+    HD2CT_OUTGOING_TEST_HOOK_OWNER_MISMATCH = 2u,
+    HD2CT_OUTGOING_TEST_HOOK_SUCCESS_RESET = 3u
+};
+
 void hd2ct_outgoing_test_reset(void);
 void hd2ct_outgoing_test_settings(uint32_t master_enabled,
                                   uint32_t outgoing_enabled,
@@ -28,6 +34,9 @@ uint32_t hd2ct_outgoing_test_pending(void);
 uint32_t hd2ct_outgoing_test_counter(uint32_t counter_id);
 uint32_t hd2ct_outgoing_test_hook_active(void);
 uint32_t hd2ct_outgoing_test_failure_code(void);
+uint32_t hd2ct_outgoing_test_hook_failure_stage(void);
+uint32_t hd2ct_outgoing_test_hook_win32_error(void);
+uint32_t hd2ct_outgoing_test_hook_page(uint32_t scenario);
 uint32_t hd2ct_outgoing_test_send_count(void);
 uint32_t hd2ct_outgoing_test_last_send(char *out, uint32_t capacity);
 uint32_t hd2ct_outgoing_test_send_at(uint32_t index, char *out,

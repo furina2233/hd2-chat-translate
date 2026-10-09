@@ -126,6 +126,7 @@ void hd2ct_http_worker_request(HINTERNET session, const HD2CT_WorkerJob *job,
     int header_chars;
     int ok = 0;
     const char *failure_code = "NETWORK";
+    const wchar_t *request_path;
     memset(&url_parts, 0, sizeof(url_parts));
     memset(&built_request, 0, sizeof(built_request));
     *successful = 0;
@@ -146,6 +147,8 @@ void hd2ct_http_worker_request(HINTERNET session, const HD2CT_WorkerJob *job,
         failure_code = "INTERNAL";
         goto cleanup;
     }
+    request_path = built_request.request_path_override != NULL ?
+        built_request.request_path_override : url_parts.path;
     if (built_request.header_name != NULL && built_request.header_value != NULL) {
         int written = snprintf(headers_utf8, sizeof(headers_utf8),
                                "Content-Type: %s\r\nAccept: application/json\r\n%s: %s%s\r\n",
@@ -184,7 +187,7 @@ void hd2ct_http_worker_request(HINTERNET session, const HD2CT_WorkerJob *job,
         failure_code = hd2ct_winhttp_failure(request_deadline, error);
         goto cleanup;
     }
-    request = WinHttpOpenRequest(connection, L"POST", url_parts.path, NULL,
+    request = WinHttpOpenRequest(connection, L"POST", request_path, NULL,
                                  WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES,
                                  url_parts.secure ? WINHTTP_FLAG_SECURE : 0);
     if (request == NULL) {

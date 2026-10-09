@@ -75,9 +75,13 @@ HD2CT_MODEL 非空时选择 AI 翻译；缺失、为空或仅含空白时选择�
 
 AI 适配器把地址根路径补全为 /chat/completions，或把精确的 /v1、/v1/ 补全为 /v1/chat/completions。机器翻译适配器仅把根路径补全为各自接口；其他路径保持原样。已支持服务要求 HTTPS，只有 localhost、127.0.0.0/8 和 ::1 可使用 HTTP。拒绝 URL 凭据、查询、片段、反斜杠、空白和控制字符；禁用重定向、cookies 和自动认证。
 
-AI Chat Completions 请求 JSON 含 model、temperature=0、reasoning_effort="none"、response_format.type=json_schema 及 system/user 两条 messages。每次请求都显式指定思考强度为 none。聊天正文单独放在 user message；提示词位于 [native/adapter/chat_completions.c](../native/adapter/chat_completions.c)。响应 schema 严格要求 is_target_language（布尔值）和 translation（字符串），并禁止额外属性；服务端需支持结构化输出。完整简体中文请求示例见 [ai-request-example.json](ai-request-example.json)。系统提示词由中文编写的通用部分和简体中文专属部分组成：通用部分拼入目标语言，约束文本翻译及精确 JSON 字段 is_target_language/translation；仅简体中文目标会追加网络缩写、敌名和游戏黑话对照，例如 Charger=牛、Spore Charger=孢子牛，并保留中文原文。繁体中文和其他目标只使用通用部分。不对 gg 或 ggs 加特例。
+通用 AI Chat Completions 请求 JSON 含 model、temperature=0、reasoning_effort="none"、response_format.type=json_schema 及 system/user 两条 messages。响应 schema 严格要求 is_target_language（布尔值）和 translation（字符串），并禁止额外属性；服务端需支持该格式。完整简体中文通用请求示例见 [ai-request-example.json](ai-request-example.json)。
 
-响应读取 Chat Completions 的 choices[0].message.content，并要求其为只含 is_target_language(bool) 与 translation(string) 的 JSON 对象。若 is_target_language 为 true，C 向 Lua 返回保持原文结果；否则 translation 必须是合法 UTF-8、非空且不超过 16,384 字节。所有翻译方式的译文与原文完全相同时也由 C 决定保持原文。
+当 HTTPS URL 的主机精确为 api.deepseek.com、端口为 443、没有凭据或额外查询信息，且路径为 /chat/completions、/v1/chat/completions 或 /beta/chat/completions 时，AI 适配器使用 DeepSeek 官方协议 profile；/beta 也会进入该 profile。传输层对这些请求固定使用 /beta/chat/completions 路径，以启用 DeepSeek strict tool calls。请求不发送 response_format，而以唯一的 hd2ct_translation 函数工具承载原来的两字段 JSON Schema，设置 strict=true、全部属性 required、additionalProperties=false，并用 tool_choice 强制调用；thinking.type=disabled、reasoning_effort="none"，输出上限为512 tokens。官方 Chat Completions 文档列出的 response_format.type 只有 text 和 json_object；strict 工具调用要求 /beta 地址和完整的对象 schema。[API 文档](https://api-docs.deepseek.com/api/create-chat-completion/)；[Tool Calls 指南](https://api-docs.deepseek.com/guides/tool_calls/)。
+
+DeepSeek 响应必须包含且只包含一个 type=function、名称为 hd2ct_translation 的 tool call；arguments 必须是完整 JSON 字符串，且继续使用相同的 UTF-8、禁止 NUL、重复字段、精确字段和 SKIP 校验。客户端不会执行工具，也不会再发起请求或回退解析 message.content。非官方 DeepSeek 主机、自定义路径及其他 Chat Completions 服务继续使用通用 response_format 请求和 content 响应解析。两种 profile 共用原有中文提示词：通用部分拼入目标语言，约束文本翻译及精确 JSON 字段 is_target_language/translation；仅简体中文目标会追加网络缩写、敌名和游戏黑话对照，例如 Charger=牛、Spore Charger=孢子牛，并保留中文原文。繁体中文和其他目标只使用通用部分。不对 gg 或 ggs 加特例。
+
+通用响应读取 Chat Completions 的 choices[0].message.content；DeepSeek profile 读取唯一 hd2ct_translation 工具调用的 arguments。两者都要求完整 JSON 对象只含 is_target_language(bool) 与 translation(string)。若 is_target_language 为 true，C 向 Lua 返回保持原文结果；否则 translation 必须是合法 UTF-8、非空且不超过 16,384 字节。所有翻译方式的译文与原文完全相同时也由 C 决定保持原文。
 
 ## 原生任务接口
 
@@ -103,9 +107,9 @@ ABI 2 的 DLL 只导出三个函数，签名见 [client.h](../native/client.h)�
 
 C callback 仅在调用返回地址、已绑定的 Lua frame pump 线程、服务对象和缓存设置均有效时拦截。它通过受检内存读取最多复制 804 字节（含 NUL），要求正文非空且 UTF-8 有效；每条 FIFO 项使用自己的缓冲区，不保存游戏输入框指针。上下文快照包含游戏 root、发送 service、本地 uint64 ID、网络 manager 和最多 16 个 uint64 接收者；出站 replay 前再次核对完整上下文。队列最多 8 条，每次 pump 最多重放一条。入队失败、job pool 满、HTTP 错误、超时、无效/超长译文或发送开关关闭时回退到原文。游戏线程 pump 超过 2 秒未刷新时停止接收；若仍有同会话 pending，hook 保留队列并等待下一次安全 pump 或聊天调用，由后者先顺序发送 pending 原文再透传当前消息。上下文已变化、失效或无法安全读取/核验时会取消旧队列。翻译结果到达后先确认上下文并原子 claim FIFO head，再调用游戏原函数，重入时不会重复发送；claim 暂时失败会缓存结果，后续 pump 重试，并在开关关闭或期限已到时丢弃该译文、改发原文。
 
-出站状态由原生后台 controller 最多每 5 秒写入 `%LOCALAPPDATA%\HD2ChatTranslate\mailbox\chat-outgoing-status.json`。状态只含固定计数器、固定失败码和开关/钩子状态，不含正文、UID、地址、密钥或指针；hook 与游戏线程 pump 不执行状态文件 I/O。目录、临时文件与目标文件均拒绝 reparse point，更新通过临时文件写入后替换。该文件与 Lua 状态报告相互独立。
+出站状态由原生后台 controller 最多每 5 秒写入 `%LOCALAPPDATA%\HD2ChatTranslate\mailbox\chat-outgoing-status.json`。状态只含固定计数器、固定失败码和开关/钩子状态，以及数值字段 `hook_failure_stage`、`hook_win32_error`；不含正文、UID、地址、密钥或指针。阶段编号固定为：0 NONE，1 INSTALL_ALIGN（安装对齐），2 INSTALL_READ（安装读取），3 INSTALL_WORD_MISMATCH（安装字不匹配），4 INSTALL_PROTECT_WRITE（安装保护设为可写），5 INSTALL_CAS_MISMATCH（安装 CAS 不匹配），6 INSTALL_PROTECT_RESTORE（安装恢复保护），7 INSTALL_FLUSH（安装刷新指令缓存），8 RESTORE_PROTECT_WRITE（恢复保护设为可写），9 RESTORE_CAS_MISMATCH（恢复 CAS 不匹配），10 RESTORE_PROTECT_RESTORE（恢复保护），11 RESTORE_FLUSH（恢复刷新指令缓存）。Win32 失败的错误码在调用返回后立即读取；普通比较不匹配的错误码为 0。安装 CAS 成功但恢复旧保护失败时，会在页面仍可写且字仍等于本模块 patch 的条件下 CAS 回原值、刷新指令缓存，再尽力恢复旧保护；若字已被其他代码改写则不覆盖。此失败路径保留模块与 relay 的 pin 生命周期。hook 与游戏线程 pump 不执行状态文件 I/O。目录、临时文件与目标文件均拒绝 reparse point，更新通过临时文件写入后替换。该文件与 Lua 状态报告相互独立。
 
-fake native fixture 覆盖队列、超时、设置回退、上下文取消、patch owner 冲突、重入和 loopback HTTP；这不能验证真实游戏中的接收者内存上下文、relay 安装与发送结果。真实游戏行为尚未验证。
+fake native fixture 覆盖队列、超时、设置回退、上下文取消、patch owner 冲突、重入和 loopback HTTP；独立 VirtualAlloc 测试页还覆盖保护恢复失败后的 owner-match 回滚、foreign word 冲突和成功后诊断重置。这不能验证真实游戏中的接收者内存上下文、relay 安装与发送结果。真实游戏行为尚未验证。
 
 ## 翻译适配器
 

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import ctypes
+import gc
 import hashlib
 import json
 import os
@@ -157,6 +159,12 @@ lib.fixture_OutgoingHookActive.argtypes = []
 lib.fixture_OutgoingHookActive.restype = ctypes.c_uint32
 lib.fixture_OutgoingFailureCode.argtypes = []
 lib.fixture_OutgoingFailureCode.restype = ctypes.c_uint32
+lib.fixture_OutgoingHookFailureStage.argtypes = []
+lib.fixture_OutgoingHookFailureStage.restype = ctypes.c_uint32
+lib.fixture_OutgoingHookWin32Error.argtypes = []
+lib.fixture_OutgoingHookWin32Error.restype = ctypes.c_uint32
+lib.fixture_OutgoingHookTestPage.argtypes = [ctypes.c_uint32]
+lib.fixture_OutgoingHookTestPage.restype = ctypes.c_uint32
 lib.fixture_OutgoingSendCount.argtypes = []
 lib.fixture_OutgoingSendCount.restype = ctypes.c_uint32
 lib.fixture_OutgoingSendAt.argtypes = [ctypes.c_uint32, ctypes.c_void_p, ctypes.c_uint32]
@@ -299,6 +307,8 @@ def outgoing_stats():
         "timeouts": int(lib.fixture_OutgoingCounter(5)),
         "hook_active": int(lib.fixture_OutgoingHookActive()),
         "failure_code": int(lib.fixture_OutgoingFailureCode()),
+        "hook_failure_stage": int(lib.fixture_OutgoingHookFailureStage()),
+        "hook_win32_error": int(lib.fixture_OutgoingHookWin32Error()),
     }
 
 if not actions:
@@ -393,6 +403,9 @@ for action in actions:
     elif op == "outgoing_setup":
         outgoing_setup(action)
         action_results.append(outgoing_stats())
+    elif op == "outgoing_hook_test_page":
+        result = lib.fixture_OutgoingHookTestPage(action["scenario"])
+        action_results.append({"fixture_result": int(result), **outgoing_stats()})
     elif op == "outgoing_intercept":
         started = time.perf_counter()
         outgoing_intercept(action)
@@ -582,6 +595,69 @@ LSTATUS WINAPI fixture_RegGetValueW(
 }
 
 #include "client.c"
+
+__declspec(dllexport) int __cdecl fixture_BuildAiRequest(
+    const char *url, uint32_t target_language, char *body, uint32_t body_capacity,
+    wchar_t *request_path, uint32_t request_path_capacity)
+{
+    HD2CT_WorkerJob job;
+    HD2CT_BuiltRequest request;
+    size_t url_bytes;
+    size_t path_chars;
+    int result = 0;
+    memset(&job, 0, sizeof(job));
+    memset(&request, 0, sizeof(request));
+    if (url == NULL || body == NULL || body_capacity == 0 ||
+        request_path == NULL || request_path_capacity == 0) return 0;
+    url_bytes = strlen(url);
+    if (url_bytes == 0 || url_bytes > HD2CT_MAX_URL) return 0;
+    memcpy(job.url, url, url_bytes + 1u);
+    memcpy(job.model, "fixture-model", sizeof("fixture-model"));
+    memcpy(job.api_key, "fixture-key", sizeof("fixture-key"));
+    memcpy(job.source, "Hold this position.", sizeof("Hold this position."));
+    job.source_bytes = (uint32_t)(sizeof("Hold this position.") - 1u);
+    job.target_language = target_language;
+    request_path[0] = L'\0';
+    if (!hd2ct_build_ai_request(&job, &request) || request.body == NULL ||
+        request.body_bytes + 1u > body_capacity) goto cleanup;
+    if (request.request_path_override != NULL) {
+        path_chars = wcslen(request.request_path_override);
+        if (path_chars + 1u > request_path_capacity) goto cleanup;
+        memcpy(request_path, request.request_path_override,
+               (path_chars + 1u) * sizeof(wchar_t));
+    }
+    memcpy(body, request.body, request.body_bytes + 1u);
+    result = 1;
+
+cleanup:
+    if (request.body != NULL) {
+        SecureZeroMemory(request.body, request.body_bytes);
+        cJSON_free(request.body);
+    }
+    return result;
+}
+
+__declspec(dllexport) int __cdecl fixture_ParseAiResponse(
+    const char *url, char *response, uint32_t response_bytes, char *translation,
+    uint32_t *translation_bytes)
+{
+    HD2CT_WorkerJob job;
+    const char *failure_code = NULL;
+    size_t url_bytes;
+    int result;
+    memset(&job, 0, sizeof(job));
+    if (url == NULL || response == NULL || translation == NULL ||
+        translation_bytes == NULL) return 0;
+    url_bytes = strlen(url);
+    if (url_bytes == 0 || url_bytes > HD2CT_MAX_URL) return 0;
+    memcpy(job.url, url, url_bytes + 1u);
+    memcpy(job.source, "Hold this position.", sizeof("Hold this position."));
+    job.source_bytes = (uint32_t)(sizeof("Hold this position.") - 1u);
+    *translation_bytes = 0;
+    result = hd2ct_parse_ai_response(&job, response, response_bytes, translation,
+                                     translation_bytes, &failure_code);
+    return result;
+}
 
 __declspec(dllexport) void __cdecl fixture_ClearRegistry(void)
 {
@@ -839,6 +915,22 @@ __declspec(dllexport) uint32_t __cdecl fixture_OutgoingHookActive(void)
 __declspec(dllexport) uint32_t __cdecl fixture_OutgoingFailureCode(void)
 {
     return hd2ct_outgoing_test_failure_code();
+}
+
+__declspec(dllexport) uint32_t __cdecl fixture_OutgoingHookFailureStage(void)
+{
+    return hd2ct_outgoing_test_hook_failure_stage();
+}
+
+__declspec(dllexport) uint32_t __cdecl fixture_OutgoingHookWin32Error(void)
+{
+    return hd2ct_outgoing_test_hook_win32_error();
+}
+
+__declspec(dllexport) uint32_t __cdecl fixture_OutgoingHookTestPage(
+    uint32_t scenario)
+{
+    return hd2ct_outgoing_test_hook_page(scenario);
 }
 
 __declspec(dllexport) uint32_t __cdecl fixture_OutgoingSendCount(void)
@@ -2068,6 +2160,98 @@ class NativeHttpWorkerTests(unittest.TestCase):
                 self.assertEqual(self.state.paths, [expected])
                 self.assertEqual(self.state.payloads[0]["reasoning_effort"], "none")
 
+        fixture = ctypes.CDLL(str(self.environment_test_dll()))
+        fixture.fixture_BuildAiRequest.argtypes = [
+            ctypes.c_char_p, ctypes.c_uint32, ctypes.c_void_p, ctypes.c_uint32,
+            ctypes.c_wchar_p, ctypes.c_uint32,
+        ]
+        fixture.fixture_BuildAiRequest.restype = ctypes.c_int
+
+        def build_fixture(url: str, target_language: int = 1) -> tuple[dict, str]:
+            body = ctypes.create_string_buffer(32769)
+            request_path = ctypes.create_unicode_buffer(128)
+            self.assertEqual(
+                fixture.fixture_BuildAiRequest(
+                    url.encode("utf-8"), target_language, body, len(body),
+                    request_path, len(request_path),
+                ),
+                1,
+            )
+            return json.loads(body.value.decode("utf-8")), request_path.value
+
+        deepseek_urls = (
+            "https://api.deepseek.com/chat/completions",
+            "https://api.deepseek.com/v1/chat/completions",
+            "https://api.deepseek.com/beta/chat/completions",
+            "https://api.deepseek.com/beta",
+            "https://API.DEEPSEEK.COM:443/v1/chat/completions",
+        )
+        for index, url in enumerate(deepseek_urls):
+            target_language = 1 if index % 2 == 0 else 2
+            with self.subTest(deepseek_url=url):
+                payload, request_path = build_fixture(url, target_language)
+                self.assertEqual(request_path, "/beta/chat/completions")
+                self.assertNotIn("response_format", payload)
+                self.assertEqual(payload["max_tokens"], 512)
+                self.assertEqual(payload["thinking"], {"type": "disabled"})
+                self.assertEqual(payload["reasoning_effort"], "none")
+                self.assertEqual(payload["temperature"], 0)
+                self.assertEqual(payload["tool_choice"], {
+                    "type": "function",
+                    "function": {"name": "hd2ct_translation"},
+                })
+                self.assertEqual(len(payload["tools"]), 1)
+                function = payload["tools"][0]["function"]
+                self.assertEqual(function["name"], "hd2ct_translation")
+                self.assertTrue(function["strict"])
+                self.assertTrue(function["description"])
+                self.assertEqual(
+                    function["parameters"],
+                    AI_RESPONSE_FORMAT["json_schema"]["schema"],
+                )
+                self.assertEqual(
+                    [message["role"] for message in payload["messages"]],
+                    ["system", "user"],
+                )
+                self.assertEqual(payload["messages"][1]["content"],
+                                 "Hold this position.")
+                generic, generic_path = build_fixture(
+                    "https://api.deepseek.com/custom/openai/compat",
+                    target_language,
+                )
+                self.assertEqual(generic_path, "")
+                self.assertEqual(generic["response_format"], AI_RESPONSE_FORMAT)
+                self.assertNotIn("tools", generic)
+                self.assertEqual(payload["messages"][0], generic["messages"][0])
+
+        non_profile_urls = (
+            "https://api.deepseek.com/custom/chat/completions",
+            "https://api.deepseek.com.evil.test/chat/completions",
+            "https://evil-api.deepseek.com/chat/completions",
+            "https://user@api.deepseek.com/chat/completions",
+            "https://@api.deepseek.com/chat/completions",
+            "https://api.deepseek.com:444/chat/completions",
+            "http://api.deepseek.com/chat/completions",
+            "https://api.deepseek.com/v1/chat/completions/",
+            "https://api.deepseek.com/chat/completions?query=1",
+            "https://api.deepseek.com/chat/completions#fragment",
+        )
+        for url in non_profile_urls:
+            with self.subTest(non_profile_url=url):
+                payload, request_path = build_fixture(url)
+                self.assertEqual(request_path, "")
+                self.assertEqual(payload["response_format"], AI_RESPONSE_FORMAT)
+                self.assertNotIn("tools", payload)
+        fixture.fixture_BuildAiRequest = None
+        del build_fixture
+        fixture_handle = fixture._handle
+        del fixture
+        gc.collect()
+        free_library = ctypes.windll.kernel32.FreeLibrary
+        free_library.argtypes = [ctypes.c_void_p]
+        free_library.restype = ctypes.c_int
+        self.assertEqual(free_library(fixture_handle), 1)
+
         root_cases = (
             (1, "/chat/completions"),
             (2, "/language/translate/v2"),
@@ -2346,6 +2530,98 @@ class NativeHttpWorkerTests(unittest.TestCase):
             ],
         )
         self.assertEqual(malformed["actions"][1]["result"], "ERR\nBAD_RESPONSE")
+
+        fixture = ctypes.CDLL(str(self.environment_test_dll()))
+        fixture.fixture_ParseAiResponse.argtypes = [
+            ctypes.c_char_p, ctypes.c_void_p, ctypes.c_uint32,
+            ctypes.c_void_p, ctypes.POINTER(ctypes.c_uint32),
+        ]
+        fixture.fixture_ParseAiResponse.restype = ctypes.c_int
+
+        def parse_fixture(url: str, response: dict) -> tuple[bool, str]:
+            raw = json.dumps(response, ensure_ascii=False,
+                              separators=(",", ":")).encode("utf-8")
+            provider_body = ctypes.create_string_buffer(raw, len(raw) + 1)
+            translation = ctypes.create_string_buffer(16385)
+            written = ctypes.c_uint32()
+            accepted = fixture.fixture_ParseAiResponse(
+                url.encode("utf-8"), provider_body, len(raw),
+                translation, ctypes.byref(written),
+            )
+            return bool(accepted), translation.raw[:written.value].decode("utf-8")
+
+        def deepseek_response(tool_calls: list[dict], finish_reason: str = "tool_calls") -> dict:
+            return {"choices": [{
+                "finish_reason": finish_reason,
+                "message": {"tool_calls": tool_calls},
+            }]}
+
+        def tool_call(name: str = "hd2ct_translation",
+                      arguments: object = '{"is_target_language":false,"translation":"前往撤离点"}',
+                      call_type: str = "function") -> dict:
+            return {
+                "type": call_type,
+                "function": {"name": name, "arguments": arguments},
+            }
+
+        deepseek_url = "https://api.deepseek.com/beta/chat/completions"
+        valid, translated = parse_fixture(
+            deepseek_url, deepseek_response([tool_call()]))
+        self.assertTrue(valid)
+        self.assertEqual(translated, "前往撤离点")
+        valid, preserved = parse_fixture(
+            deepseek_url,
+            deepseek_response([tool_call(arguments=(
+                '{"is_target_language":true,"translation":"忽略"}'
+            ))]),
+        )
+        self.assertTrue(valid)
+        self.assertEqual(preserved, "Hold this position.")
+
+        invalid_deepseek_responses = (
+            deepseek_response([tool_call(name="other_function")]),
+            deepseek_response([tool_call(), tool_call()]),
+            deepseek_response([tool_call(arguments='{"is_target_language":false}')]),
+            deepseek_response([tool_call(arguments=(
+                '{"is_target_language":"false","translation":"bad"}'
+            ))]),
+            deepseek_response([tool_call(arguments=(
+                '{"is_target_language":false,"translation":7}'
+            ))]),
+            deepseek_response([tool_call(arguments=7)]),
+            deepseek_response([tool_call(call_type="other")]),
+            deepseek_response([tool_call(arguments=(
+                '{"is_target_language":false,"translation":"one",'
+                '"translation":"two"}'
+            ))]),
+            deepseek_response([tool_call(arguments=(
+                '{"is_target_language":false,"translation":"\\u0000"}'
+            ))]),
+            {"choices": [{"finish_reason": "tool_calls", "message": {
+                "content": '{"is_target_language":false,"translation":"fallback"}',
+            }}]},
+        )
+        for response in invalid_deepseek_responses:
+            with self.subTest(deepseek_response=response):
+                accepted, _ = parse_fixture(deepseek_url, response)
+                self.assertFalse(accepted)
+
+        generic_response = provider_response(
+            result_content("generic response", is_target_language=False))
+        generic_raw = json.loads(generic_response.decode("utf-8"))
+        accepted, generic_translation = parse_fixture(
+            "https://api.deepseek.com/custom/openai/compat", generic_raw)
+        self.assertTrue(accepted)
+        self.assertEqual(generic_translation, "generic response")
+        fixture.fixture_ParseAiResponse = None
+        del parse_fixture
+        fixture_handle = fixture._handle
+        del fixture
+        gc.collect()
+        free_library = ctypes.windll.kernel32.FreeLibrary
+        free_library.argtypes = [ctypes.c_void_p]
+        free_library.restype = ctypes.c_int
+        self.assertEqual(free_library(fixture_handle), 1)
 
     def test_game_thread_submit_does_not_wait_for_slow_http(self) -> None:
         native_module = build_package.standalone_module_source(
@@ -2678,7 +2954,7 @@ class NativeHttpWorkerTests(unittest.TestCase):
                     {"op": "outgoing_intercept", "body": "cancel-all-original"},
                     {"op": "wait", "token": "out_1"},
                     {"op": "cancel_all"},
-                    {"op": "outgoing_pump"},
+                    {"op": "outgoing_wait_send"},
                 ],
             )
         self.assertEqual(cancel_outgoing["actions"][2]["result"],
@@ -2687,6 +2963,21 @@ class NativeHttpWorkerTests(unittest.TestCase):
         self.assertEqual(cancel_outgoing["actions"][4]["sends"],
                          ["cancel-all-keeps-outgoing"])
         self.assertEqual(cancel_outgoing["actions"][4]["pending"], 0)
+
+        failed_install = self.run_child(actions=[
+            {"op": "outgoing_setup"},
+            {"op": "outgoing_set_patch_conflict", "enabled": 1},
+            {"op": "outgoing_set_settings", "master_enabled": 1,
+             "outgoing_enabled": 1},
+            {"op": "outgoing_intercept", "body": "failed-install-original"},
+        ])
+        self.assertEqual(failed_install["actions"][2]["hook_active"], 1)
+        self.assertEqual(failed_install["actions"][2]["hook_failure_stage"], 3)
+        self.assertEqual(failed_install["actions"][-1]["sends"],
+                         ["failed-install-original"])
+        self.assertEqual(failed_install["actions"][-1]["pending"], 0)
+        self.assertEqual(failed_install["actions"][-1]["intercepted"], 0)
+        self.assertEqual(failed_install["actions"][-1]["bootstrap_count"], 0)
 
         self.state.clear()
         self.state.response = google_response("unreachable", "en")
@@ -2961,7 +3252,10 @@ class NativeHttpWorkerTests(unittest.TestCase):
                     {"op": "outgoing_setup", "read_file_settings": True},
                     {"op": "outgoing_intercept", "body": "status-secret-message"},
                     {"op": "outgoing_set_status_root", "path": str(temporary_root)},
+                    {"op": "outgoing_hook_test_page", "scenario": 1},
                     {"op": "outgoing_write_status"},
+                    {"op": "outgoing_hook_test_page", "scenario": 2},
+                    {"op": "outgoing_hook_test_page", "scenario": 3},
                 ],
             )
             mailbox = temporary_root / "HD2ChatTranslate" / "mailbox"
@@ -2975,11 +3269,29 @@ class NativeHttpWorkerTests(unittest.TestCase):
             "schema_version", "enabled", "hookactive", "intercepted",
             "called_translated", "called_original", "passthrough",
             "queue_pending", "context_cancelled", "timeouts",
-            "last_failure_code",
+            "last_failure_code", "hook_failure_stage", "hook_win32_error",
         })
+        self.assertIs(type(status_data["hook_failure_stage"]), int)
+        self.assertIn(status_data["hook_failure_stage"], set(range(12)))
+        self.assertIs(type(status_data["hook_win32_error"]), int)
+        self.assertGreaterEqual(status_data["hook_win32_error"], 0)
+        self.assertLessEqual(status_data["hook_win32_error"], 0xFFFFFFFF)
+        self.assertEqual(status_data["hook_failure_stage"], 6)
+        self.assertEqual(status_data["hook_win32_error"], 5)
+        self.assertEqual(status_data["last_failure_code"], 2)
         self.assertNotIn("status-secret-message", status_text)
         self.assertNotIn("4660", status_text)
-        self.assertEqual(status_result["actions"][-1]["written"], True)
+        actions = status_result["actions"]
+        self.assertEqual(actions[3]["fixture_result"], 1)
+        self.assertEqual(actions[4]["written"], True)
+        self.assertEqual(actions[5]["fixture_result"], 1)
+        self.assertEqual(actions[5]["hook_failure_stage"], 5)
+        self.assertEqual(actions[5]["hook_win32_error"], 0)
+        self.assertEqual(actions[5]["failure_code"], 2)
+        self.assertEqual(actions[6]["fixture_result"], 3)
+        self.assertEqual(actions[6]["hook_failure_stage"], 0)
+        self.assertEqual(actions[6]["hook_win32_error"], 0)
+        self.assertEqual(actions[6]["failure_code"], 0)
 
         self.state.clear()
         with tempfile.TemporaryDirectory(
