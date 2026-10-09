@@ -6,6 +6,8 @@
 
 > **使用风险：** 插件会注入游戏进程、执行代码并调用游戏内部函数更新聊天显示。此行为可能违反游戏或反作弊规则，并导致账号处罚或封禁。
 
+英文版说明：[README_EN.md](/docs/README_EN.md)
+
 ## 安装与更新
 
 1. 正常关闭游戏，在 HD2Arsenal 导入 HD2ChatTranslateYYYYMMDDHHMMSS.zip，更新同名模组并启用。
