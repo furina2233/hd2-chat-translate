@@ -268,6 +268,7 @@ local OUTGOING_WINDOWS = {
     {rva = 0x1327f00, size = 0x2000},
     {rva = 0x174fa00, size = 0x800},
     {rva = 0x20bba00, size = 0x1800},
+    {rva = 0x18f2d00, size = 0x1800},
 }
 
 local function new_outgoing_windows()
