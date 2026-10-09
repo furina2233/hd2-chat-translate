@@ -2,6 +2,7 @@
 local M = {}
 
 M.DEFAULT_DURATION_MS = 5 * 60 * 1000
+M.SAMPLE_INTERVAL_MS = 1000
 M.REPORT_INTERVAL_MS = 5 * 1000
 M.MAX_EVENTS = 512
 M.MAX_REPORT_BYTES = 64 * 1024
@@ -346,12 +347,21 @@ function M.new(adapter, options)
         step = safe_step,
         manifest = report,
         wrap_update = function(original_update)
+            local next_sample_ms = 0
             return function(...)
                 if state.done then
                     if type(original_update) == "function" then return original_update(...) end
                     return
                 end
+                -- 受检进程内读取开销较高；仅每秒采集一对回调边界快照。
+                local now_ms = safe_now()
+                if now_ms and now_ms < next_sample_ms
+                    and (not state.started or now_ms < state.deadline_ms) then
+                    if type(original_update) == "function" then return original_update(...) end
+                    return
+                end
                 safe_step("addon_pre_update")
+                if now_ms then next_sample_ms = now_ms + M.SAMPLE_INTERVAL_MS end
                 if state.done then
                     if type(original_update) == "function" then return original_update(...) end
                     return

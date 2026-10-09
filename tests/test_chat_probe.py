@@ -526,11 +526,34 @@ completed.now = 20
 local completed_after_result = pack(completed_wrapper("after"))
 local completed_after_adapter_calls = completed.adapter_calls
 
+local throttled = {ready = true, now = 0}
+local throttled_probe = new_probe(throttled, 10000)
+local throttled_original_calls = 0
+local throttled_wrapper = throttled_probe.wrap_update(function()
+    throttled_original_calls = throttled_original_calls + 1
+    return "tick", nil
+end)
+throttled_wrapper()
+for _ = 1, 60 do throttled_wrapper() end
+throttled.now = 999
+throttled_wrapper()
+local samples_before_second = throttled.samples
+throttled.now = 1000
+local throttled_return = pack(throttled_wrapper())
+
 local original_error_probe = new_probe({ready = true, now = 0}, 10000)
 local error_wrapper = original_error_probe.wrap_update(function() error("original update failure") end)
 local original_error_ok, original_error = pcall(error_wrapper)
 
 RESULT = core.encode_json({
+    throttled = {
+        samples_before_second = samples_before_second,
+        samples_at_second = throttled.samples,
+        original_calls = throttled_original_calls,
+        return_count = throttled_return.n,
+        first_return = throttled_return[1],
+        trailing_nil = throttled_return[2] == nil,
+    },
     gate = gate_result,
     pre_post = pre_post,
     idle = {events = idle_events, writes = idle_writes},
@@ -783,6 +806,11 @@ class LuaCoreTests(unittest.TestCase):
         lifecycle_output = self.lua.run(lifecycle_script)
         self.assertNotIn("PRIVATE_BODY_SENTINEL", lifecycle_output)
         lifecycle = json.loads(lifecycle_output)
+        self.assertEqual(lifecycle["throttled"], {
+            "samples_before_second": 2, "samples_at_second": 4,
+            "original_calls": 63, "return_count": 2,
+            "first_return": "tick", "trailing_nil": True,
+        })
         self.assertEqual(lifecycle["gate"], {
             "reads": 0, "prepares": 0, "writes": 0, "adapter_calls": 1,
         })
