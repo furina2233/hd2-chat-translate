@@ -82,7 +82,7 @@ CLion 的构建目标选择 `hd2ct_http`，它会依次构建 DLL 并核验、�
 cmake --build build/cmake --target hd2ct_http
 ~~~
 
-打包时将同一构建目录中的 DLL 与 metadata 成对传入，保留原有 ZIP 命名与上游资产校验：
+打包时将同一构建目录中的 DLL 与 metadata 成对传入，并在一次命令中生成两种安装包：
 
 ~~~pwsh
 python tools/build_package.py --native-dll build/cmake/native/hd2ct_http.dll --native-meta build/cmake/native/hd2ct_http.meta.json
@@ -95,7 +95,12 @@ python tools/build_package.py
 if ($LASTEXITCODE -ne 0) { throw '安装包构建失败' }
 ~~~
 
-默认读取上一步的 DLL/meta、game/ 源码、共享目标语言目录、`resources/menu_locales.json` 与两个固定上游 ZIP，输出 artifacts/HD2ChatTranslateYYYYMMDDHHMMSS.zip。打包器校验全部15种菜单locale和每种语言的标题、说明、目标语言名称及超时格式，再把文本快照嵌入 Lua 设置模块；游戏运行时不读取该JSON文件。命名时间为北京时间；--output 也必须使用此格式，已有文件不会覆盖，同秒重复构建需等下一秒。修改目标语言目录后必须重新构建 DLL；安装包构建器会拒绝目录摘要不匹配的旧模块。
+默认读取上一步的 DLL/meta、game/ 源码、共享目标语言目录、`resources/menu_locales.json` 与两个固定上游 ZIP，输出 `artifacts/HD2ChatTranslateNoDependenciesYYYYMMDDHHMMSS.zip` 和 `artifacts/HD2ChatTranslateIncludeDependenciesYYYYMMDDHHMMSS.zip`。两个文件名使用同一个北京时间时间戳。打包器校验全部15种菜单locale和每种语言的标题、说明、目标语言名称及超时格式，再把文本快照嵌入 Lua 设置模块；游戏运行时不读取该JSON文件。`--output-dir` 指定两包的输出目录；`--output` 接受任一新变体的有效文件名作为路径锚点，并在其目录生成两包。两参数互斥，旧版单包文件名不接受，已有目标文件不会覆盖，同秒重复构建需等下一秒。修改目标语言目录后必须重新构建 DLL；安装包构建器会拒绝目录摘要不匹配的旧模块。
+
+~~~pwsh
+python tools/build_package.py --output-dir 'C:\release\20261009'
+python tools/build_package.py --output 'C:\release\HD2ChatTranslateIncludeDependencies20261009120000.zip'
+~~~
 
 使用其他依赖路径时可显式传入：
 
@@ -103,7 +108,7 @@ if ($LASTEXITCODE -ne 0) { throw '安装包构建失败' }
 python tools/build_package.py --loader-zip 'C:\dependencies\Bingus-Shared-Loader-v18.zip' --menu-zip 'C:\dependencies\Mod-Options-Menu-v1.2.zip' --native-dll 'C:\build\hd2ct_http.dll' --native-meta 'C:\build\hd2ct_http.meta.json'
 ~~~
 
-包中包含 manifest.json、项目 GPLv3 原文、一个合并 patch、空 stream/gpu_resources sidecar、cJSON、loader 和菜单框架的许可及来源文件。合并 patch 包含 loader、聊天翻译与菜单三个 Lua 资源，只需导入一个 ZIP。模型地址、模型名和密钥不会进入包。包保留既有 Guid 与资源名，导入 Arsenal 时更新同名模组。
+`NoDependencies` 包的 patch 只含聊天翻译 Lua 资源；它仍内嵌原生 DLL 与菜单设置模块，并附项目 GPLv3 与 cJSON 许可，不含 Bingus Shared Loader 或 Mod Options Menu 资源及其许可文件。使用前需单独安装 Bingus Shared Loader v18 和 Mod Options Menu v1.2。`IncludeDependencies` 包保留 loader、聊天翻译和菜单三个 Lua 资源，并附上游许可及来源材料。两包保留相同的 Guid、manifest Name、patch 和聊天资源名；同一时刻只安装其中一个，切换时用另一包更新同一模组。模型地址、模型名和密钥不会进入包。
 
 ## 离线验证
 
@@ -137,7 +142,7 @@ git diff --check
 从构建输出中选择确切 ZIP 路径，检查 CRC 与 SHA-256：
 
 ~~~pwsh
-$taskPackage = 'artifacts/HD2ChatTranslateYYYYMMDDHHMMSS.zip' # 替换为本次实际文件名
+$taskPackage = 'artifacts/HD2ChatTranslateIncludeDependenciesYYYYMMDDHHMMSS.zip' # 替换为本次实际文件名
 python -m zipfile -t $taskPackage
 Get-FileHash -LiteralPath $taskPackage -Algorithm SHA256
 ~~~
@@ -157,7 +162,7 @@ Get-FileHash -LiteralPath $taskPackage -Algorithm SHA256
 | loader 摘要或条目不匹配 | 重新获取固定 v18 发布资产并保留原 ZIP |
 | 菜单 ZIP 摘要或条目不匹配 | 重新获取固定 Mod Options Menu v1.2 原始发布资产 |
 | 目标语言目录与 metadata 不匹配 | 用当前目录重新构建 DLL 与 metadata，再打包 |
-| 文件名不符合要求或已存在 | 使用新的 HD2ChatTranslate年月日时分秒.zip 名称 |
+| 文件名不符合要求或已存在 | 使用新的 HD2ChatTranslateNoDependencies 或 HD2ChatTranslateIncludeDependencies 加年月日时分秒名称 |
 | Lua 回归报错或被跳过 | 指定兼容 Win64 LuaJIT DLL 后重跑 |
 
 artifacts/ 和 Python 缓存被 Git 忽略。提交源码时不要提交生成的 DLL、ZIP、上游安装包、游戏资源或本机配置。当前兼容范围、内存与加载边界见[技术说明](technical.md)。

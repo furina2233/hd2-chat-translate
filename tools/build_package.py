@@ -41,7 +41,12 @@ MAX_ARCHIVE_LUA_RESOURCES = 16
 MAX_ARCHIVE_SIZE = 8 * 1024 * 1024
 DELIVERY_PREFIX = "HD2ChatTranslate"
 BEIJING_TIMEZONE = timezone(timedelta(hours=8))
-DELIVERY_NAME_PATTERN = re.compile(r"^HD2ChatTranslate([0-9]{14})\.zip$", re.ASCII)
+DELIVERY_NAME_PATTERN = re.compile(
+    r"^HD2ChatTranslate(NoDependencies|IncludeDependencies)([0-9]{14})\.zip$",
+    re.ASCII,
+)
+NO_DEPENDENCIES_VARIANT = "NoDependencies"
+INCLUDE_DEPENDENCIES_VARIANT = "IncludeDependencies"
 STANDALONE_DLL = ROOT / "artifacts" / "native" / "hd2ct_http.dll"
 STANDALONE_META = ROOT / "artifacts" / "native" / "hd2ct_http.meta.json"
 STANDALONE_LICENSE = ROOT / "native" / "vendor" / "cjson" / "LICENSE"
@@ -689,30 +694,95 @@ def entry_source(
     return declaration + embedded
 
 
-def addon_files(
-    entry: bytes,
-    *,
-    loader_zip: Path | str | None = None,
-    menu_zip: Path | str | None = None,
+def _read_common_license_files() -> dict[str, bytes]:
+    """读取两种包都需要的项目 GPL 与 cJSON 许可。"""
+    try:
+        project_license = PROJECT_LICENSE.read_bytes()
+    except OSError as error:
+        raise ValueError("安装包缺少项目 GPLv3 许可证原文") from error
+    try:
+        cjson_license = STANDALONE_LICENSE.read_bytes()
+    except OSError as error:
+        raise ValueError("standalone包缺少vendor/cJSON许可证原文") from error
+    return {
+        "LICENSE": project_license,
+        "LICENSES/cJSON-LICENSE.txt": cjson_license,
+    }
+
+
+def _load_dependency_assets(
+    loader_zip: Path | str | None,
+    menu_zip: Path | str | None,
 ) -> dict[str, bytes]:
-    resource = struct.pack("<II", len(entry), 2) + entry
+    """一次性核验并读取两个前置的资源、许可和来源材料。"""
     loader_resource, loader_readme, loader_manifest = load_shared_loader_assets(loader_zip)
     menu_resource = load_mod_options_menu_resource(menu_zip)
-    archive = make_lua_resource_archive(
-        [
-            (SHARED_LOADER_RESOURCE_HASH, loader_resource),
-            (resource_hash(RESOURCE_NAME), resource),
-            (MOD_OPTIONS_MENU_RESOURCE_HASH, menu_resource),
-        ]
+    try:
+        menu_license = MOD_OPTIONS_MENU_LICENSE.read_bytes()
+        menu_source_note = MOD_OPTIONS_MENU_SOURCE.read_bytes()
+    except OSError as error:
+        raise ValueError("standalone包缺少ModOptionsMenu许可证或来源说明") from error
+    if len(menu_license) != 674 or hashlib.sha256(menu_license).hexdigest() != MOD_OPTIONS_MENU_LICENSE_SHA256:
+        raise ValueError("ModOptionsMenu许可证字节与固定上游原文不匹配")
+    loader_zip_path = Path(loader_zip) if loader_zip is not None else SHARED_LOADER_ZIP
+    loader_input_note = (
+        "artifacts/Bingus-Shared-Loader-v18.zip"
+        if _same_path(loader_zip_path, SHARED_LOADER_ZIP)
+        else "命令行 --loader-zip 指定的 ZIP"
     )
-    description = (
+    loader_source_note = (
+        "Bingus Shared Loader v18 来源说明\n\n"
+        "上游项目：https://github.com/CowboyBingus/BingusSharedLoader\n"
+        f"本机构建输入：{loader_input_note}\n"
+        f"输入 ZIP SHA-256：{SHARED_LOADER_ZIP_SHA256}\n\n"
+        "本包从用户本机已有的上游 ZIP 中读取固定白名单条目。Loader Lua resource 在合并进本插件 patch 时保持原始字节。\n"
+        "随包保留的 README 和 manifest 是上游文件原文。本说明不为 Bingus Shared Loader 声明或新增许可证。\n"
+    ).encode("utf-8")
+    return {
+        "loader_resource": loader_resource,
+        "loader_readme": loader_readme,
+        "loader_manifest": loader_manifest,
+        "loader_source_note": loader_source_note,
+        "menu_resource": menu_resource,
+        "menu_license": menu_license,
+        "menu_source_note": menu_source_note,
+    }
+
+
+def _manifest_description(include_dependencies: bool) -> str:
+    dependency_note = (
+        "内置 Bingus Shared Loader v18 和 Mod Options Menu v1.2，无需另外导入。"
+        if include_dependencies
+        else "此包不含 Bingus Shared Loader v18 或 Mod Options Menu v1.2，使用前需分别安装这两个前置。"
+    )
+    return (
         "进程内聊天翻译：通过游戏内原生网络线程将聊天交给配置的翻译服务，"
         "翻译成功后显示原文、换行和“译文：”加译文；服务判断无需回写时保持原文，请求失败显示简短提示，不广播译文。"
         "读取 HD2CT_API_URL、HD2CT_MODEL、HD2CT_API_KEY 和 HD2CT_APP_ID 环境变量；"
         "启用状态与请求超时由游戏内菜单控制。"
-        "内置 Bingus Shared Loader v18，无需另外导入。Arsenal 默认优先级请放在列表最底；"
-        "启用 first-mod-wins 时请放在列表最顶。"
+        + dependency_note
+        + "Arsenal 默认优先级请放在列表最底；启用 first-mod-wins 时请放在列表最顶。"
     )
+
+
+def _assemble_addon_files(
+    entry: bytes,
+    *,
+    include_dependencies: bool,
+    common_licenses: dict[str, bytes],
+    dependency_assets: dict[str, bytes] | None,
+) -> dict[str, bytes]:
+    resource = struct.pack("<II", len(entry), 2) + entry
+    resources = [(resource_hash(RESOURCE_NAME), resource)]
+    if include_dependencies:
+        if dependency_assets is None:
+            raise ValueError("IncludeDependencies包缺少已核验的前置资源")
+        resources.extend((
+            (SHARED_LOADER_RESOURCE_HASH, dependency_assets["loader_resource"]),
+            (MOD_OPTIONS_MENU_RESOURCE_HASH, dependency_assets["menu_resource"]),
+        ))
+    archive = make_lua_resource_archive(resources)
+    description = _manifest_description(include_dependencies)
     manifest = {
         "Version": 1,
         "Guid": str(uuid.UUID(ADDON_GUID)),
@@ -731,42 +801,37 @@ def addon_files(
         "Addon/" + ARCHIVE_NAME: archive,
         "Addon/" + ARCHIVE_NAME + ".stream": b"",
         "Addon/" + ARCHIVE_NAME + ".gpu_resources": b"",
+        **common_licenses,
     }
-    try:
-        files["LICENSE"] = PROJECT_LICENSE.read_bytes()
-    except OSError as error:
-        raise ValueError("安装包缺少项目 GPLv3 许可证原文") from error
-    try:
-        files["LICENSES/cJSON-LICENSE.txt"] = STANDALONE_LICENSE.read_bytes()
-    except OSError as error:
-        raise ValueError("standalone包缺少vendor/cJSON许可证原文") from error
-    try:
-        menu_license = MOD_OPTIONS_MENU_LICENSE.read_bytes()
-        menu_source_note = MOD_OPTIONS_MENU_SOURCE.read_bytes()
-    except OSError as error:
-        raise ValueError("standalone包缺少ModOptionsMenu许可证或来源说明") from error
-    if len(menu_license) != 674 or hashlib.sha256(menu_license).hexdigest() != MOD_OPTIONS_MENU_LICENSE_SHA256:
-        raise ValueError("ModOptionsMenu许可证字节与固定上游原文不匹配")
-    loader_zip_path = Path(loader_zip) if loader_zip is not None else SHARED_LOADER_ZIP
-    loader_input_note = (
-        "artifacts/Bingus-Shared-Loader-v18.zip"
-        if _same_path(loader_zip_path, SHARED_LOADER_ZIP)
-        else "命令行 --loader-zip 指定的 ZIP"
-    )
-    source_note = (
-        "Bingus Shared Loader v18 来源说明\n\n"
-        "上游项目：https://github.com/CowboyBingus/BingusSharedLoader\n"
-        f"本机构建输入：{loader_input_note}\n"
-        f"输入 ZIP SHA-256：{SHARED_LOADER_ZIP_SHA256}\n\n"
-        "本包从用户本机已有的上游 ZIP 中读取固定白名单条目。Loader Lua resource 在合并进本插件 patch 时保持原始字节。\n"
-        "随包保留的 README 和 manifest 是上游文件原文。本说明不为 Bingus Shared Loader 声明或新增许可证。\n"
-    ).encode("utf-8")
-    files["LICENSES/BingusSharedLoader-README.txt"] = loader_readme
-    files["LICENSES/BingusSharedLoader-manifest.json"] = loader_manifest
-    files["LICENSES/BingusSharedLoader-SOURCE.txt"] = source_note
-    files["LICENSES/ModOptionsMenu-LICENSE.txt"] = menu_license
-    files["LICENSES/ModOptionsMenu-SOURCE.txt"] = menu_source_note
+    if include_dependencies:
+        assert dependency_assets is not None
+        files.update({
+            "LICENSES/BingusSharedLoader-README.txt": dependency_assets["loader_readme"],
+            "LICENSES/BingusSharedLoader-manifest.json": dependency_assets["loader_manifest"],
+            "LICENSES/BingusSharedLoader-SOURCE.txt": dependency_assets["loader_source_note"],
+            "LICENSES/ModOptionsMenu-LICENSE.txt": dependency_assets["menu_license"],
+            "LICENSES/ModOptionsMenu-SOURCE.txt": dependency_assets["menu_source_note"],
+        })
     return files
+
+
+def addon_files(
+    entry: bytes,
+    *,
+    loader_zip: Path | str | None = None,
+    menu_zip: Path | str | None = None,
+    include_dependencies: bool = True,
+) -> dict[str, bytes]:
+    common_licenses = _read_common_license_files()
+    dependency_assets = (
+        _load_dependency_assets(loader_zip, menu_zip) if include_dependencies else None
+    )
+    return _assemble_addon_files(
+        entry,
+        include_dependencies=include_dependencies,
+        common_licenses=common_licenses,
+        dependency_assets=dependency_assets,
+    )
 
 
 def _same_path(left: Path, right: Path) -> bool:
@@ -776,95 +841,149 @@ def _same_path(left: Path, right: Path) -> bool:
     )
 
 
-def default_output_path(now: datetime | None = None) -> Path:
-    """返回北京时间命名的默认交付包路径。"""
+def _beijing_moment(now: datetime | None = None) -> datetime:
     moment = now or datetime.now(BEIJING_TIMEZONE)
     if moment.tzinfo is None:
-        moment = moment.replace(tzinfo=BEIJING_TIMEZONE)
-    else:
-        moment = moment.astimezone(BEIJING_TIMEZONE)
-    return ROOT / "artifacts" / f"{DELIVERY_PREFIX}{moment:%Y%m%d%H%M%S}.zip"
+        return moment.replace(tzinfo=BEIJING_TIMEZONE)
+    return moment.astimezone(BEIJING_TIMEZONE)
+
+
+def _variant_name(include_dependencies: bool) -> str:
+    return INCLUDE_DEPENDENCIES_VARIANT if include_dependencies else NO_DEPENDENCIES_VARIANT
+
+
+def _delivery_filename(variant: str, moment: datetime) -> str:
+    if variant not in (NO_DEPENDENCIES_VARIANT, INCLUDE_DEPENDENCIES_VARIANT):
+        raise ValueError("未知的安装包变体")
+    return f"{DELIVERY_PREFIX}{variant}{moment:%Y%m%d%H%M%S}.zip"
+
+
+def default_output_path(
+    now: datetime | None = None,
+    *,
+    include_dependencies: bool = True,
+) -> Path:
+    """返回北京时间命名的单包默认路径；默认返回含前置版本。"""
+    return ROOT / "artifacts" / _delivery_filename(
+        _variant_name(include_dependencies), _beijing_moment(now)
+    )
+
+
+def _delivery_filename_match(filename: str) -> re.Match[str] | None:
+    match = DELIVERY_NAME_PATTERN.fullmatch(filename)
+    if match is None:
+        return None
+    try:
+        datetime.strptime(match.group(2), "%Y%m%d%H%M%S")
+    except ValueError:
+        return None
+    return match
 
 
 def is_delivery_filename(filename: str) -> bool:
-    """检查命令行交付包名称及其中的日期时间是否有效。"""
-    match = DELIVERY_NAME_PATTERN.fullmatch(filename)
-    if match is None:
-        return False
-    try:
-        datetime.strptime(match.group(1), "%Y%m%d%H%M%S")
-    except ValueError:
-        return False
-    return True
+    """只接受两种变体且日历时间有效的交付文件名。"""
+    return _delivery_filename_match(filename) is not None
+
+
+def _paired_output_paths(
+    output_anchor: Path | str | None = None,
+    *,
+    output_dir: Path | str | None = None,
+    now: datetime | None = None,
+) -> tuple[Path, Path]:
+    """按一个北京时间时间戳派生两种包的目标路径。"""
+    if output_anchor is not None and output_dir is not None:
+        raise ValueError("--output 与 --output-dir 不能同时指定")
+    if output_anchor is not None:
+        anchor = Path(output_anchor)
+        match = _delivery_filename_match(anchor.name)
+        if match is None:
+            raise ValueError("--output 文件名必须是带有效北京时间时间戳的新安装包变体名")
+        timestamp = match.group(2)
+        directory = anchor.parent
+    else:
+        timestamp = _beijing_moment(now).strftime("%Y%m%d%H%M%S")
+        directory = Path(output_dir) if output_dir is not None else ROOT / "artifacts"
+    return (
+        directory / f"{DELIVERY_PREFIX}{NO_DEPENDENCIES_VARIANT}{timestamp}.zip",
+        directory / f"{DELIVERY_PREFIX}{INCLUDE_DEPENDENCIES_VARIANT}{timestamp}.zip",
+    )
 
 
 def _select_output_path(
     output: Path | str | None,
     *,
+    include_dependencies: bool,
     now: datetime | None = None,
 ) -> Path:
-    """CLI默认使用时间戳名称；内部测试可传入临时输出路径。"""
-    return Path(output) if output is not None else default_output_path(now)
+    """保留单包构建API的任意显式路径，默认名使用对应的新变体。"""
+    if output is None:
+        return default_output_path(now, include_dependencies=include_dependencies)
+    return Path(output)
 
 
-def build_artifact(
-    output: Path | str | None = None,
-    *,
-    loader_zip: Path | str | None = None,
-    menu_zip: Path | str | None = None,
-    native_dll: Path | str | None = None,
-    native_meta: Path | str | None = None,
-) -> Path:
+def _build_input_paths(
+    dll_path: Path,
+    meta_path: Path,
+    loader_zip_path: Path,
+    menu_zip_path: Path,
+) -> tuple[Path, ...]:
+    """列出全部输入路径，NoDependencies也保留覆盖保护。"""
+    return (
+        ROOT / "game" / "chat_probe.lua",
+        ROOT / "game" / "chat_probe_core.lua",
+        ROOT / "game" / "chat_observe_core.lua",
+        ROOT / "game" / "chat_translate_core.lua",
+        ROOT / "game" / "chat_http_native.lua",
+        ROOT / "game" / "settings.lua",
+        dll_path,
+        meta_path,
+        STANDALONE_LICENSE,
+        PROJECT_LICENSE,
+        MOD_OPTIONS_MENU_LICENSE,
+        MOD_OPTIONS_MENU_SOURCE,
+        target_languages.CATALOGUE_PATH,
+        loader_zip_path,
+        menu_zip_path,
+        menu_locales.CATALOGUE_PATH,
+    )
+
+
+def _preflight_outputs(output_paths: tuple[Path, ...], input_paths: tuple[Path, ...]) -> None:
+    for index, path in enumerate(output_paths):
+        if any(_same_path(path, prior) for prior in output_paths[:index]):
+            raise ValueError("两个安装包输出路径不能相同")
+        if any(_same_path(path, source) for source in input_paths):
+            raise ValueError("输出不能覆盖构建输入文件")
+    existing = [path for path in output_paths if os.path.lexists(path)]
+    if existing:
+        names = "、".join(path.name for path in existing)
+        raise ValueError(f"交付包已存在，拒绝覆盖：{names}")
+
+
+def _build_packaged_entry(dll_path: Path, meta_path: Path) -> bytes:
     entry_path = ROOT / "game" / "chat_probe.lua"
     core_path = ROOT / "game" / "chat_probe_core.lua"
     observer_path = ROOT / "game" / "chat_observe_core.lua"
     translate_path = ROOT / "game" / "chat_translate_core.lua"
     standalone_module_path = ROOT / "game" / "chat_http_native.lua"
     settings_path = ROOT / "game" / "settings.lua"
-    dll_path = Path(native_dll) if native_dll is not None else STANDALONE_DLL
-    meta_path = Path(native_meta) if native_meta is not None else STANDALONE_META
-    loader_zip_path = Path(loader_zip) if loader_zip is not None else SHARED_LOADER_ZIP
-    menu_zip_path = Path(menu_zip) if menu_zip is not None else MOD_OPTIONS_MENU_ZIP
-    catalogue = target_languages.load_catalogue()
-    localizations = menu_locales.load_catalogue()
-    output_path = _select_output_path(output)
-    if output is None and os.path.lexists(output_path):
-        raise ValueError(
-            f"默认交付包已存在，拒绝覆盖：{output_path.name}。"
-            "请等待下一秒重新构建，或通过 --output 指定新的时间戳文件名。"
-        )
-    source_paths = (
-        entry_path, core_path, observer_path, translate_path, standalone_module_path,
-        settings_path, dll_path, meta_path, STANDALONE_LICENSE, PROJECT_LICENSE,
-        MOD_OPTIONS_MENU_LICENSE, MOD_OPTIONS_MENU_SOURCE,
-        target_languages.CATALOGUE_PATH, loader_zip_path, menu_zip_path,
-        menu_locales.CATALOGUE_PATH,
-    )
-    if any(_same_path(output_path, path) for path in source_paths):
-        raise ValueError("输出不能覆盖构建输入文件")
     if not dll_path.is_file() or not meta_path.is_file():
         raise ValueError(
             f"缺少原生 helper DLL 或配套meta：{dll_path} / {meta_path}；"
             "请先构建原生 helper，package builder不会自动编译或下载。"
         )
-    if not STANDALONE_LICENSE.is_file():
-        raise ValueError("缺少 native/vendor/cjson/LICENSE")
-    if not PROJECT_LICENSE.is_file():
-        raise ValueError("缺少项目 LICENSE")
-    if not MOD_OPTIONS_MENU_LICENSE.is_file() or not MOD_OPTIONS_MENU_SOURCE.is_file():
-        raise ValueError("缺少ModOptionsMenu许可证或来源说明")
+    catalogue = target_languages.load_catalogue()
+    localizations = menu_locales.load_catalogue()
+    dll = dll_path.read_bytes()
+    metadata = meta_path.read_bytes()
     native_module = standalone_module_source(
-        standalone_module_path.read_bytes(),
-        dll_path.read_bytes(),
-        meta_path.read_bytes(),
-        catalogue,
+        standalone_module_path.read_bytes(), dll, metadata, catalogue
     )
     settings_module = target_language_settings_source(
-        settings_path.read_bytes(),
-        catalogue,
-        localizations,
+        settings_path.read_bytes(), catalogue, localizations
     )
-    packaged_entry = entry_source(
+    return entry_source(
         entry_path.read_bytes(),
         core_path.read_bytes(),
         observer_path.read_bytes(),
@@ -873,23 +992,140 @@ def build_artifact(
         settings_source=settings_module,
         standalone=True,
     )
-    files = addon_files(packaged_entry, loader_zip=loader_zip_path, menu_zip=menu_zip_path)
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    with zipfile.ZipFile(output_path, "x", compression=zipfile.ZIP_DEFLATED) as package:
+
+
+def _write_archive(file_object, files: dict[str, bytes]) -> None:
+    with zipfile.ZipFile(file_object, "w", compression=zipfile.ZIP_DEFLATED) as package:
         for name, content in sorted(files.items()):
             info = zipfile.ZipInfo(name, date_time=(1980, 1, 1, 0, 0, 0))
             info.compress_type = zipfile.ZIP_DEFLATED
             info.external_attr = 0o100644 << 16
             package.writestr(info, content)
-    return output_path
+
+
+def _write_artifact_archives(
+    artifacts: tuple[tuple[Path, dict[str, bytes]], ...],
+) -> tuple[Path, ...]:
+    """先独占创建所有目标，再写ZIP；失败时清理本次创建的部分文件。"""
+    handles = []
+    created_paths: list[Path] = []
+    try:
+        for path, _ in artifacts:
+            path.parent.mkdir(parents=True, exist_ok=True)
+        for path, _ in artifacts:
+            handle = path.open("xb")
+            handles.append(handle)
+            created_paths.append(path)
+        for (_, files), handle in zip(artifacts, handles):
+            _write_archive(handle, files)
+        return tuple(path for path, _ in artifacts)
+    except BaseException:
+        for handle in handles:
+            try:
+                handle.close()
+            except OSError:
+                pass
+        for path in created_paths:
+            try:
+                path.unlink(missing_ok=True)
+            except OSError:
+                pass
+        raise
+    finally:
+        for handle in handles:
+            if not handle.closed:
+                handle.close()
+
+
+def build_artifact(
+    output: Path | str | None = None,
+    *,
+    include_dependencies: bool = True,
+    loader_zip: Path | str | None = None,
+    menu_zip: Path | str | None = None,
+    native_dll: Path | str | None = None,
+    native_meta: Path | str | None = None,
+) -> Path:
+    """构建单个变体；默认生成IncludeDependencies包。"""
+    dll_path = Path(native_dll) if native_dll is not None else STANDALONE_DLL
+    meta_path = Path(native_meta) if native_meta is not None else STANDALONE_META
+    loader_zip_path = Path(loader_zip) if loader_zip is not None else SHARED_LOADER_ZIP
+    menu_zip_path = Path(menu_zip) if menu_zip is not None else MOD_OPTIONS_MENU_ZIP
+    output_path = _select_output_path(
+        output, include_dependencies=include_dependencies
+    )
+    input_paths = _build_input_paths(dll_path, meta_path, loader_zip_path, menu_zip_path)
+    _preflight_outputs((output_path,), input_paths)
+    packaged_entry = _build_packaged_entry(dll_path, meta_path)
+    common_licenses = _read_common_license_files()
+    dependency_assets = (
+        _load_dependency_assets(loader_zip_path, menu_zip_path)
+        if include_dependencies
+        else None
+    )
+    files = _assemble_addon_files(
+        packaged_entry,
+        include_dependencies=include_dependencies,
+        common_licenses=common_licenses,
+        dependency_assets=dependency_assets,
+    )
+    return _write_artifact_archives(((output_path, files),))[0]
+
+
+def build_artifacts(
+    output_anchor: Path | str | None = None,
+    *,
+    output_dir: Path | str | None = None,
+    loader_zip: Path | str | None = None,
+    menu_zip: Path | str | None = None,
+    native_dll: Path | str | None = None,
+    native_meta: Path | str | None = None,
+    now: datetime | None = None,
+) -> tuple[Path, Path]:
+    """一次读取和组装输入，构建同时间戳的无前置版与含前置版。"""
+    output_paths = _paired_output_paths(
+        output_anchor, output_dir=output_dir, now=now
+    )
+    dll_path = Path(native_dll) if native_dll is not None else STANDALONE_DLL
+    meta_path = Path(native_meta) if native_meta is not None else STANDALONE_META
+    loader_zip_path = Path(loader_zip) if loader_zip is not None else SHARED_LOADER_ZIP
+    menu_zip_path = Path(menu_zip) if menu_zip is not None else MOD_OPTIONS_MENU_ZIP
+    input_paths = _build_input_paths(dll_path, meta_path, loader_zip_path, menu_zip_path)
+    _preflight_outputs(output_paths, input_paths)
+
+    packaged_entry = _build_packaged_entry(dll_path, meta_path)
+    common_licenses = _read_common_license_files()
+    dependency_assets = _load_dependency_assets(loader_zip_path, menu_zip_path)
+    no_dependencies_files = _assemble_addon_files(
+        packaged_entry,
+        include_dependencies=False,
+        common_licenses=common_licenses,
+        dependency_assets=None,
+    )
+    include_dependencies_files = _assemble_addon_files(
+        packaged_entry,
+        include_dependencies=True,
+        common_licenses=common_licenses,
+        dependency_assets=dependency_assets,
+    )
+    return _write_artifact_archives((
+        (output_paths[0], no_dependencies_files),
+        (output_paths[1], include_dependencies_files),
+    ))
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument(
+    output_group = parser.add_mutually_exclusive_group()
+    output_group.add_argument(
         "--output",
         type=Path,
-        help="显式指定ZIP路径；文件名须为HD2ChatTranslateYYYYMMDDHHMMSS.zip。",
+        help="路径锚点；文件名须为任一新安装包变体和有效北京时间戳，程序会在同目录生成两包。",
+    )
+    output_group.add_argument(
+        "--output-dir",
+        type=Path,
+        help="两包的输出目录；默认使用项目artifacts目录。",
     )
     parser.add_argument("--loader-zip", type=Path, help="Bingus Shared Loader v18来源ZIP；默认使用项目artifacts路径。")
     parser.add_argument("--menu-zip", type=Path, help="ModOptionsMenu v1.2来源ZIP；默认使用项目artifacts路径。")
@@ -897,10 +1133,11 @@ def main() -> None:
     parser.add_argument("--native-meta", type=Path, help="原生HTTP helper meta JSON；默认使用项目artifacts/native路径。")
     args = parser.parse_args()
     if args.output is not None and not is_delivery_filename(args.output.name):
-        parser.error("CLI交付文件名必须为 HD2ChatTranslateYYYYMMDDHHMMSS.zip，时间使用北京时间")
+        parser.error("--output必须使用两个新安装包变体之一及有效北京时间戳")
     try:
-        result = build_artifact(
+        outputs = build_artifacts(
             args.output,
+            output_dir=args.output_dir,
             loader_zip=args.loader_zip,
             menu_zip=args.menu_zip,
             native_dll=args.native_dll,
@@ -908,7 +1145,8 @@ def main() -> None:
         )
     except (OSError, ValueError) as error:
         parser.error(str(error))
-    print(f"已构建HD2聊天插件ZIP：{result}")
+    for output in outputs:
+        print(f"已构建HD2聊天插件ZIP：{output}")
 
 
 if __name__ == "__main__":

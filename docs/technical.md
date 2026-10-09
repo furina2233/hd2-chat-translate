@@ -10,7 +10,7 @@
 - [game/chat_http_native.lua](../game/chat_http_native.lua) 校验并加载随包嵌入的原生 DLL。
 - [game/settings.lua](../game/settings.lua) 向 Mod Options Menu 注册目标语言选项，不读取或控制翻译服务配置。
 - [native/client.c](../native/client.c) 管理公开 ABI、后台线程、队列、缓存与限流；原生客户端各模块共同链接为一个 DLL。
-- [tools/build_package.py](../tools/build_package.py) 将固定 loader 资源、Lua addon 和原生模块合成 Arsenal 安装包。
+- [tools/build_package.py](../tools/build_package.py) 将 Lua addon 和原生模块构建为含前置或需单独安装前置的 Arsenal 安装包。
 
 当前兼容范围为 Steam build 25480438、游戏 EXE 1.8.46015.0。门禁同时核对 game.dll SHA-256 2e2c3b7c2500646dadd5f2b4c6e0504dbb7e7896139f64cddc0d1813c718f51e、文件长度 15,522,408、PE timestamp 1790161983、SizeOfImage 74,727,424，以及可执行节 RVA 0x1000、长度 34,667,155、标志 0x60000020 和已知指令签名。指纹或签名不匹配时不会进入聊天回写路径。
 
@@ -145,9 +145,9 @@ Lua FFI 的 BY_HANDLE_FILE_INFORMATION 定义为 52 字节，并核对 dwVolumeS
 
 ## Arsenal patch 格式
 
-生成的 addon patch 使用一个 Lua type（type_count=1）和三个资源文件（file_count=3），类型值为 0xA14E8DFA2CD117E2。资源按名称 hash 排序，编号为 0、1、2，依次为 loader、聊天插件、Mod Options Menu；资源数据按 16 字节边界对齐。Bingus Shared Loader v18 和 Mod Options Menu v1.2 的 Lua resource 从固定输入中校验后原字节嵌入；stream 与 gpu_resources sidecar 均为空。
+两种安装包都使用一个 Lua type（type_count=1），类型值为 0xA14E8DFA2CD117E2。`NoDependencies` patch 只有聊天插件资源（file_count=1）；`IncludeDependencies` patch 有 loader、聊天插件和 Mod Options Menu 三个资源（file_count=3），资源按名称 hash 排序，编号为 0、1、2。资源数据按 16 字节边界对齐。含前置包中的 Bingus Shared Loader v18 和 Mod Options Menu v1.2 Lua resource 从固定输入中校验后原字节嵌入；两种包的 stream 与 gpu_resources sidecar 均为空。两个包都包含项目 GPL 与 cJSON 许可证；含前置包还保留上游许可和来源材料。
 
-Arsenal manifest Guid 固定为 a741d044-972b-4dc5-b08e-1a68441e1d7f，patch 文件名为 9ba626afa44a3aa3.patch_0。构建时保留这两个身份值，以便导入新 ZIP 时更新同名模组。Lua resource 名为 mods/hd2chat/HD2ChatTranslate，加载器依据此标识发现 addon。
+两种包共用 Arsenal manifest Guid `a741d044-972b-4dc5-b08e-1a68441e1d7f`、manifest Name、patch 文件名 `9ba626afa44a3aa3.patch_0` 和聊天 Lua resource 名 `mods/hd2chat/HD2ChatTranslate`，以便彼此更新同一个模组。两包不能同时安装；切换时导入另一变体。`NoDependencies` 使用者需另行安装 Bingus Shared Loader v18 与 Mod Options Menu v1.2。一次 CLI 构建输出 `HD2ChatTranslateNoDependenciesYYYYMMDDHHMMSS.zip` 和 `HD2ChatTranslateIncludeDependenciesYYYYMMDDHHMMSS.zip`，两者共享北京时间时间戳；`--output-dir` 指定目录，`--output` 用任一新变体的有效文件名作为同目录路径锚点。
 
 ## 启动日志保留
 

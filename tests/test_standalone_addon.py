@@ -483,15 +483,62 @@ class StandaloneBuilderTests(unittest.TestCase):
         instant = datetime(2026, 10, 2, 16, 4, 5, tzinfo=timezone.utc)
         with tempfile.TemporaryDirectory() as directory:
             with mock.patch.object(builder, "ROOT", Path(directory)):
-                default_name = builder.default_output_path(instant).name
-            output = Path(directory) / default_name
-            self.assertEqual(default_name, "HD2ChatTranslate20261003000405.zip")
-            self.assertTrue(builder.is_delivery_filename(default_name))
+                include_name = builder.default_output_path(instant).name
+                no_dependencies_name = builder.default_output_path(
+                    instant, include_dependencies=False
+                ).name
+            output = Path(directory) / include_name
+            self.assertEqual(include_name, "HD2ChatTranslateIncludeDependencies20261003000405.zip")
+            self.assertEqual(no_dependencies_name, "HD2ChatTranslateNoDependencies20261003000405.zip")
+            self.assertTrue(builder.is_delivery_filename(include_name))
+            self.assertTrue(builder.is_delivery_filename(no_dependencies_name))
+            self.assertFalse(builder.is_delivery_filename("HD2ChatTranslate20261003000405.zip"))
+            self.assertFalse(builder.is_delivery_filename("HD2ChatTranslateNoDependencies20260230000000.zip"))
+            no_anchor, include_anchor = builder._paired_output_paths(
+                Path(directory) / no_dependencies_name
+            )
+            self.assertEqual((no_anchor.name, include_anchor.name), (no_dependencies_name, include_name))
+            self.assertEqual(
+                builder._paired_output_paths(Path(directory) / include_name),
+                (no_anchor, include_anchor),
+            )
+            with self.assertRaisesRegex(ValueError, "不能同时指定"):
+                builder._paired_output_paths(
+                    Path(directory) / include_name, output_dir=directory
+                )
 
             _, _, loader_resource, loader_readme, loader_manifest = synthetic_shared_loader_package()
             loader_assets = (loader_resource, loader_readme, loader_manifest)
             with mock.patch.object(builder, "load_shared_loader_assets", return_value=loader_assets):
                 files = builder.addon_files(entry)
+            with mock.patch.object(
+                builder, "_load_dependency_assets", side_effect=AssertionError("不应读取前置")
+            ):
+                no_dependencies_files = builder.addon_files(entry, include_dependencies=False)
+            no_dependencies_expected = {
+                "manifest.json",
+                "Addon/9ba626afa44a3aa3.patch_0",
+                "Addon/9ba626afa44a3aa3.patch_0.stream",
+                "Addon/9ba626afa44a3aa3.patch_0.gpu_resources",
+                "LICENSE",
+                "LICENSES/cJSON-LICENSE.txt",
+            }
+            self.assertEqual(set(no_dependencies_files), no_dependencies_expected)
+            no_dependencies_archive = no_dependencies_files["Addon/9ba626afa44a3aa3.patch_0"]
+            no_dependencies_header = struct.unpack_from("<III20sQQ24s", no_dependencies_archive, 0)
+            self.assertEqual(no_dependencies_header[2], 1)
+            no_dependencies_entry = struct.unpack_from("<7Q6I", no_dependencies_archive, 104)
+            self.assertEqual(no_dependencies_entry[0], builder.resource_hash(builder.RESOURCE_NAME))
+            self.assertEqual(
+                no_dependencies_archive[
+                    no_dependencies_entry[2]:no_dependencies_entry[2] + no_dependencies_entry[7]
+                ],
+                struct.pack("<II", len(entry), 2) + entry,
+            )
+            no_dependencies_manifest = json.loads(no_dependencies_files["manifest.json"])
+            self.assertEqual(no_dependencies_manifest["Guid"], builder.ADDON_GUID)
+            self.assertEqual(no_dependencies_manifest["Name"], "HD2 Chat Translate Standalone")
+            self.assertIn("需分别安装这两个前置", no_dependencies_manifest["Description"])
             self.assertTrue(entry.startswith(b"-- HD2-Addon: mods/hd2chat/HD2ChatTranslate\n"))
             archive = files["Addon/9ba626afa44a3aa3.patch_0"]
             header = struct.unpack_from("<III20sQQ24s", archive, 0)
@@ -790,6 +837,165 @@ class StandaloneBuilderTests(unittest.TestCase):
                 self.assertEqual(set(names), set(files))
                 self.assertEqual(len(names), len(set(names)))
                 self.assertEqual(package.read("LICENSE"), builder.PROJECT_LICENSE.read_bytes())
+
+            pair_directory = Path(directory) / "pair-output"
+            with (
+                mock.patch.object(builder, "_build_packaged_entry", wraps=builder._build_packaged_entry) as entry_builder,
+                mock.patch.object(builder, "_read_common_license_files", wraps=builder._read_common_license_files) as license_reader,
+                mock.patch.object(builder, "load_shared_loader_assets", return_value=loader_assets) as loader_reader,
+                mock.patch.object(builder, "load_mod_options_menu_resource", wraps=builder.load_mod_options_menu_resource) as menu_reader,
+            ):
+                pair_paths = builder.build_artifacts(
+                    output_dir=pair_directory,
+                    native_dll=dll_path,
+                    native_meta=meta_path,
+                    now=instant,
+                )
+            self.assertEqual(
+                [path.name for path in pair_paths],
+                [no_dependencies_name, include_name],
+            )
+            self.assertEqual((entry_builder.call_count, license_reader.call_count), (1, 1))
+            self.assertEqual((loader_reader.call_count, menu_reader.call_count), (1, 1))
+            with (
+                zipfile.ZipFile(pair_paths[0]) as no_dependencies_package,
+                zipfile.ZipFile(pair_paths[1]) as include_dependencies_package,
+            ):
+                self.assertIsNone(no_dependencies_package.testzip())
+                self.assertIsNone(include_dependencies_package.testzip())
+                no_names = set(no_dependencies_package.namelist())
+                include_names = set(include_dependencies_package.namelist())
+                self.assertEqual(no_names, no_dependencies_expected)
+                self.assertEqual(include_names, set(files))
+                self.assertNotIn("LICENSES/ModOptionsMenu-LICENSE.txt", no_names)
+                self.assertIn("LICENSES/ModOptionsMenu-LICENSE.txt", include_names)
+                self.assertEqual(
+                    no_dependencies_package.read("Addon/9ba626afa44a3aa3.patch_0"),
+                    no_dependencies_files["Addon/9ba626afa44a3aa3.patch_0"],
+                )
+                no_manifest = json.loads(no_dependencies_package.read("manifest.json"))
+                include_manifest = json.loads(include_dependencies_package.read("manifest.json"))
+                self.assertEqual((no_manifest["Guid"], no_manifest["Name"]),
+                                 (include_manifest["Guid"], include_manifest["Name"]))
+                no_archive = no_dependencies_package.read("Addon/9ba626afa44a3aa3.patch_0")
+                include_archive = include_dependencies_package.read("Addon/9ba626afa44a3aa3.patch_0")
+                self.assertEqual(struct.unpack_from("<III20sQQ24s", no_archive, 0)[2], 1)
+                self.assertEqual(struct.unpack_from("<III20sQQ24s", include_archive, 0)[2], 3)
+                self.assertEqual(
+                    no_dependencies_package.read("LICENSES/cJSON-LICENSE.txt"),
+                    include_dependencies_package.read("LICENSES/cJSON-LICENSE.txt"),
+                )
+
+            missing_loader = Path(directory) / "missing-loader.zip"
+            missing_menu = Path(directory) / "missing-menu.zip"
+            no_dependencies_single_path = Path(directory) / "single-no-dependencies.zip"
+            with mock.patch.object(
+                builder, "_load_dependency_assets", side_effect=AssertionError("不应读取缺失前置")
+            ):
+                no_dependencies_single = builder.build_artifact(
+                    no_dependencies_single_path,
+                    include_dependencies=False,
+                    loader_zip=missing_loader,
+                    menu_zip=missing_menu,
+                    native_dll=dll_path,
+                    native_meta=meta_path,
+                )
+            with zipfile.ZipFile(no_dependencies_single) as package:
+                self.assertIsNone(package.testzip())
+                self.assertEqual(set(package.namelist()), no_dependencies_expected)
+
+            collision_directory = Path(directory) / "collision-output"
+            collision_directory.mkdir()
+            collision_no_dependencies, collision_include_dependencies = builder._paired_output_paths(
+                output_dir=collision_directory, now=instant
+            )
+            old_content = b"keep existing package"
+            collision_no_dependencies.write_bytes(old_content)
+            with self.assertRaisesRegex(ValueError, "已存在，拒绝覆盖"):
+                builder.build_artifacts(
+                    output_dir=collision_directory,
+                    native_dll=dll_path,
+                    native_meta=meta_path,
+                    now=instant,
+                )
+            self.assertEqual(collision_no_dependencies.read_bytes(), old_content)
+            self.assertFalse(collision_include_dependencies.exists())
+
+            reverse_collision_directory = Path(directory) / "reverse-collision-output"
+            reverse_collision_directory.mkdir()
+            reverse_no_dependencies, reverse_include_dependencies = builder._paired_output_paths(
+                output_dir=reverse_collision_directory, now=instant
+            )
+            reverse_old_content = b"keep existing include-dependencies package"
+            reverse_include_dependencies.write_bytes(reverse_old_content)
+            with self.assertRaisesRegex(ValueError, "已存在，拒绝覆盖"):
+                builder.build_artifacts(
+                    output_dir=reverse_collision_directory,
+                    native_dll=dll_path,
+                    native_meta=meta_path,
+                    now=instant,
+                )
+            self.assertEqual(reverse_include_dependencies.read_bytes(), reverse_old_content)
+            self.assertFalse(reverse_no_dependencies.exists())
+
+            race_directory = Path(directory) / "race-output"
+            race_no_dependencies, race_include_dependencies = builder._paired_output_paths(
+                output_dir=race_directory, now=instant
+            )
+            original_path_open = Path.open
+
+            def create_racing_include_target(path, mode="r", *args, **kwargs):
+                if path == race_include_dependencies and mode == "xb":
+                    path.write_bytes(b"created by competing process")
+                return original_path_open(path, mode, *args, **kwargs)
+
+            with mock.patch.object(Path, "open", new=create_racing_include_target):
+                with self.assertRaises(FileExistsError):
+                    builder.build_artifacts(
+                        output_dir=race_directory,
+                        native_dll=dll_path,
+                        native_meta=meta_path,
+                        now=instant,
+                    )
+            self.assertFalse(race_no_dependencies.exists())
+            self.assertEqual(
+                race_include_dependencies.read_bytes(), b"created by competing process"
+            )
+
+            cli_outputs = (
+                Path(directory) / no_dependencies_name,
+                Path(directory) / include_name,
+            )
+            with (
+                mock.patch.object(builder, "build_artifacts", return_value=cli_outputs) as cli_builder,
+                mock.patch.object(sys, "argv", ["build_package.py", "--output", str(Path(directory) / include_name)]),
+                mock.patch("sys.stdout", new_callable=io.StringIO) as stdout,
+            ):
+                builder.main()
+            self.assertEqual(cli_builder.call_args.args, (Path(directory) / include_name,))
+            self.assertIn(no_dependencies_name, stdout.getvalue())
+            self.assertIn(include_name, stdout.getvalue())
+
+            with (
+                mock.patch.object(builder, "build_artifacts", return_value=cli_outputs) as cli_builder,
+                mock.patch.object(sys, "argv", ["build_package.py", "--output-dir", str(pair_directory)]),
+                mock.patch("sys.stdout", new_callable=io.StringIO) as stdout,
+            ):
+                builder.main()
+            self.assertIsNone(cli_builder.call_args.args[0])
+            self.assertEqual(cli_builder.call_args.kwargs["output_dir"], Path(pair_directory))
+            self.assertIn(no_dependencies_name, stdout.getvalue())
+            self.assertIn(include_name, stdout.getvalue())
+
+            with (
+                mock.patch.object(builder, "build_artifacts") as cli_builder,
+                mock.patch.object(sys, "argv", ["build_package.py", "--output", str(Path(directory) / "HD2ChatTranslate20261003000405.zip")]),
+                mock.patch("sys.stderr", new_callable=io.StringIO),
+                self.assertRaises(SystemExit) as cli_error,
+            ):
+                builder.main()
+            self.assertEqual(cli_error.exception.code, 2)
+            cli_builder.assert_not_called()
 
     def test_loader_holds_verified_read_lock_through_absolute_hardened_load(self):
         result = self.run_loader("positive")
