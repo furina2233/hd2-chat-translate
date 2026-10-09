@@ -10,10 +10,9 @@
 
 ## 安装与更新
 
-1. 正常关闭游戏，在 HD2Arsenal 导入 HD2ChatTranslateYYYYMMDDHHMMSS.zip，更新同名模组并启用。
-2. 默认优先级放在列表最底端；启用“第一个模组优先”时放在最顶端。
-3. 点击部署后启动游戏。包内已合并 Bingus Shared Loader v18，无需另行导入。
-4. 更新模组时关闭游戏，再导入新 ZIP、更新同名模组并重新部署。
+1. 正常关闭游戏，在 HD2Arsenal 导入。
+2. 点击部署后启动游戏。独立版需要你已安装Bingus Shared Loader和Mod Options Menu两个前置模组，依赖包含版则不需要。
+3. 更新模组时关闭游戏，再导入新 ZIP、更新同名模组并重新部署。
 
 ## 配置
 
