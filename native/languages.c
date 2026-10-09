@@ -16,6 +16,10 @@ typedef struct HD2CT_ParsedValues {
     uint32_t enabled_valid;
     uint32_t timeout_index;
     uint32_t timeout_valid;
+    uint32_t outgoing_enabled;
+    uint32_t outgoing_enabled_valid;
+    uint32_t outgoing_target_language;
+    uint32_t outgoing_target_valid;
 } HD2CT_ParsedValues;
 
 const HD2CT_TargetLanguage *hd2ct_target_language(uint32_t index)
@@ -160,11 +164,15 @@ static int hd2ct_parse_values_text(const unsigned char *text, size_t length,
     static const char target_option_id[] = HD2CT_TARGET_LANGUAGE_OPTION_ID;
     static const char enabled_option_id[] = HD2CT_ENABLED_OPTION_ID;
     static const char timeout_option_id[] = HD2CT_TIMEOUT_OPTION_ID;
+    static const char outgoing_enabled_option_id[] = HD2CT_OUTGOING_ENABLED_OPTION_ID;
+    static const char outgoing_target_option_id[] = HD2CT_OUTGOING_TARGET_OPTION_ID;
     size_t cursor = 0u;
     memset(parsed, 0, sizeof(*parsed));
     parsed->target_language = HD2CT_DEFAULT_TARGET_LANGUAGE;
     parsed->enabled = HD2CT_ENABLED_DEFAULT;
     parsed->timeout_index = HD2CT_DEFAULT_TIMEOUT_INDEX;
+    parsed->outgoing_enabled = HD2CT_OUTGOING_ENABLED_DEFAULT;
+    parsed->outgoing_target_language = HD2CT_DEFAULT_OUTGOING_TARGET_LANGUAGE;
     while (cursor < length) {
         size_t line_start = cursor;
         size_t line_end;
@@ -176,6 +184,8 @@ static int hd2ct_parse_values_text(const unsigned char *text, size_t length,
         int target_line;
         int enabled_line;
         int timeout_line;
+        int outgoing_enabled_line;
+        int outgoing_target_line;
         while (cursor < length && text[cursor] != '\r' && text[cursor] != '\n') {
             if (text[cursor] == '\t' && tab == SIZE_MAX) tab = cursor;
             ++cursor;
@@ -196,6 +206,12 @@ static int hd2ct_parse_values_text(const unsigned char *text, size_t length,
         timeout_line = tab - line_start == sizeof(timeout_option_id) - 1u &&
             memcmp(text + line_start, timeout_option_id,
                    sizeof(timeout_option_id) - 1u) == 0;
+        outgoing_enabled_line = tab - line_start == sizeof(outgoing_enabled_option_id) - 1u &&
+            memcmp(text + line_start, outgoing_enabled_option_id,
+                   sizeof(outgoing_enabled_option_id) - 1u) == 0;
+        outgoing_target_line = tab - line_start == sizeof(outgoing_target_option_id) - 1u &&
+            memcmp(text + line_start, outgoing_target_option_id,
+                   sizeof(outgoing_target_option_id) - 1u) == 0;
         for (i = tab + 1u; i < line_end; ++i) {
             if (text[i] == '\t') {
                 extra_tab = 1;
@@ -218,6 +234,15 @@ static int hd2ct_parse_values_text(const unsigned char *text, size_t length,
             parsed->timeout_valid = !extra_tab && hd2ct_parse_index(
                 value, value_length, HD2CT_TIMEOUT_CHOICE_COUNT,
                 &parsed->timeout_index);
+        } else if (outgoing_enabled_line) {
+            parsed->outgoing_enabled = HD2CT_OUTGOING_ENABLED_DEFAULT;
+            parsed->outgoing_enabled_valid = !extra_tab && hd2ct_parse_boolean(
+                value, value_length, &parsed->outgoing_enabled);
+        } else if (outgoing_target_line) {
+            parsed->outgoing_target_language = HD2CT_DEFAULT_OUTGOING_TARGET_LANGUAGE;
+            parsed->outgoing_target_valid = !extra_tab && hd2ct_parse_index(
+                value, value_length, HD2CT_TARGET_LANGUAGE_COUNT,
+                &parsed->outgoing_target_language);
         }
     }
     return parsed->any_valid_line != 0u;
@@ -246,6 +271,12 @@ static void hd2ct_apply_parsed_values(const HD2CT_ParsedValues *parsed,
         settings->timeout_seconds =
             g_hd2ct_timeout_seconds[parsed->timeout_index - 1u];
     }
+    if (parsed->outgoing_enabled_valid != 0u) {
+        settings->outgoing_enabled = parsed->outgoing_enabled;
+    }
+    if (parsed->outgoing_target_valid != 0u) {
+        settings->outgoing_target_language = parsed->outgoing_target_language;
+    }
 }
 
 void hd2ct_read_applied_settings(HD2CT_RuntimeSettings *settings)
@@ -259,6 +290,8 @@ void hd2ct_read_applied_settings(HD2CT_RuntimeSettings *settings)
     settings->target_language = HD2CT_DEFAULT_TARGET_LANGUAGE;
     settings->timeout_seconds = HD2CT_DEFAULT_TIMEOUT_SECONDS;
     settings->enabled = HD2CT_ENABLED_DEFAULT;
+    settings->outgoing_enabled = HD2CT_OUTGOING_ENABLED_DEFAULT;
+    settings->outgoing_target_language = HD2CT_DEFAULT_OUTGOING_TARGET_LANGUAGE;
     if (!hd2ct_values_primary_path(path,
                                   sizeof(path) / sizeof(path[0]))) {
         return;

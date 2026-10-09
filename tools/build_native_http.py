@@ -22,6 +22,7 @@ NATIVE_SOURCES = (
     NATIVE_DIR / "common.c",
     NATIVE_DIR / "config.c",
     NATIVE_DIR / "languages.c",
+    NATIVE_DIR / "outgoing.c",
     NATIVE_DIR / "adapter" / "base.c",
     NATIVE_DIR / "adapter" / "chat_completions.c",
     NATIVE_DIR / "adapter" / "google.c",
@@ -33,6 +34,7 @@ NATIVE_SOURCES = (
 NATIVE_HEADERS = (
     NATIVE_DIR / "client.h",
     NATIVE_DIR / "internal.h",
+    NATIVE_DIR / "outgoing.h",
     NATIVE_DIR / "vendor" / "cjson" / "cJSON.h",
 )
 ALLOWED_IMPORTS = {
@@ -144,7 +146,7 @@ def main() -> int:
     command = [
         str(compiler),
         "-std=c11",
-        "-O2",
+        "-Os",
         "-shared",
         "-s",
         "-static-libgcc",

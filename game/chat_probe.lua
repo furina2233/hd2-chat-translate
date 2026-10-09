@@ -1044,12 +1044,45 @@ local function initialize_probe()
     end
 
     local native_http_loader
+    local native_transport_api
+    local outgoing_pump_step
     if STANDALONE_ENABLED and type(native_http_factory) == "function" then
         local loader_ok, loader = pcall(native_http_factory, ffi, kernel, bcrypt, hash_bytes, u16_ascii)
         if loader_ok and type(loader) == "table" and type(loader.load) == "function" then
             native_http_loader = loader
         end
     end
+
+    --[[HD2CT出站泵闭包开始]]
+    if STANDALONE_ENABLED then
+        local next_pump_ms = 0
+        local pump_stopped = false
+        outgoing_pump_step = function()
+            if pump_stopped or not native_transport_api then return false end
+            local clock_ok, clock_value = pcall(kernel.GetTickCount64)
+            if not clock_ok then
+                pump_stopped = true
+                return false
+            end
+            local now_ms = tonumber(clock_value)
+            if not now_ms or now_ms < 0 or now_ms ~= math.floor(now_ms)
+                or now_ms > 9007199254740791 then
+                pump_stopped = true
+                return false
+            end
+            if now_ms < next_pump_ms then return false end
+            next_pump_ms = now_ms + 200
+            local response_ok, response = pcall(
+                native_transport_api.response, "__hd2ct_outgoing_pump_v1")
+            if not response_ok or
+                (response ~= "SENT\n" and response ~= "SKIP\n") then
+                pump_stopped = true
+                return false
+            end
+            return response == "SENT\n"
+        end
+    end
+    --[[HD2CT出站泵闭包结束]]
 
     local function query(rva)
         if type(rva) ~= "number" or rva ~= rva or rva < 0 or rva ~= math.floor(rva)
@@ -1198,8 +1231,6 @@ local function initialize_probe()
     local translate_heartbeat_fresh = false
     local translate_owned_tokens = {}
     local translate_file_sequence = 0
-    local native_transport_api
-
     local MAX_OBSERVER_ADDRESS = 0x7fffffffffff
     local MAX_OBSERVER_READ = TRANSLATE_ENABLED and 256 * 1024 or 16 * 1024
     local FULL_APPLY_READ_RESERVE = 224 * 1024
@@ -3165,19 +3196,30 @@ local function initialize_probe()
         if observer_faulted then return observer_finish_with_error("adapter_error") end
         return done == true
     end
-    return one_probe_step
+    return one_probe_step, outgoing_pump_step
 end
 
 local original_update = _G.update
-local setup_ok, probe_step = pcall(initialize_probe)
+local setup_ok, probe_step, outgoing_pump_step = pcall(initialize_probe)
 if setup_ok then
     if TRANSLATE_ENABLED then
         if type(translate_core) == "table" and type(translate_core.wrap_update_after) == "function" then
-            _G.update = translate_core.wrap_update_after(original_update, probe_step)
+            _G.update = translate_core.wrap_update_after(
+                original_update, probe_step, outgoing_pump_step)
         else
             local finished = false
+            local pump_finished = false
             local function after_original(...)
-                if not finished then
+                local sent = false
+                if not pump_finished and type(outgoing_pump_step) == "function" then
+                    local pump_ok, pump_sent = pcall(outgoing_pump_step)
+                    if not pump_ok then
+                        pump_finished = true
+                    elseif pump_sent == true then
+                        sent = true
+                    end
+                end
+                if not sent and not finished then
                     local ok, done = pcall(probe_step)
                     if not ok or done == true then finished = true end
                 end

@@ -227,6 +227,26 @@ def target_language_settings_source(
     lines.extend([
         "            },",
         "        },",
+    ])
+    outgoing_enabled = data["menu_options"]["outgoing_enabled"]
+    lines.extend([
+        "        outgoing_enabled = {",
+        "            option_id = " + _lua_string_literal(outgoing_enabled["option_id"]) + ",",
+        "            type = " + _lua_string_literal(outgoing_enabled["type"]) + ",",
+        "            label = " + _lua_string_literal(outgoing_enabled["label"]) + ",",
+        f"            default = {str(outgoing_enabled['default']).lower()},",
+        "            description = " + _lua_string_literal(outgoing_enabled["description"]) + ",",
+        "        },",
+    ])
+    outgoing_target = data["menu_options"]["outgoing_target"]
+    lines.extend([
+        "        outgoing_target = {",
+        "            option_id = " + _lua_string_literal(outgoing_target["option_id"]) + ",",
+        "            type = " + _lua_string_literal(outgoing_target["type"]) + ",",
+        "            label = " + _lua_string_literal(outgoing_target["label"]) + ",",
+        f"            default_index = {outgoing_target['default_index']},",
+        "            description = " + _lua_string_literal(outgoing_target["description"]) + ",",
+        "        },",
         "    },",
         "    languages = {",
     ])
@@ -707,7 +727,7 @@ def addon_files(
     )
     description = (
         "进程内聊天翻译：通过游戏内原生网络线程将聊天交给配置的翻译服务，"
-        "翻译成功后显示原文、换行和“译文：”加译文；服务判断无需回写时保持原文，请求失败显示简短提示，不广播译文。"
+        "收到消息时本地显示原文、换行和“译文：”加译文；开启发送前翻译后按独立目标语言发送，失败或超时发送原文。"
         "读取 HD2CT_API_URL、HD2CT_MODEL、HD2CT_API_KEY 和 HD2CT_APP_ID 环境变量；"
         "启用状态与请求超时由游戏内菜单控制。"
         "内置 Bingus Shared Loader v18，无需另外导入。Arsenal 默认优先级请放在列表最底；"

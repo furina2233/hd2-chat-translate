@@ -17,10 +17,13 @@ _ROOT_KEYS = {
     "schema_version", "option_id", "mod_id", "default_index", "menu_options", "languages"
 }
 _LANGUAGE_KEYS = {"id", "label", "ai_target", "google", "baidu", "youdao"}
-_MENU_OPTIONS_KEYS = {"enabled", "timeout"}
+_MENU_OPTIONS_KEYS = {"enabled", "timeout", "outgoing_enabled", "outgoing_target"}
 _ENABLED_OPTION_KEYS = {"option_id", "type", "label", "default", "description"}
 _TIMEOUT_OPTION_KEYS = {
     "option_id", "type", "label", "default_index", "description", "choices"
+}
+_OUTGOING_TARGET_OPTION_KEYS = {
+    "option_id", "type", "label", "default_index", "description"
 }
 _TIMEOUT_CHOICE_KEYS = {"label", "seconds"}
 _OPTION_ID = re.compile(r"^[a-z][a-z0-9]*(?:\.[a-z][a-z0-9_]*)+$")
@@ -53,8 +56,8 @@ def validate_catalogue(value: Any) -> dict[str, Any]:
     """验证语言目录、菜单设置项、稳定标识、默认项与服务语言码。"""
     if not isinstance(value, dict) or set(value) != _ROOT_KEYS:
         raise ValueError("共享菜单目录顶层字段不符合schema")
-    if type(value["schema_version"]) is not int or value["schema_version"] != 2:
-        raise ValueError("共享菜单目录schema_version必须为2")
+    if type(value["schema_version"]) is not int or value["schema_version"] != 3:
+        raise ValueError("共享菜单目录schema_version必须为3")
 
     option_id = _plain_text(value["option_id"], "option_id")
     if not _OPTION_ID.fullmatch(option_id):
@@ -65,7 +68,7 @@ def validate_catalogue(value: Any) -> dict[str, Any]:
 
     menu_options = value["menu_options"]
     if not isinstance(menu_options, dict) or set(menu_options) != _MENU_OPTIONS_KEYS:
-        raise ValueError("menu_options必须包含enabled与timeout")
+        raise ValueError("menu_options字段不符合schema")
     enabled = menu_options["enabled"]
     if not isinstance(enabled, dict) or set(enabled) != _ENABLED_OPTION_KEYS:
         raise ValueError("enabled菜单项字段不符合schema")
@@ -109,7 +112,48 @@ def validate_catalogue(value: Any) -> dict[str, Any]:
                 or label != expected_labels[index]):
             raise ValueError("timeout choices必须依序为10、20、30秒")
         normalized_choices.append({"label": label, "seconds": seconds})
-    if len({option_id, enabled_id, timeout_id}) != 3:
+
+    outgoing_enabled = menu_options["outgoing_enabled"]
+    if not isinstance(outgoing_enabled, dict) or set(outgoing_enabled) != _ENABLED_OPTION_KEYS:
+        raise ValueError("outgoing_enabled菜单项字段不符合schema")
+    outgoing_enabled_id = _plain_text(
+        outgoing_enabled["option_id"], "menu_options.outgoing_enabled.option_id")
+    if not _OPTION_ID.fullmatch(outgoing_enabled_id):
+        raise ValueError("outgoing_enabled菜单项option_id格式无效")
+    outgoing_enabled_label = _plain_text(
+        outgoing_enabled["label"], "menu_options.outgoing_enabled.label")
+    if len(outgoing_enabled_label) > _LABEL_MAX_CHARACTERS:
+        raise ValueError("outgoing_enabled菜单项label超过48字符")
+    outgoing_enabled_description = _plain_text(
+        outgoing_enabled["description"], "menu_options.outgoing_enabled.description")
+    if (outgoing_enabled["type"] != "toggle"
+            or type(outgoing_enabled["default"]) is not bool
+            or outgoing_enabled["default"] is not False
+            or outgoing_enabled_label != "翻译我的消息再发送"
+            or outgoing_enabled_description != "发送前先翻译自己的聊天消息。失败或超时时自动发送原文。"):
+        raise ValueError("outgoing_enabled菜单项必须是默认关闭且文本固定的toggle")
+
+    outgoing_target = menu_options["outgoing_target"]
+    if not isinstance(outgoing_target, dict) or set(outgoing_target) != _OUTGOING_TARGET_OPTION_KEYS:
+        raise ValueError("outgoing_target菜单项字段不符合schema")
+    outgoing_target_id = _plain_text(
+        outgoing_target["option_id"], "menu_options.outgoing_target.option_id")
+    if not _OPTION_ID.fullmatch(outgoing_target_id):
+        raise ValueError("outgoing_target菜单项option_id格式无效")
+    outgoing_target_label = _plain_text(
+        outgoing_target["label"], "menu_options.outgoing_target.label")
+    if len(outgoing_target_label) > _LABEL_MAX_CHARACTERS:
+        raise ValueError("outgoing_target菜单项label超过48字符")
+    outgoing_target_description = _plain_text(
+        outgoing_target["description"], "menu_options.outgoing_target.description")
+    if (outgoing_target["type"] != "choice"
+            or type(outgoing_target["default_index"]) is not int
+            or outgoing_target["default_index"] != 3
+            or outgoing_target_label != "将我的话翻译为"
+            or outgoing_target_description != "选择自己发送消息的目标语言。"):
+        raise ValueError("outgoing_target菜单项必须是默认索引3且文本固定的choice")
+
+    if len({option_id, enabled_id, timeout_id, outgoing_enabled_id, outgoing_target_id}) != 5:
         raise ValueError("菜单option_id必须互不重复")
     normalized_menu_options = {
         "enabled": {
@@ -127,15 +171,28 @@ def validate_catalogue(value: Any) -> dict[str, Any]:
             "description": timeout_description,
             "choices": normalized_choices,
         },
+        "outgoing_enabled": {
+            "option_id": outgoing_enabled_id,
+            "type": "toggle",
+            "label": outgoing_enabled_label,
+            "default": False,
+            "description": outgoing_enabled_description,
+        },
+        "outgoing_target": {
+            "option_id": outgoing_target_id,
+            "type": "choice",
+            "label": outgoing_target_label,
+            "default_index": 3,
+            "description": outgoing_target_description,
+        },
     }
 
     languages = value["languages"]
     if not isinstance(languages, list) or not 2 <= len(languages) <= 16:
         raise ValueError("目标语言数量必须在2到16项之间")
     default_index = value["default_index"]
-    if (type(default_index) is not int or default_index < 1 or
-            default_index > len(languages)):
-        raise ValueError("default_index必须是有效的1起始语言索引")
+    if type(default_index) is not int or default_index != 1:
+        raise ValueError("default_index必须是简体中文的索引1")
 
     ids: set[str] = set()
     labels: set[str] = set()
@@ -163,7 +220,7 @@ def validate_catalogue(value: Any) -> dict[str, Any]:
         rows.append({key: row[key] for key in _FIELD_ORDER})
 
     return {
-        "schema_version": 2,
+        "schema_version": 3,
         "option_id": option_id,
         "mod_id": mod_id,
         "default_index": default_index,
@@ -204,7 +261,7 @@ def catalogue_sha256(catalogue: dict[str, Any] | None = None) -> str:
     """返回规范化目录内容的SHA256，不受JSON空白或对象键顺序影响。"""
     source = validate_catalogue(catalogue) if catalogue is not None else load_catalogue()
     normalized = {
-        "schema_version": 2,
+        "schema_version": 3,
         "option_id": source["option_id"],
         "mod_id": source["mod_id"],
         "default_index": source["default_index"],
@@ -242,6 +299,10 @@ def c_header_text(catalogue: dict[str, Any] | None = None) -> str:
         f"#define HD2CT_DEFAULT_TIMEOUT_INDEX {source['menu_options']['timeout']['default_index']}u",
         f"#define HD2CT_TIMEOUT_CHOICE_COUNT {len(source['menu_options']['timeout']['choices'])}u",
         f"#define HD2CT_DEFAULT_TIMEOUT_SECONDS {source['menu_options']['timeout']['choices'][source['menu_options']['timeout']['default_index'] - 1]['seconds']}u",
+        f"#define HD2CT_OUTGOING_ENABLED_OPTION_ID {_c_string(source['menu_options']['outgoing_enabled']['option_id'])}",
+        "#define HD2CT_OUTGOING_ENABLED_DEFAULT 0u",
+        f"#define HD2CT_OUTGOING_TARGET_OPTION_ID {_c_string(source['menu_options']['outgoing_target']['option_id'])}",
+        f"#define HD2CT_DEFAULT_OUTGOING_TARGET_LANGUAGE {source['menu_options']['outgoing_target']['default_index']}u",
         "",
         "static const uint32_t g_hd2ct_timeout_seconds[HD2CT_TIMEOUT_CHOICE_COUNT] = {",
         "    " + ", ".join(

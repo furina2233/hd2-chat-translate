@@ -1100,10 +1100,20 @@ function M.step(state)
     return false
 end
 
-function M.wrap_update_after(original_update, probe_step)
+function M.wrap_update_after(original_update, probe_step, outgoing_pump_step)
     local finished = false
+    local pump_finished = false
     local function after_original(...)
-        if not finished then
+        local outgoing_sent = false
+        if not pump_finished and type(outgoing_pump_step) == "function" then
+            local pump_ok, sent = pcall(outgoing_pump_step)
+            if not pump_ok then
+                pump_finished = true
+            elseif sent == true then
+                outgoing_sent = true
+            end
+        end
+        if not outgoing_sent and not finished then
             local ok, done = pcall(probe_step)
             if not ok or done == true then finished = true end
         end

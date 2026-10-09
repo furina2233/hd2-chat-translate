@@ -33,6 +33,10 @@
 #define HD2CT_MAX_VALUES_PATH 32768u
 #define HD2CT_JOB_COUNT 32u
 #define HD2CT_CACHE_COUNT 512u
+#define HD2CT_OUTGOING_QUEUE_COUNT 8u
+#define HD2CT_OUTGOING_MAX_SOURCE 803u
+#define HD2CT_OUTGOING_SEND_LIMIT 512u
+#define HD2CT_OUTGOING_PUMP_TOKEN "__hd2ct_outgoing_pump_v1"
 #define HD2CT_JOB_TTL_MS 60000ull
 #define HD2CT_RATE_PERIOD_MS 60000ull
 #define HD2CT_REQUESTS_PER_PERIOD 30u
@@ -51,6 +55,11 @@ enum {
     HD2CT_SLOT_QUEUED = 1,
     HD2CT_SLOT_ACTIVE = 2,
     HD2CT_SLOT_DONE = 3
+};
+
+enum {
+    HD2CT_JOB_INCOMING = 0,
+    HD2CT_JOB_OUTGOING = 1
 };
 
 enum {
@@ -81,12 +90,18 @@ typedef struct HD2CT_WorkerJob {
     uint32_t target_language;
     uint32_t timeout_seconds;
     uint32_t menu_enabled;
+    uint32_t kind;
+    uint32_t settings_snapshot_valid;
+    uint32_t target_language_snapshot;
+    uint32_t timeout_seconds_snapshot;
 } HD2CT_WorkerJob;
 
 typedef struct HD2CT_RuntimeSettings {
     uint32_t target_language;
     uint32_t timeout_seconds;
     uint32_t enabled;
+    uint32_t outgoing_enabled;
+    uint32_t outgoing_target_language;
 } HD2CT_RuntimeSettings;
 
 typedef struct HD2CT_TargetLanguage {
@@ -159,6 +174,11 @@ int hd2ct_read_environment_value(const wchar_t *name, char *out,
 const HD2CT_TargetLanguage *hd2ct_target_language(uint32_t index);
 uint32_t hd2ct_default_target_language(void);
 void hd2ct_read_applied_settings(HD2CT_RuntimeSettings *settings);
+uint32_t hd2ct_submit_outgoing(const char *token, const char *body,
+                               uint32_t bytes, uint32_t target_language,
+                               uint32_t timeout_seconds);
+uint32_t hd2ct_poll_job(const char *token, char *out, uint32_t capacity,
+                        uint32_t *written);
 #ifdef HD2CT_TESTING
 int hd2ct_test_set_values_file_path(const wchar_t *path);
 #endif

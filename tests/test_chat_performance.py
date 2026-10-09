@@ -194,6 +194,30 @@ local wrapper_second = capture_returns(wrapped_update("values"))
 local original_error_propagated = not pcall(wrapped_update, "raise")
 local wrapper_zero = capture_returns(wrapped_update("zero"))
 
+local outgoing_wrapper_state = {original = 0, probe = 0, pump = 0, error_pump = 0}
+local outgoing_wrapped = core.wrap_update_after(function()
+    outgoing_wrapper_state.original = outgoing_wrapper_state.original + 1
+    return "frame", nil
+end, function()
+    outgoing_wrapper_state.probe = outgoing_wrapper_state.probe + 1
+    return true
+end, function()
+    outgoing_wrapper_state.pump = outgoing_wrapper_state.pump + 1
+    return outgoing_wrapper_state.pump == 2
+end)
+local outgoing_first = capture_returns(outgoing_wrapped())
+local outgoing_second = capture_returns(outgoing_wrapped())
+local outgoing_third = capture_returns(outgoing_wrapped())
+local pump_error_wrapped = core.wrap_update_after(function() end, function()
+    outgoing_wrapper_state.probe = outgoing_wrapper_state.probe + 1
+    return false
+end, function()
+    outgoing_wrapper_state.error_pump = outgoing_wrapper_state.error_pump + 1
+    error("PRIVATE_OUTGOING_PUMP_EXCEPTION")
+end)
+pump_error_wrapped()
+pump_error_wrapped()
+
 local latency = new_env({scan_plan = function() return {owner_id = 17, slots = {63}} end})
 latency.messages[63] = make_message(63, "old baseline message")
 step_at(latency, 0)
@@ -513,6 +537,18 @@ RESULT = json_core.encode_json({
         original_error_propagated = original_error_propagated,
         original_before_probe = wrapper_order[1] == "original" and wrapper_order[2] == "probe",
     },
+    outgoing_wrapper = {
+        original = outgoing_wrapper_state.original,
+        probe = outgoing_wrapper_state.probe,
+        pump = outgoing_wrapper_state.pump,
+        error_pump = outgoing_wrapper_state.error_pump,
+        first_returns = outgoing_first.n,
+        first_nil_preserved = outgoing_first[1] == "frame" and outgoing_first[2] == nil,
+        sent_returns = outgoing_second.n,
+        sent_nil_preserved = outgoing_second[1] == "frame" and outgoing_second[2] == nil,
+        third_returns = outgoing_third.n,
+        third_nil_preserved = outgoing_third[1] == "frame" and outgoing_third[2] == nil,
+    },
     scan_latency = {
         baseline_at_ms = baseline_at_ms,
         baseline_remaining = baseline_remaining,
@@ -652,6 +688,76 @@ class ChatTranslatePerformanceTests(unittest.TestCase):
         self.assertEqual(wrapper["zero_returns"], 0, "zero returns were not preserved")
         self.assertTrue(wrapper["original_error_propagated"], "original update errors must propagate")
         self.assertTrue(wrapper["original_before_probe"], "probe ran before the original update")
+
+        outgoing_wrapper = result["outgoing_wrapper"]
+        self.assertEqual(outgoing_wrapper["original"], 3)
+        self.assertEqual(outgoing_wrapper["probe"], 3,
+                         "a sent message or completed probe should only skip the current scan")
+        self.assertEqual(outgoing_wrapper["pump"], 3,
+                         "outgoing pumping must continue after the incoming probe completes")
+        self.assertEqual(outgoing_wrapper["error_pump"], 1,
+                         "a pump failure should stop only the pump callback")
+        self.assertTrue(outgoing_wrapper["first_nil_preserved"])
+        self.assertTrue(outgoing_wrapper["sent_nil_preserved"])
+        self.assertTrue(outgoing_wrapper["third_nil_preserved"])
+
+        probe_source = (ROOT / "game" / "chat_probe.lua").read_text(encoding="utf-8")
+        pump_start_marker = "--[[HD2CT出站泵闭包开始]]"
+        pump_end_marker = "--[[HD2CT出站泵闭包结束]]"
+        pump_start = probe_source.index(pump_start_marker)
+        pump_end = probe_source.index(pump_end_marker, pump_start)
+        initialize_start = probe_source.index("local function initialize_probe()")
+        self.assertLess(probe_source.index("local native_transport_api", initialize_start), pump_start)
+        self.assertLess(probe_source.index("local outgoing_pump_step", initialize_start), pump_start)
+        pump_source = probe_source[pump_start + len(pump_start_marker):pump_end]
+        closure_script = """
+local STANDALONE_ENABLED = true
+local now_ms, clock_calls, clock_failure = 0, 0, false
+local response_calls, response_value = 0, "SENT\\n"
+local kernel = {GetTickCount64 = function()
+    clock_calls = clock_calls + 1
+    if clock_failure then error("PRIVATE_CLOCK_FAILURE") end
+    return now_ms
+end}
+local function make_pump()
+    local native_transport_api
+    local outgoing_pump_step
+""" + pump_source + """
+    return outgoing_pump_step, function(api) native_transport_api = api end
+end
+local pump, bind_api = make_pump()
+local no_api_result = pump()
+local calls_without_api = clock_calls
+bind_api({response = function(token)
+    response_calls = response_calls + 1
+    if token ~= "__hd2ct_outgoing_pump_v1" then error("PRIVATE_TOKEN_FAILURE") end
+    return response_value
+end})
+local sent_result = pump()
+now_ms = 100
+local interval_result = pump()
+now_ms = 200
+response_value = "SKIP\\n"
+local skip_result = pump()
+now_ms = 400
+clock_failure = true
+local failure_result = pump()
+local calls_at_failure = clock_calls
+now_ms = 600
+clock_failure = false
+local stopped_result = pump()
+RESULT = table.concat({
+    tostring(type(pump) == "function"), tostring(no_api_result == false),
+    tostring(calls_without_api), tostring(sent_result == true),
+    tostring(interval_result == false), tostring(skip_result == false),
+    tostring(failure_result == false), tostring(response_calls),
+    tostring(calls_at_failure), tostring(stopped_result == false),
+    tostring(clock_calls)
+}, "|")
+"""
+        closure_values = self.lua.run(closure_script).split("|")
+        self.assertEqual(closure_values, ["true", "true", "0", "true", "true",
+                                          "true", "true", "2", "4", "true", "4"])
         for sample in result["frequency"]:
             with self.subTest(fps=sample["fps"]):
                 self.assertLessEqual(sample["batches"], 6)

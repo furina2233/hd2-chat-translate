@@ -48,11 +48,21 @@ TEXT_KEYS = (
     "timeout_label",
     "timeout_description",
     "timeout_choice_format",
+    "outgoing_enabled_label",
+    "outgoing_enabled_description",
+    "outgoing_target_label",
+    "outgoing_target_description",
 )
 LOCALE_KEYS = frozenset((*TEXT_KEYS, "target_languages"))
-LABEL_KEYS = frozenset(("target_language_label", "enabled_label", "timeout_label"))
+LABEL_KEYS = frozenset((
+    "target_language_label", "enabled_label", "timeout_label",
+    "outgoing_enabled_label", "outgoing_target_label",
+))
 DESCRIPTION_KEYS = frozenset(
-    ("target_language_description", "enabled_description", "timeout_description")
+    (
+        "target_language_description", "enabled_description", "timeout_description",
+        "outgoing_enabled_description", "outgoing_target_description",
+    )
 )
 MAX_LABEL_LENGTH = 64
 MAX_DESCRIPTION_LENGTH = 400
