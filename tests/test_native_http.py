@@ -30,20 +30,7 @@ NATIVE_SOURCES = build_native_http.NATIVE_SOURCES
 NATIVE_TEST_ROOT = ROOT / "artifacts" / "validation"
 TARGET_LANGUAGE_CATALOGUE = target_languages.load_catalogue()
 AI_RESPONSE_FORMAT = {
-    "type": "json_schema",
-    "json_schema": {
-        "name": "hd2ct_translation",
-        "strict": True,
-        "schema": {
-            "type": "object",
-            "properties": {
-                "is_target_language": {"type": "boolean"},
-                "translation": {"type": "string"},
-            },
-            "required": ["is_target_language", "translation"],
-            "additionalProperties": False,
-        },
-    },
+    "type": "json_object",
 }
 
 ENVIRONMENT_CHILD = r"""
@@ -603,7 +590,6 @@ __declspec(dllexport) int __cdecl fixture_BuildAiRequest(
     HD2CT_WorkerJob job;
     HD2CT_BuiltRequest request;
     size_t url_bytes;
-    size_t path_chars;
     int result = 0;
     memset(&job, 0, sizeof(job));
     memset(&request, 0, sizeof(request));
@@ -620,12 +606,6 @@ __declspec(dllexport) int __cdecl fixture_BuildAiRequest(
     request_path[0] = L'\0';
     if (!hd2ct_build_ai_request(&job, &request) || request.body == NULL ||
         request.body_bytes + 1u > body_capacity) goto cleanup;
-    if (request.request_path_override != NULL) {
-        path_chars = wcslen(request.request_path_override);
-        if (path_chars + 1u > request_path_capacity) goto cleanup;
-        memcpy(request_path, request.request_path_override,
-               (path_chars + 1u) * sizeof(wchar_t));
-    }
     memcpy(body, request.body, request.body_bytes + 1u);
     result = 1;
 
@@ -1474,6 +1454,7 @@ class NativeHttpWorkerTests(unittest.TestCase):
         for position, row in enumerate(languages):
             payload = self.state.payloads[position]
             if adapter_name == "ai":
+                self.assertEqual(set(payload), {"model", "messages", "response_format"})
                 self.assertEqual(payload["response_format"], AI_RESPONSE_FORMAT)
                 prompt = payload["messages"][0]["content"]
                 self.assertIn(row["ai_target"], prompt)
@@ -2158,7 +2139,11 @@ class NativeHttpWorkerTests(unittest.TestCase):
                 self.assertEqual(result["actions"][0]["accepted"], 1)
                 self.assertEqual(result["actions"][1]["result"], "OK\n你好，绝地潜兵。")
                 self.assertEqual(self.state.paths, [expected])
-                self.assertEqual(self.state.payloads[0]["reasoning_effort"], "none")
+                self.assertEqual(
+                    set(self.state.payloads[0]),
+                    {"model", "messages", "response_format"},
+                )
+                self.assertEqual(self.state.payloads[0]["response_format"], AI_RESPONSE_FORMAT)
 
         fixture = ctypes.CDLL(str(self.environment_test_dll()))
         fixture.fixture_BuildAiRequest.argtypes = [
@@ -2179,69 +2164,30 @@ class NativeHttpWorkerTests(unittest.TestCase):
             )
             return json.loads(body.value.decode("utf-8")), request_path.value
 
-        deepseek_urls = (
+        compatible_urls = (
             "https://api.deepseek.com/chat/completions",
             "https://api.deepseek.com/v1/chat/completions",
             "https://api.deepseek.com/beta/chat/completions",
             "https://api.deepseek.com/beta",
-            "https://API.DEEPSEEK.COM:443/v1/chat/completions",
-        )
-        for index, url in enumerate(deepseek_urls):
-            target_language = 1 if index % 2 == 0 else 2
-            with self.subTest(deepseek_url=url):
-                payload, request_path = build_fixture(url, target_language)
-                self.assertEqual(request_path, "/beta/chat/completions")
-                self.assertNotIn("response_format", payload)
-                self.assertEqual(payload["max_tokens"], 512)
-                self.assertEqual(payload["thinking"], {"type": "disabled"})
-                self.assertEqual(payload["reasoning_effort"], "none")
-                self.assertEqual(payload["temperature"], 0)
-                self.assertEqual(payload["tool_choice"], {
-                    "type": "function",
-                    "function": {"name": "hd2ct_translation"},
-                })
-                self.assertEqual(len(payload["tools"]), 1)
-                function = payload["tools"][0]["function"]
-                self.assertEqual(function["name"], "hd2ct_translation")
-                self.assertTrue(function["strict"])
-                self.assertTrue(function["description"])
-                self.assertEqual(
-                    function["parameters"],
-                    AI_RESPONSE_FORMAT["json_schema"]["schema"],
-                )
-                self.assertEqual(
-                    [message["role"] for message in payload["messages"]],
-                    ["system", "user"],
-                )
-                self.assertEqual(payload["messages"][1]["content"],
-                                 "Hold this position.")
-                generic, generic_path = build_fixture(
-                    "https://api.deepseek.com/custom/openai/compat",
-                    target_language,
-                )
-                self.assertEqual(generic_path, "")
-                self.assertEqual(generic["response_format"], AI_RESPONSE_FORMAT)
-                self.assertNotIn("tools", generic)
-                self.assertEqual(payload["messages"][0], generic["messages"][0])
-
-        non_profile_urls = (
-            "https://api.deepseek.com/custom/chat/completions",
+            "https://api.deepseek.com/custom/openai/compat",
             "https://api.deepseek.com.evil.test/chat/completions",
-            "https://evil-api.deepseek.com/chat/completions",
-            "https://user@api.deepseek.com/chat/completions",
-            "https://@api.deepseek.com/chat/completions",
-            "https://api.deepseek.com:444/chat/completions",
-            "http://api.deepseek.com/chat/completions",
-            "https://api.deepseek.com/v1/chat/completions/",
-            "https://api.deepseek.com/chat/completions?query=1",
-            "https://api.deepseek.com/chat/completions#fragment",
+            "https://third-party.example/openai/v1/chat/completions",
         )
-        for url in non_profile_urls:
-            with self.subTest(non_profile_url=url):
-                payload, request_path = build_fixture(url)
-                self.assertEqual(request_path, "")
-                self.assertEqual(payload["response_format"], AI_RESPONSE_FORMAT)
-                self.assertNotIn("tools", payload)
+        for target_language in (1, 2):
+            expected, expected_path = build_fixture(compatible_urls[0], target_language)
+            self.assertEqual(expected_path, "")
+            self.assertEqual(set(expected), {"model", "messages", "response_format"})
+            self.assertEqual(expected["response_format"], AI_RESPONSE_FORMAT)
+            self.assertEqual(
+                [message["role"] for message in expected["messages"]],
+                ["system", "user"],
+            )
+            self.assertEqual(expected["messages"][1]["content"], "Hold this position.")
+            for url in compatible_urls:
+                with self.subTest(url=url, target_language=target_language):
+                    payload, request_path = build_fixture(url, target_language)
+                    self.assertEqual(request_path, "")
+                    self.assertEqual(payload, expected)
         fixture.fixture_BuildAiRequest = None
         del build_fixture
         fixture_handle = fixture._handle
@@ -2422,9 +2368,8 @@ class NativeHttpWorkerTests(unittest.TestCase):
         payload = self.state.payloads[0]
         self.assertEqual([item["role"] for item in payload["messages"]], ["system", "user"])
         self.assertEqual(payload["messages"][1]["content"], english)
+        self.assertEqual(set(payload), {"model", "messages", "response_format"})
         self.assertEqual(payload["response_format"], AI_RESPONSE_FORMAT)
-        self.assertEqual(payload["temperature"], 0)
-        self.assertEqual(payload["reasoning_effort"], "none")
         example = json.loads(
             (ROOT / "docs" / "ai-request-example.json").read_text(encoding="utf-8")
         )
@@ -2550,69 +2495,71 @@ class NativeHttpWorkerTests(unittest.TestCase):
             )
             return bool(accepted), translation.raw[:written.value].decode("utf-8")
 
-        def deepseek_response(tool_calls: list[dict], finish_reason: str = "tool_calls") -> dict:
-            return {"choices": [{
-                "finish_reason": finish_reason,
-                "message": {"tool_calls": tool_calls},
-            }]}
-
-        def tool_call(name: str = "hd2ct_translation",
-                      arguments: object = '{"is_target_language":false,"translation":"前往撤离点"}',
-                      call_type: str = "function") -> dict:
-            return {
-                "type": call_type,
-                "function": {"name": name, "arguments": arguments},
-            }
-
-        deepseek_url = "https://api.deepseek.com/beta/chat/completions"
-        valid, translated = parse_fixture(
-            deepseek_url, deepseek_response([tool_call()]))
-        self.assertTrue(valid)
-        self.assertEqual(translated, "前往撤离点")
-        valid, preserved = parse_fixture(
-            deepseek_url,
-            deepseek_response([tool_call(arguments=(
-                '{"is_target_language":true,"translation":"忽略"}'
-            ))]),
+        compatible_response_urls = (
+            "https://api.deepseek.com/chat/completions",
+            "https://api.deepseek.com/custom/openai/compat",
+            "https://third-party.example/openai/v1/chat/completions",
         )
-        self.assertTrue(valid)
-        self.assertEqual(preserved, "Hold this position.")
+        generic_raw = json.loads(provider_response(
+            result_content("generic response", is_target_language=False)
+        ).decode("utf-8"))
+        for url in compatible_response_urls:
+            with self.subTest(valid_response_url=url):
+                accepted, translation = parse_fixture(url, generic_raw)
+                self.assertTrue(accepted)
+                self.assertEqual(translation, "generic response")
 
-        invalid_deepseek_responses = (
-            deepseek_response([tool_call(name="other_function")]),
-            deepseek_response([tool_call(), tool_call()]),
-            deepseek_response([tool_call(arguments='{"is_target_language":false}')]),
-            deepseek_response([tool_call(arguments=(
-                '{"is_target_language":"false","translation":"bad"}'
-            ))]),
-            deepseek_response([tool_call(arguments=(
-                '{"is_target_language":false,"translation":7}'
-            ))]),
-            deepseek_response([tool_call(arguments=7)]),
-            deepseek_response([tool_call(call_type="other")]),
-            deepseek_response([tool_call(arguments=(
-                '{"is_target_language":false,"translation":"one",'
-                '"translation":"two"}'
-            ))]),
-            deepseek_response([tool_call(arguments=(
-                '{"is_target_language":false,"translation":"\\u0000"}'
-            ))]),
-            {"choices": [{"finish_reason": "tool_calls", "message": {
-                "content": '{"is_target_language":false,"translation":"fallback"}',
-            }}]},
+        preserved_raw = json.loads(provider_response(
+            result_content("忽略模型译文", is_target_language=True)
+        ).decode("utf-8"))
+        for url in compatible_response_urls:
+            with self.subTest(skip_response_url=url):
+                accepted, translation = parse_fixture(url, preserved_raw)
+                self.assertTrue(accepted)
+                self.assertEqual(translation, "Hold this position.")
+
+        tool_only_response = {
+            "choices": [{
+                "finish_reason": "tool_calls",
+                "message": {
+                    "tool_calls": [{
+                        "type": "function",
+                        "function": {
+                            "name": "hd2ct_translation",
+                            "arguments": result_content("ignored"),
+                        },
+                    }],
+                },
+            }],
+        }
+        invalid_contents = (
+            '{"is_target_language":false}',
+            '{"is_target_language":"false","translation":"bad"}',
+            '{"is_target_language":false,"translation":7}',
+            '{"is_target_language":false,"translation":"one",'
+            '"translation":"two"}',
+            '{"is_target_language":false,"translation":"\\u0000"}',
+            '{"is_target_language":false,"translation":"ok","extra":1}',
+            '{"is_target_language":false,"translation":"   "}',
+            'not a JSON object',
+            '{"is_target_language":false,"translation":"ok"} trailing',
         )
-        for response in invalid_deepseek_responses:
-            with self.subTest(deepseek_response=response):
-                accepted, _ = parse_fixture(deepseek_url, response)
+        for url in compatible_response_urls:
+            with self.subTest(tool_only_url=url):
+                accepted, _ = parse_fixture(url, tool_only_response)
                 self.assertFalse(accepted)
-
-        generic_response = provider_response(
-            result_content("generic response", is_target_language=False))
-        generic_raw = json.loads(generic_response.decode("utf-8"))
-        accepted, generic_translation = parse_fixture(
-            "https://api.deepseek.com/custom/openai/compat", generic_raw)
-        self.assertTrue(accepted)
-        self.assertEqual(generic_translation, "generic response")
+            for content in invalid_contents:
+                malformed_raw = json.loads(provider_response(content).decode("utf-8"))
+                with self.subTest(invalid_content_url=url, content=content):
+                    accepted, _ = parse_fixture(url, malformed_raw)
+                    self.assertFalse(accepted)
+        truncated = json.loads(provider_response(
+            result_content("truncated"), finish_reason="length"
+        ).decode("utf-8"))
+        for url in compatible_response_urls:
+            with self.subTest(truncated_response_url=url):
+                accepted, _ = parse_fixture(url, truncated)
+                self.assertFalse(accepted)
         fixture.fixture_ParseAiResponse = None
         del parse_fixture
         fixture_handle = fixture._handle

@@ -1,29 +1,7 @@
 {
   "model": "YOUR_MODEL",
-  "temperature": 0,
-  "reasoning_effort": "none",
   "response_format": {
-    "type": "json_schema",
-    "json_schema": {
-      "name": "hd2ct_translation",
-      "strict": true,
-      "schema": {
-        "type": "object",
-        "properties": {
-          "is_target_language": {
-            "type": "boolean"
-          },
-          "translation": {
-            "type": "string"
-          }
-        },
-        "required": [
-          "is_target_language",
-          "translation"
-        ],
-        "additionalProperties": false
-      }
-    }
+    "type": "json_object"
   },
   "messages": [
     {

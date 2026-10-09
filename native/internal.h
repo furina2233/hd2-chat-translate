@@ -121,7 +121,6 @@ typedef struct HD2CT_BuiltRequest {
     const char *header_name;
     const char *header_prefix;
     const char *header_value;
-    const wchar_t *request_path_override;
 } HD2CT_BuiltRequest;
 
 typedef struct HD2CT_AdapterBase {

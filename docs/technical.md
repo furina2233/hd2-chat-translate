@@ -75,13 +75,11 @@ HD2CT_MODEL 非空时选择 AI 翻译；缺失、为空或仅含空白时选择�
 
 AI 适配器把地址根路径补全为 /chat/completions，或把精确的 /v1、/v1/ 补全为 /v1/chat/completions。机器翻译适配器仅把根路径补全为各自接口；其他路径保持原样。已支持服务要求 HTTPS，只有 localhost、127.0.0.0/8 和 ::1 可使用 HTTP。拒绝 URL 凭据、查询、片段、反斜杠、空白和控制字符；禁用重定向、cookies 和自动认证。
 
-通用 AI Chat Completions 请求 JSON 含 model、temperature=0、reasoning_effort="none"、response_format.type=json_schema 及 system/user 两条 messages。响应 schema 严格要求 is_target_language（布尔值）和 translation（字符串），并禁止额外属性；服务端需支持该格式。完整简体中文通用请求示例见 [ai-request-example.json](ai-request-example.json)。
+AI 适配器使用 OpenAI-compatible Chat Completions 请求，只发送 `model`、`messages` 和 `response_format: {"type":"json_object"}`。请求不显式设置采样或思考参数，也不发送 `stream`；模型使用服务端默认策略及非流式默认行为。端点需同时实现兼容的 Chat Completions 与 JSON mode；供应商原生 API 不一定支持这两者。JSON mode 保证输出是合法 JSON 语法，不保证对象字段结构；提示词要求只返回 `is_target_language`（布尔值）和 `translation`（字符串），客户端再严格校验字段、类型、重复字段和额外字段。[DeepSeek Chat Completions 文档](https://api-docs.deepseek.com/api/create-chat-completion/)；[通义千问结构化输出文档](https://help.aliyun.com/zh/model-studio/qwen-structured-output)。完整简体中文请求示例见 [ai-request-example.json](ai-request-example.json)。
 
-当 HTTPS URL 的主机精确为 api.deepseek.com、端口为 443、没有凭据或额外查询信息，且路径为 /chat/completions、/v1/chat/completions 或 /beta/chat/completions 时，AI 适配器使用 DeepSeek 官方协议 profile；/beta 也会进入该 profile。传输层对这些请求固定使用 /beta/chat/completions 路径，以启用 DeepSeek strict tool calls。请求不发送 response_format，而以唯一的 hd2ct_translation 函数工具承载原来的两字段 JSON Schema，设置 strict=true、全部属性 required、additionalProperties=false，并用 tool_choice 强制调用；thinking.type=disabled、reasoning_effort="none"，输出上限为512 tokens。官方 Chat Completions 文档列出的 response_format.type 只有 text 和 json_object；strict 工具调用要求 /beta 地址和完整的对象 schema。[API 文档](https://api-docs.deepseek.com/api/create-chat-completion/)；[Tool Calls 指南](https://api-docs.deepseek.com/guides/tool_calls/)。
+系统提示词由通用部分和简体中文专属术语部分组成。通用部分填入目标语言并要求只翻译待处理聊天文本；仅 `zh_cn` 追加网络缩写、敌名和游戏术语对照，例如 Charger=牛、Spore Charger=孢子牛。繁体中文及其他目标语言不追加该段。
 
-DeepSeek 响应必须包含且只包含一个 type=function、名称为 hd2ct_translation 的 tool call；arguments 必须是完整 JSON 字符串，且继续使用相同的 UTF-8、禁止 NUL、重复字段、精确字段和 SKIP 校验。客户端不会执行工具，也不会再发起请求或回退解析 message.content。非官方 DeepSeek 主机、自定义路径及其他 Chat Completions 服务继续使用通用 response_format 请求和 content 响应解析。两种 profile 共用原有中文提示词：通用部分拼入目标语言，约束文本翻译及精确 JSON 字段 is_target_language/translation；仅简体中文目标会追加网络缩写、敌名和游戏黑话对照，例如 Charger=牛、Spore Charger=孢子牛，并保留中文原文。繁体中文和其他目标只使用通用部分。不对 gg 或 ggs 加特例。
-
-通用响应读取 Chat Completions 的 choices[0].message.content；DeepSeek profile 读取唯一 hd2ct_translation 工具调用的 arguments。两者都要求完整 JSON 对象只含 is_target_language(bool) 与 translation(string)。若 is_target_language 为 true，C 向 Lua 返回保持原文结果；否则 translation 必须是合法 UTF-8、非空且不超过 16,384 字节。所有翻译方式的译文与原文完全相同时也由 C 决定保持原文。
+响应只接受 `choices[0].message.content` 中的完整 JSON 字符串；缺少 content 的工具调用响应会以 `BAD_RESPONSE` 拒绝，不执行工具、不发起后续请求，也不回退到其他响应字段。客户端校验 UTF-8、禁止 NUL、完整 JSON 消费、两个必需字段唯一出现、字段类型和译文长度。`is_target_language` 为 true 时返回原文保持结果；否则译文必须合法、非空且不超过 16,384 字节。译文与原文按字节完全相同时也返回 `SKIP`。请求超时由既有 10、20、30 秒设置控制。
 
 ## 原生任务接口
 
