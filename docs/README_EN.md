@@ -6,10 +6,12 @@ The currently compatible versions are Steam build 25480438 and game EXE 1.8.4601
 
 > **Usage risk:** The plugin injects into the game process, executes code, and calls internal game functions to update the chat display. This behavior may violate the game’s or anti-cheat rules and may result in account penalties or a ban.
 
+English documentation: [README_EN.md](README_EN.md)
+
 ## Installation and updates
 
-1. Close the game normally. In HD2Arsenal, import either `HD2ChatTranslateNoDependenciesYYYYMMDDHHMMSS.zip` or `HD2ChatTranslateIncludeDependenciesYYYYMMDDHHMMSS.zip`, then enable the mod.
-2. Click Deploy, then launch the game. The NoDependencies package requires Bingus Shared Loader and Mod Options Menu to be installed separately. The IncludeDependencies package already contains both prerequisites.
+1. Close the game normally and import the mod into HD2Arsenal.
+2. Click Deploy, then launch the game. The standalone version requires both prerequisite mods, Bingus Shared Loader and Mod Options Menu, to be installed. The dependency-bundled version does not.
 3. To update the mod, close the game, import the new ZIP, update the mod with the same name, and deploy again.
 
 ## Configuration
@@ -57,23 +59,23 @@ Note that the plugin monitors the chat window whether or not translation is enab
 
 For common request failures, the original text is preserved and one of the following notices is shown in the translation position:
 
-| Situation | Shown message and meaning |
+| Situation | Displayed message |
 | --- | --- |
-| HTTP 400 or 422 | `请求参数有误` — Invalid request parameters |
-| HTTP 401 | `API 密钥无效` — API key is invalid |
-| HTTP 403 | `无权使用此接口` — You are not authorized to use this endpoint |
-| HTTP 404 | `接口或模型不存在` — Endpoint or model does not exist |
-| Timeout | `请求超时` — Request timed out |
-| HTTP 429 | `请求太频繁，请稍后再试` — Too many requests; try again later |
-| Other HTTP 5xx | `服务暂时不可用` — Service temporarily unavailable |
-| Network connection failure | `网络连接失败` — Network connection failed |
-| Invalid or overly long response | `返回内容无效或返回内容过长` — Response is invalid or too long |
-| Invalid configuration or URL | `模型配置无效或接口地址无效` — Model configuration or endpoint URL is invalid |
-| Machine translation URL does not match a service | `暂不支持此翻译服务` — This translation service is not currently supported |
-| Invalid application credentials or signature | `翻译凭据或签名无效` — Translation credentials or signature are invalid |
-| Insufficient translation account quota | `翻译额度不足` — Translation quota is insufficient |
-| Service does not support the source language | `不支持此语言` — This language is not supported |
-| Other failure | `翻译服务异常，或翻译失败，请稍后重试` — Translation service error or translation failed; try again later |
+| HTTP 400 or 422 | Invalid request parameters |
+| HTTP 401 | API key is invalid |
+| HTTP 403 | You are not authorized to use this endpoint |
+| HTTP 404 | Endpoint or model does not exist |
+| Timeout | Request timed out |
+| HTTP 429 | Too many requests; try again later |
+| Other HTTP 5xx | Service temporarily unavailable |
+| Network connection failure | Network connection failed |
+| Invalid or overly long response | Response is invalid or too long |
+| Invalid configuration or URL | Model configuration or endpoint URL is invalid |
+| Machine translation URL does not match a service | This translation service is not currently supported |
+| Invalid application credentials or signature | Translation credentials or signature are invalid |
+| Insufficient translation account quota | Translation quota is insufficient |
+| Service does not support the source language | This language is not supported |
+| Other failure | Translation service error or translation failed; try again later |
 
 If no translation appears, first confirm that the mod is enabled in Arsenal and deployed. Then check the variables required by the selected service and whether they are set as user or system variables. Restart the game and send a new non-Chinese chat message. In AI mode, the service may identify the source as Chinese; in that case, only the original text is kept. For machine translation behavior with Chinese messages, see above. Chats sent before startup are not translated retroactively. In AI mode, check the model name, endpoint path, and JSON mode support. For machine translation, check API access, the application ID, key, and account quota. Youdao signatures also depend on the system clock being correct. For network notices, check your local connection and provider availability.
 
@@ -94,4 +96,4 @@ Set `HD2CT_ENABLED` to `0` and restart the game to disable translation. To unins
 
 ## License
 
-Original code in this project is licensed under GNU GPL v3.0 only (SPDX: GPL-3.0-only); see [LICENSE](../LICENSE) for the full text. Third-party cJSON remains under the MIT License. Bingus Shared Loader v18 bundled in the IncludeDependencies package follows its upstream license and source notices; this project does not relicense that upstream content.
+Original code in this project is licensed under GNU GPL v3.0 only (SPDX: GPL-3.0-only); see [LICENSE](../LICENSE) for the full text. Third-party cJSON remains under the MIT License. Bingus Shared Loader v18 in the bundled package follows its upstream license and source notices; this project does not relicense that upstream content.
