@@ -4,6 +4,7 @@
 artifacts/
 build/
 dist/
+/cmake-build-*/
 
 # Python 开发缓存。
 __pycache__/

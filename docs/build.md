@@ -61,6 +61,33 @@ python tools/build_native_http.py --cc 'C:\tools\mingw64\bin\gcc.exe' --objdump 
 
 可用 --output 和 --meta 指定中间产物路径；两者必须成对交给下一步，不可混用旧 DLL 与新 metadata。更换编译器时二进制摘要可能改变，包构建器会嵌入本次实际模块及其摘要。
 
+## 使用 CLion / CMake 构建
+
+在 CLion 中打开项目根目录，并配置 Windows x64 MinGW 工具链：C 编译器选择 MinGW-w64 GCC，objdump 使用同一工具链的 Binutils。在 CMake 配置的 CMake options 中通过 `-DPython3_EXECUTABLE=解释器路径` 指定 Python 3.10+。CMake 配置只需要 Python 标准库，不会下载或安装依赖；不支持 MSVC、Clang、32 位或非 Windows 工具链。
+
+在项目根目录执行以下命令；将路径替换为本机实际路径。`cmake`、`ninja` 可使用 CLion 自带版本，GCC、objdump 和 Python 使用已配置的工具；若 Ninja 不在 PATH 中，再添加 `-DCMAKE_MAKE_PROGRAM='<CLion 中的 ninja.exe 路径>'`：
+
+~~~pwsh
+cmake -S . -B build/cmake -G Ninja -DCMAKE_C_COMPILER='E:\mingw64\bin\gcc.exe' -DPython3_EXECUTABLE='C:\Program Files\Python310\python.exe'
+cmake --build build/cmake
+~~~
+
+CMake 配置时会在构建目录生成 `target_languages.generated.h` 供 CLion 索引；语言目录或生成器变化后，构建会更新该头文件。输出 DLL 和 metadata 位于 `build/cmake/native/hd2ct_http.dll` 与 `build/cmake/native/hd2ct_http.meta.json`。DLL 使用与命令行构建相同的 MinGW 编译选项、Windows 系统链接库和严格导入/导出核验。
+
+该目标面向安装包构建；Debug 配置也使用 `-Os`、`-g0`，并剥离调试信息，以控制嵌入 DLL 后的 Lua 入口大小。
+
+CLion 的构建目标选择 `hd2ct_http`，它会依次构建 DLL 并核验、生成 metadata。命令行可构建全部目标，或只构建同名聚合目标：
+
+~~~pwsh
+cmake --build build/cmake --target hd2ct_http
+~~~
+
+打包时将同一构建目录中的 DLL 与 metadata 成对传入，保留原有 ZIP 命名与上游资产校验：
+
+~~~pwsh
+python tools/build_package.py --native-dll build/cmake/native/hd2ct_http.dll --native-meta build/cmake/native/hd2ct_http.meta.json
+~~~
+
 ## 生成 Arsenal 安装包
 
 ~~~pwsh
