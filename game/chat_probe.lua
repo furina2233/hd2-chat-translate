@@ -833,6 +833,9 @@ end)()
 
 local function initialize_probe()
     local ffi = require("ffi")
+    -- LuaJIT shares C function declarations with every mod. Bind private,
+    -- versioned names to the Windows exports so other prototypes cannot win.
+    -- The adapter tables retain their internal names for the embedded modules.
     ffi.cdef[[
         typedef unsigned char HD2Probe_U8;
         typedef unsigned short HD2Probe_U16;
@@ -889,41 +892,68 @@ local function initialize_probe()
             HD2Probe_U16 cAlternateFileName[14];
         } HD2Probe_WIN32_FIND_DATAW;
 
-        HD2Probe_HANDLE GetCurrentProcess(void);
-        HD2Probe_HMODULE GetModuleHandleA(const char *module_name);
-        HD2Probe_HMODULE LoadLibraryExW(const HD2Probe_U16 *path, void *file, HD2Probe_U32 flags);
-        void *GetProcAddress(HD2Probe_HMODULE module, const char *name);
-        HD2Probe_U32 GetFileSize(HD2Probe_HANDLE file, HD2Probe_U32 *high);
-        HD2Probe_U32 GetLastError(void);
-        int GetFileInformationByHandle(HD2Probe_HANDLE file, HD2Probe_BY_HANDLE_FILE_INFORMATION *information);
-        HD2Probe_U32 GetModuleFileNameW(HD2Probe_HMODULE module, HD2Probe_U16 *path, HD2Probe_U32 capacity);
-        HD2Probe_SIZE_T VirtualQuery(const void *address, HD2Probe_MEMORY_BASIC_INFORMATION *information, HD2Probe_SIZE_T information_size);
-        int ReadProcessMemory(HD2Probe_HANDLE process, const void *address, void *buffer, HD2Probe_SIZE_T length, HD2Probe_SIZE_T *bytes_read);
-        HD2Probe_HANDLE CreateFileW(const HD2Probe_U16 *path, HD2Probe_U32 access, HD2Probe_U32 share_mode, void *security, HD2Probe_U32 creation, HD2Probe_U32 attributes, HD2Probe_HANDLE template_file);
-        HD2Probe_HANDLE FindFirstFileW(const HD2Probe_U16 *pattern, HD2Probe_WIN32_FIND_DATAW *find_data);
-        int FindNextFileW(HD2Probe_HANDLE find, HD2Probe_WIN32_FIND_DATAW *find_data);
-        int FindClose(HD2Probe_HANDLE find);
-        HD2Probe_U32 GetFileAttributesW(const HD2Probe_U16 *path);
-        int ReadFile(HD2Probe_HANDLE file, void *buffer, HD2Probe_U32 length, HD2Probe_U32 *bytes_read, void *overlapped);
-        int CloseHandle(HD2Probe_HANDLE handle);
-        int CreateDirectoryA(const char *path, void *security);
-        int CreateDirectoryW(const HD2Probe_U16 *path, void *security);
-        HD2Probe_U32 GetEnvironmentVariableW(const HD2Probe_U16 *name, HD2Probe_U16 *buffer, HD2Probe_U32 capacity);
-        HD2Probe_U64 GetTickCount64(void);
-        int WriteFile(HD2Probe_HANDLE file, const void *buffer, HD2Probe_U32 length, HD2Probe_U32 *bytes_written, void *overlapped);
-        int FlushFileBuffers(HD2Probe_HANDLE file);
-        int DeleteFileW(const HD2Probe_U16 *path);
-        int MoveFileExW(const HD2Probe_U16 *existing_path, const HD2Probe_U16 *new_path, HD2Probe_U32 flags);
+        HD2Probe_HANDLE hd2ct1_GetCurrentProcess(void) __asm__("GetCurrentProcess");
+        HD2Probe_HMODULE hd2ct1_GetModuleHandleA(const char *module_name) __asm__("GetModuleHandleA");
+        HD2Probe_HMODULE hd2ct1_LoadLibraryExW(const HD2Probe_U16 *path, void *file, HD2Probe_U32 flags) __asm__("LoadLibraryExW");
+        void *hd2ct1_GetProcAddress(HD2Probe_HMODULE module, const char *name) __asm__("GetProcAddress");
+        HD2Probe_U32 hd2ct1_GetFileSize(HD2Probe_HANDLE file, HD2Probe_U32 *high) __asm__("GetFileSize");
+        HD2Probe_U32 hd2ct1_GetLastError(void) __asm__("GetLastError");
+        int hd2ct1_GetFileInformationByHandle(HD2Probe_HANDLE file, HD2Probe_BY_HANDLE_FILE_INFORMATION *information) __asm__("GetFileInformationByHandle");
+        HD2Probe_U32 hd2ct1_GetModuleFileNameW(HD2Probe_HMODULE module, HD2Probe_U16 *path, HD2Probe_U32 capacity) __asm__("GetModuleFileNameW");
+        HD2Probe_SIZE_T hd2ct1_VirtualQuery(const void *address, HD2Probe_MEMORY_BASIC_INFORMATION *information, HD2Probe_SIZE_T information_size) __asm__("VirtualQuery");
+        int hd2ct1_ReadProcessMemory(HD2Probe_HANDLE process, const void *address, void *buffer, HD2Probe_SIZE_T length, HD2Probe_SIZE_T *bytes_read) __asm__("ReadProcessMemory");
+        HD2Probe_HANDLE hd2ct1_CreateFileW(const HD2Probe_U16 *path, HD2Probe_U32 access, HD2Probe_U32 share_mode, void *security, HD2Probe_U32 creation, HD2Probe_U32 attributes, HD2Probe_HANDLE template_file) __asm__("CreateFileW");
+        HD2Probe_HANDLE hd2ct1_FindFirstFileW(const HD2Probe_U16 *pattern, HD2Probe_WIN32_FIND_DATAW *find_data) __asm__("FindFirstFileW");
+        int hd2ct1_FindNextFileW(HD2Probe_HANDLE find, HD2Probe_WIN32_FIND_DATAW *find_data) __asm__("FindNextFileW");
+        int hd2ct1_FindClose(HD2Probe_HANDLE find) __asm__("FindClose");
+        HD2Probe_U32 hd2ct1_GetFileAttributesW(const HD2Probe_U16 *path) __asm__("GetFileAttributesW");
+        int hd2ct1_ReadFile(HD2Probe_HANDLE file, void *buffer, HD2Probe_U32 length, HD2Probe_U32 *bytes_read, void *overlapped) __asm__("ReadFile");
+        int hd2ct1_CloseHandle(HD2Probe_HANDLE handle) __asm__("CloseHandle");
+        int hd2ct1_CreateDirectoryA(const char *path, void *security) __asm__("CreateDirectoryA");
+        int hd2ct1_CreateDirectoryW(const HD2Probe_U16 *path, void *security) __asm__("CreateDirectoryW");
+        HD2Probe_U32 hd2ct1_GetEnvironmentVariableW(const HD2Probe_U16 *name, HD2Probe_U16 *buffer, HD2Probe_U32 capacity) __asm__("GetEnvironmentVariableW");
+        HD2Probe_U64 hd2ct1_GetTickCount64(void) __asm__("GetTickCount64");
+        int hd2ct1_WriteFile(HD2Probe_HANDLE file, const void *buffer, HD2Probe_U32 length, HD2Probe_U32 *bytes_written, void *overlapped) __asm__("WriteFile");
+        int hd2ct1_FlushFileBuffers(HD2Probe_HANDLE file) __asm__("FlushFileBuffers");
+        int hd2ct1_DeleteFileW(const HD2Probe_U16 *path) __asm__("DeleteFileW");
+        int hd2ct1_MoveFileExW(const HD2Probe_U16 *existing_path, const HD2Probe_U16 *new_path, HD2Probe_U32 flags) __asm__("MoveFileExW");
 
-        HD2Probe_I32 BCryptOpenAlgorithmProvider(HD2Probe_BCRYPT_ALG_HANDLE *algorithm, const HD2Probe_U16 *algorithm_id, const HD2Probe_U16 *implementation, HD2Probe_U32 flags);
-        HD2Probe_I32 BCryptCreateHash(HD2Probe_BCRYPT_ALG_HANDLE algorithm, HD2Probe_BCRYPT_HASH_HANDLE *hash, HD2Probe_U8 *object_buffer, HD2Probe_U32 object_size, HD2Probe_U8 *secret, HD2Probe_U32 secret_size, HD2Probe_U32 flags);
-        HD2Probe_I32 BCryptHashData(HD2Probe_BCRYPT_HASH_HANDLE hash, HD2Probe_U8 *data, HD2Probe_U32 length, HD2Probe_U32 flags);
-        HD2Probe_I32 BCryptFinishHash(HD2Probe_BCRYPT_HASH_HANDLE hash, HD2Probe_U8 *digest, HD2Probe_U32 digest_size, HD2Probe_U32 flags);
-        HD2Probe_I32 BCryptDestroyHash(HD2Probe_BCRYPT_HASH_HANDLE hash);
-        HD2Probe_I32 BCryptCloseAlgorithmProvider(HD2Probe_BCRYPT_ALG_HANDLE algorithm, HD2Probe_U32 flags);
+        HD2Probe_I32 hd2ct1_BCryptOpenAlgorithmProvider(HD2Probe_BCRYPT_ALG_HANDLE *algorithm, const HD2Probe_U16 *algorithm_id, const HD2Probe_U16 *implementation, HD2Probe_U32 flags) __asm__("BCryptOpenAlgorithmProvider");
+        HD2Probe_I32 hd2ct1_BCryptCreateHash(HD2Probe_BCRYPT_ALG_HANDLE algorithm, HD2Probe_BCRYPT_HASH_HANDLE *hash, HD2Probe_U8 *object_buffer, HD2Probe_U32 object_size, HD2Probe_U8 *secret, HD2Probe_U32 secret_size, HD2Probe_U32 flags) __asm__("BCryptCreateHash");
+        HD2Probe_I32 hd2ct1_BCryptHashData(HD2Probe_BCRYPT_HASH_HANDLE hash, HD2Probe_U8 *data, HD2Probe_U32 length, HD2Probe_U32 flags) __asm__("BCryptHashData");
+        HD2Probe_I32 hd2ct1_BCryptFinishHash(HD2Probe_BCRYPT_HASH_HANDLE hash, HD2Probe_U8 *digest, HD2Probe_U32 digest_size, HD2Probe_U32 flags) __asm__("BCryptFinishHash");
+        HD2Probe_I32 hd2ct1_BCryptDestroyHash(HD2Probe_BCRYPT_HASH_HANDLE hash) __asm__("BCryptDestroyHash");
+        HD2Probe_I32 hd2ct1_BCryptCloseAlgorithmProvider(HD2Probe_BCRYPT_ALG_HANDLE algorithm, HD2Probe_U32 flags) __asm__("BCryptCloseAlgorithmProvider");
     ]]
 
-    local kernel = ffi.load("kernel32.dll")
+    local kernel_library = ffi.load("kernel32.dll")
+    local kernel = {
+        GetCurrentProcess = kernel_library.hd2ct1_GetCurrentProcess,
+        GetModuleHandleA = kernel_library.hd2ct1_GetModuleHandleA,
+        LoadLibraryExW = kernel_library.hd2ct1_LoadLibraryExW,
+        GetProcAddress = kernel_library.hd2ct1_GetProcAddress,
+        GetFileSize = kernel_library.hd2ct1_GetFileSize,
+        GetLastError = kernel_library.hd2ct1_GetLastError,
+        GetFileInformationByHandle = kernel_library.hd2ct1_GetFileInformationByHandle,
+        GetModuleFileNameW = kernel_library.hd2ct1_GetModuleFileNameW,
+        VirtualQuery = kernel_library.hd2ct1_VirtualQuery,
+        ReadProcessMemory = kernel_library.hd2ct1_ReadProcessMemory,
+        CreateFileW = kernel_library.hd2ct1_CreateFileW,
+        FindFirstFileW = kernel_library.hd2ct1_FindFirstFileW,
+        FindNextFileW = kernel_library.hd2ct1_FindNextFileW,
+        FindClose = kernel_library.hd2ct1_FindClose,
+        GetFileAttributesW = kernel_library.hd2ct1_GetFileAttributesW,
+        ReadFile = kernel_library.hd2ct1_ReadFile,
+        CloseHandle = kernel_library.hd2ct1_CloseHandle,
+        CreateDirectoryA = kernel_library.hd2ct1_CreateDirectoryA,
+        CreateDirectoryW = kernel_library.hd2ct1_CreateDirectoryW,
+        GetEnvironmentVariableW = kernel_library.hd2ct1_GetEnvironmentVariableW,
+        GetTickCount64 = kernel_library.hd2ct1_GetTickCount64,
+        WriteFile = kernel_library.hd2ct1_WriteFile,
+        FlushFileBuffers = kernel_library.hd2ct1_FlushFileBuffers,
+        DeleteFileW = kernel_library.hd2ct1_DeleteFileW,
+        MoveFileExW = kernel_library.hd2ct1_MoveFileExW,
+    }
     target_language_settings_clock = function()
         return tonumber(kernel.GetTickCount64())
     end
@@ -935,7 +965,15 @@ local function initialize_probe()
         pcall(print, "[HD2 Chat Probe] local report retention partial; skipped groups / delete failures / removed files:",
             retention_summary.groups_skipped, retention_summary.delete_failures, retention_summary.files_removed)
     end
-    local bcrypt = ffi.load("bcrypt.dll")
+    local bcrypt_library = ffi.load("bcrypt.dll")
+    local bcrypt = {
+        BCryptOpenAlgorithmProvider = bcrypt_library.hd2ct1_BCryptOpenAlgorithmProvider,
+        BCryptCreateHash = bcrypt_library.hd2ct1_BCryptCreateHash,
+        BCryptHashData = bcrypt_library.hd2ct1_BCryptHashData,
+        BCryptFinishHash = bcrypt_library.hd2ct1_BCryptFinishHash,
+        BCryptDestroyHash = bcrypt_library.hd2ct1_BCryptDestroyHash,
+        BCryptCloseAlgorithmProvider = bcrypt_library.hd2ct1_BCryptCloseAlgorithmProvider,
+    }
     local module = kernel.GetModuleHandleA("game.dll")
     if module == nil then error("game.dll is not loaded") end
     local module_base = ffi.cast("size_t", module)
