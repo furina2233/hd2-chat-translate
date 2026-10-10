@@ -42,6 +42,28 @@ if (-not (Test-Path -LiteralPath artifacts/Mod-Options-Menu-v1.2.zip)) {
 
 native/vendor/cjson/ 已包含固定的 [cJSON v1.7.19](https://github.com/DaveGamble/cJSON/tree/v1.7.19) 源码与 MIT 许可。无需另行下载、安装 HD2SDK 或提取游戏资源。
 
+## 一键编译并打包
+
+准备好上述工具和两个依赖 ZIP 后，可以按顺序构建原生 DLL、metadata，再生成无前置和含前置两种安装包：
+
+~~~pwsh
+python tools/quick_build_all.py
+if ($LASTEXITCODE -ne 0) { throw '一键构建失败' }
+~~~
+
+工具命令名不在 PATH 时可传 GCC、objdump 的路径；也可覆盖两个 ZIP 的位置和安装包输出目录：
+
+~~~pwsh
+python tools/quick_build_all.py `
+    --cc 'C:\tools\mingw64\bin\gcc.exe' `
+    --objdump 'C:\tools\mingw64\bin\objdump.exe' `
+    --loader-zip 'C:\dependencies\Bingus-Shared-Loader-v18.zip' `
+    --menu-zip 'C:\dependencies\Mod-Options-Menu-v1.2.zip' `
+    --output-dir 'C:\release\20261009'
+~~~
+
+路径参数按启动命令时所在目录解析。该脚本不会下载依赖或部署文件；原生构建失败时会停止打包。手动分步构建和 CMake 流程仍可分别使用下文命令。
+
 ## 编译原生网络模块
 
 构建脚本按 `tools/build_native_http.py` 中的 `NATIVE_SOURCES` 清单编译 `native/` 的客户端基础模块与 `native/adapter/` 的翻译适配器，并与固定版本的 cJSON 一起链接为 `hd2ct_http.dll`。源码模块划分和命名规则见[技术说明](technical.md#原生客户端模块)；添加模块时需同步更新源码清单。

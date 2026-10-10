@@ -15,8 +15,7 @@ import re
 import struct
 import uuid
 import zipfile
-import target_languages
-import menu_locales
+from scripts import menu_locales, target_languages
 
 ROOT = Path(__file__).resolve().parents[1]
 RESOURCE_NAME = "mods/hd2chat/HD2ChatTranslate"

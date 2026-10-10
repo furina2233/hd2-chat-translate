@@ -35,7 +35,8 @@ find_package(Python3 3.10 REQUIRED COMPONENTS Interpreter)
 set(HD2CT_TOOLS_DIR "${CMAKE_CURRENT_SOURCE_DIR}/tools")
 set(HD2CT_NATIVE_HELPER "${HD2CT_TOOLS_DIR}/cmake_native.py")
 set(HD2CT_NATIVE_BUILDER "${HD2CT_TOOLS_DIR}/build_native_http.py")
-set(HD2CT_LANGUAGE_GENERATOR "${HD2CT_TOOLS_DIR}/target_languages.py")
+set(HD2CT_LANGUAGE_GENERATOR "${HD2CT_TOOLS_DIR}/scripts/target_languages.py")
+set(HD2CT_TOOL_SCRIPTS_INIT "${HD2CT_TOOLS_DIR}/scripts/__init__.py")
 set(HD2CT_LANGUAGE_CATALOGUE "${CMAKE_CURRENT_SOURCE_DIR}/resources/target_languages.json")
 set(HD2CT_NATIVE_OUTPUT_DIR "${CMAKE_CURRENT_BINARY_DIR}/native")
 set(HD2CT_GENERATED_HEADER "${HD2CT_NATIVE_OUTPUT_DIR}/target_languages.generated.h")
@@ -74,6 +75,7 @@ set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
     "${HD2CT_NATIVE_HELPER}"
     "${HD2CT_NATIVE_BUILDER}"
     "${HD2CT_LANGUAGE_GENERATOR}"
+    "${HD2CT_TOOL_SCRIPTS_INIT}"
     "${HD2CT_LANGUAGE_CATALOGUE}"
 )
 
@@ -84,7 +86,9 @@ add_custom_command(
             --output-dir "${HD2CT_NATIVE_OUTPUT_DIR}"
     DEPENDS
         "${HD2CT_NATIVE_HELPER}"
+        "${HD2CT_NATIVE_BUILDER}"
         "${HD2CT_LANGUAGE_GENERATOR}"
+        "${HD2CT_TOOL_SCRIPTS_INIT}"
         "${HD2CT_LANGUAGE_CATALOGUE}"
     COMMENT "生成原生客户端目标语言头文件"
     VERBATIM

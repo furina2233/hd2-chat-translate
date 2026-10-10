@@ -11,7 +11,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-import target_languages
+from scripts import target_languages
 
 
 ROOT = Path(__file__).resolve().parents[1]

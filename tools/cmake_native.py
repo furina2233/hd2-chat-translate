@@ -10,7 +10,7 @@ from pathlib import Path
 import sys
 
 import build_native_http as native
-import target_languages
+from scripts import target_languages
 
 
 def _cmake_bracket_argument(value: str) -> str:

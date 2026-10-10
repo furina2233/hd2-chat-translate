@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any
 
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[2]
 CATALOGUE_PATH = ROOT / "resources" / "target_languages.json"
 GENERATED_HEADER_NAME = "target_languages.generated.h"
 
@@ -232,7 +232,7 @@ def c_header_text(catalogue: dict[str, Any] | None = None) -> str:
         "#ifndef HD2CT_GENERATED_TARGET_LANGUAGES_H",
         "#define HD2CT_GENERATED_TARGET_LANGUAGES_H",
         "",
-        "/* 此文件由 tools/target_languages.py 生成，不要手工编辑。 */",
+        "/* 此文件由 tools/scripts/target_languages.py 生成，不要手工编辑。 */",
         f"#define HD2CT_TARGET_LANGUAGE_COUNT {len(rows)}u",
         f"#define HD2CT_DEFAULT_TARGET_LANGUAGE {source['default_index']}u",
         f"#define HD2CT_TARGET_LANGUAGE_OPTION_ID {_c_string(source['option_id'])}",

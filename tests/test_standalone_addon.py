@@ -20,7 +20,8 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "tests"))
 sys.path.insert(0, str(ROOT / "tools"))
 import build_package as builder  # noqa: E402
-import menu_locales  # noqa: E402
+import quick_build_all as quick_builder  # noqa: E402
+from scripts import menu_locales  # noqa: E402
 from lua_support import LUA_DLL, LuaJIT  # noqa: E402
 
 
@@ -473,6 +474,68 @@ class StandaloneBuilderTests(unittest.TestCase):
         return self.lua.run(fake_loader_script(mode)).split("|")
 
     def test_default_standalone_package_contract_and_crc(self):
+        with tempfile.TemporaryDirectory() as quick_directory_name:
+            caller_directory = Path(quick_directory_name).resolve()
+            compiler_path = caller_directory / "toolchain" / "gcc.exe"
+            objdump_path = caller_directory / "toolchain" / "objdump.exe"
+            compiler_path.parent.mkdir(parents=True)
+            compiler_path.write_bytes(b"compiler fixture")
+            objdump_path.write_bytes(b"objdump fixture")
+            quick_calls = []
+
+            def successful_step(command, **kwargs):
+                quick_calls.append((command, kwargs))
+                return mock.Mock(returncode=0)
+
+            with (
+                mock.patch.object(quick_builder.Path, "cwd", return_value=caller_directory),
+                mock.patch.object(quick_builder.subprocess, "run", side_effect=successful_step),
+            ):
+                quick_result = quick_builder.main([
+                    "--cc", str(Path("toolchain") / "gcc.exe"),
+                    "--objdump", str(Path("toolchain") / "objdump.exe"),
+                    "--loader-zip", str(Path("inputs") / "loader.zip"),
+                    "--menu-zip", str(Path("inputs") / "menu.zip"),
+                    "--output-dir", str(Path("outputs") / "packages"),
+                ])
+            self.assertEqual(quick_result, 0)
+            self.assertEqual(len(quick_calls), 2)
+            native_command, _ = quick_calls[0]
+            package_command, _ = quick_calls[1]
+            self.assertEqual(native_command[:2], [sys.executable, str(quick_builder.NATIVE_BUILD_SCRIPT)])
+            self.assertEqual(package_command[:2], [sys.executable, str(quick_builder.PACKAGE_BUILD_SCRIPT)])
+            self.assertEqual(native_command[native_command.index("--output") + 1], str(quick_builder.DEFAULT_DLL))
+            self.assertEqual(package_command[package_command.index("--native-dll") + 1], str(quick_builder.DEFAULT_DLL))
+            self.assertEqual(native_command[native_command.index("--meta") + 1], str(quick_builder.DEFAULT_META))
+            self.assertEqual(package_command[package_command.index("--native-meta") + 1], str(quick_builder.DEFAULT_META))
+            self.assertEqual(native_command[native_command.index("--cc") + 1], str(compiler_path))
+            self.assertEqual(native_command[native_command.index("--objdump") + 1], str(objdump_path))
+            self.assertEqual(package_command[package_command.index("--loader-zip") + 1], str(caller_directory / "inputs" / "loader.zip"))
+            self.assertEqual(package_command[package_command.index("--menu-zip") + 1], str(caller_directory / "inputs" / "menu.zip"))
+            self.assertEqual(package_command[package_command.index("--output-dir") + 1], str(caller_directory / "outputs" / "packages"))
+            for _, options in quick_calls:
+                self.assertEqual(options["cwd"], quick_builder.ROOT)
+                self.assertIs(options["shell"], False)
+                self.assertIs(options["check"], False)
+                self.assertNotIn("stdout", options)
+                self.assertNotIn("stderr", options)
+
+            quick_calls.clear()
+            with (
+                mock.patch.object(quick_builder.Path, "cwd", return_value=caller_directory),
+                mock.patch.object(
+                    quick_builder.subprocess,
+                    "run",
+                    side_effect=lambda command, **kwargs: (
+                        quick_calls.append((command, kwargs)) or mock.Mock(returncode=23)
+                    ),
+                ),
+            ):
+                failed_quick_result = quick_builder.main([])
+            self.assertEqual(failed_quick_result, 23)
+            self.assertEqual(len(quick_calls), 1)
+            self.assertEqual(quick_calls[0][0][1], str(quick_builder.NATIVE_BUILD_SCRIPT))
+
         dll = fake_x64_dll()
         entry = make_entry(dll)
         self.assertLessEqual(len(entry), builder.MAX_SOURCE_BYTES)

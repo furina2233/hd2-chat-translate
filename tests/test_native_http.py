@@ -23,7 +23,7 @@ BUILD_SCRIPT = ROOT / "tools" / "build_native_http.py"
 WINDOWS = os.name == "nt"
 sys.path.insert(0, str(ROOT / "tools"))
 import build_native_http
-import target_languages
+from scripts import target_languages
 
 NATIVE_SOURCES = build_native_http.NATIVE_SOURCES
 NATIVE_TEST_ROOT = ROOT / "artifacts" / "validation"

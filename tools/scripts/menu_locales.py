@@ -7,7 +7,7 @@ from pathlib import Path
 import re
 import unicodedata
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[2]
 CATALOGUE_PATH = ROOT / "resources" / "menu_locales.json"
 MAX_CATALOGUE_BYTES = 256 * 1024
 
