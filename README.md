@@ -37,8 +37,7 @@
 | [百度通用翻译](https://fanyi-api.baidu.com/doc_bd/21) | `https://fanyi-api.baidu.com/api/trans/vip/translate` | HD2CT_APP_ID、HD2CT_API_KEY |
 | [有道文本翻译](https://ai.youdao.com/DOCSIRMA/html/trans/api/wbfy/index.html) | `https://openapi.youdao.com/api` | HD2CT_APP_ID、HD2CT_API_KEY |
 
-
-使用机器翻译时，即使源语言和目标语言相同，也会显示译文行；使用AI翻译时，若源语言和目标语言相同，则不会显示译文行。
+翻译时，若源语言和目标语言相同，则不会显示译文行。
 
 配置优先读取 Windows 用户变量，再读取系统变量。
 切换到机器翻译时，确认用户和系统两处均没有非空的模型配置，或用空的用户模型值覆盖系统模型值。

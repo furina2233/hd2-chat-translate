@@ -38,7 +38,7 @@ When the model name is non-empty, the plugin uses the AI Chat Completions endpoi
 | [Baidu General Translation](https://fanyi-api.baidu.com/doc_bd/21) | `https://fanyi-api.baidu.com/api/trans/vip/translate` | HD2CT_APP_ID, HD2CT_API_KEY |
 | [Youdao Text Translation](https://ai.youdao.com/DOCSIRMA/html/trans/api/wbfy/index.html) | `https://openapi.youdao.com/api` | HD2CT_APP_ID, HD2CT_API_KEY |
 
-When using machine translation, a translation line is shown even when the source and target languages are the same. With AI translation, no translation line is shown when the source and target languages are the same.
+When translating, if the source language and the target language are the same, the translated line will not be displayed.
 
 Configuration is read from Windows user variables first, then system variables.
 When switching to machine translation, make sure neither the user nor system variables contain a non-empty model setting, or override the system model setting with an empty user model value.
