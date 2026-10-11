@@ -14,12 +14,21 @@ English documentation: [README_EN.md](README_EN.md)
 2. Click Deploy, then launch the game. The standalone version requires both prerequisite mods, Bingus Shared Loader and Mod Options Menu, to be installed. The dependency-bundled version does not.
 3. To update the mod, close the game, import the new ZIP, update the mod with the same name, and deploy again.
 
+## Free, ready-to-use translation
+
+A free translation adapter is available. **Install it through a mod manager and use it immediately** without any additional configuration. It sends requests to Youdao Text Translation through my own server. The free adapter will stop working when my Youdao Cloud account's CNY 100 promotional balance runs out or when the server expires in July 2027.
+
+Please use the free version responsibly. Do not extract its key to use for your own translation service.
+
+The server accepts at most 100 requests per minute, shared by all users, and each request is limited to 200 characters.
+
 ## Configuration
 
 Supported translation providers:
 
 - AI translation: any provider that offers a Chat Completions endpoint and supports JSON mode
 - Machine translation: Google, Baidu, Youdao
+- Free translation: ready to use without configuration, powered by Youdao translation. See above for usage requirements.
 
 Enter the following values in Windows Environment Variables:
 
@@ -31,6 +40,8 @@ Enter the following values in Windows Environment Variables:
 | HD2CT_APP_ID | Baidu APP ID or Youdao application ID | Required for Baidu/Youdao | None |
 
 When the model name is non-empty, the plugin uses the AI Chat Completions endpoint and can complete the endpoint URL automatically. When the model name is missing or empty, it uses machine translation and can also complete the endpoint URL automatically. The supported machine translation providers are Google, Baidu, and Youdao.
+
+When `HD2CT_API_URL` is empty or unset, the free adapter is used.
 
 | Machine translation service | Full endpoint URL | Credentials |
 | --- | --- | --- |
