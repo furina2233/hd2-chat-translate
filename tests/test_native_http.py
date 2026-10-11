@@ -2091,6 +2091,7 @@ class NativeHttpWorkerTests(unittest.TestCase):
             ("免费版的余额已用尽，请自行配置提供商", "FREE_QUOTA_EXCEEDED"),
             ("服务器错误，请联系作者", "FREE_SERVER_ERROR"),
             ("请升级hd2-chat-translate以继续使用免费版服务", "FREE_UPGRADE_REQUIRED"),
+            ("请求的文本过长", "FREE_REQUEST_TEXT_TOO_LONG"),
             ("不支持此语言", "UNSUPPORTED_LANGUAGE"),
             ("请求参数有误", "REQUEST_INVALID"),
             ("请求超时", "TIMEOUT"),

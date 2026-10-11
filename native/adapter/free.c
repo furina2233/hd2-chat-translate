@@ -177,6 +177,7 @@ static const char *hd2ct_free_reason_code(const char *reason)
     if (strcmp(reason, "翻译凭据或签名无效") == 0) return "AUTH_INVALID";
     if (strcmp(reason, "翻译配置不完整") == 0) return "MISSING_CONFIG";
     if (strcmp(reason, "请求太频繁，请稍后再试") == 0) return "RATE_LIMITED";
+    if (strcmp(reason, "请求的文本过长") == 0) return "FREE_REQUEST_TEXT_TOO_LONG";
     if (strcmp(reason, "请升级hd2-chat-translate以继续使用免费版服务") == 0) return "FREE_UPGRADE_REQUIRED";
     if (strcmp(reason, "翻译额度不足") == 0) return "QUOTA_EXCEEDED";
     if (strcmp(reason, "免费版的余额已用尽，请自行配置提供商") == 0) return "FREE_QUOTA_EXCEEDED";
