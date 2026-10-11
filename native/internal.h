@@ -63,7 +63,8 @@ enum {
     HD2CT_ADAPTER_GOOGLE = 2,
     HD2CT_ADAPTER_BAIDU = 3,
     HD2CT_ADAPTER_YOUDAO = 4,
-    HD2CT_ADAPTER_UNKNOWN = 5
+    HD2CT_ADAPTER_UNKNOWN = 5,
+    HD2CT_ADAPTER_FREE = 6
 };
 
 typedef struct HD2CT_WorkerJob {
@@ -191,6 +192,14 @@ int hd2ct_build_youdao_request(const HD2CT_WorkerJob *job, HD2CT_BuiltRequest *r
 int hd2ct_parse_youdao_response(const HD2CT_WorkerJob *job, char *body,
                                 size_t body_bytes, char *translation,
                                 uint32_t *translation_bytes, const char **failure_code);
+int hd2ct_build_free_request(const HD2CT_WorkerJob *job, HD2CT_BuiltRequest *request);
+int hd2ct_parse_free_response(const HD2CT_WorkerJob *job, char *body,
+                              size_t body_bytes, char *translation,
+                              uint32_t *translation_bytes, const char **failure_code);
+#ifdef HD2CT_TESTING
+int hd2ct_test_totp(const unsigned char *secret, size_t secret_bytes,
+                    uint64_t unix_seconds, char output[7]);
+#endif
 
 /* 传输层只调用核心提供的取消与限流钩子。 */
 int hd2ct_job_cancelled(uint32_t slot_index, uint64_t serial);

@@ -385,6 +385,37 @@ LSTATUS WINAPI fixture_RegGetValueW(
 
 #include "client.c"
 
+__declspec(dllexport) int __cdecl fixture_Totp(
+    const unsigned char *secret, uint32_t secret_bytes,
+    uint64_t unix_seconds, char output[7])
+{
+    return hd2ct_test_totp(secret, secret_bytes, unix_seconds, output);
+}
+
+__declspec(dllexport) int __cdecl fixture_ParseFreeResponse(
+    char *response, uint32_t response_bytes, char *translation,
+    uint32_t *translation_bytes, char *failure_code, uint32_t failure_capacity)
+{
+    HD2CT_WorkerJob job;
+    const char *code = NULL;
+    int accepted;
+    memset(&job, 0, sizeof(job));
+    if (response == NULL || translation == NULL || translation_bytes == NULL ||
+        failure_code == NULL || failure_capacity == 0) return 0;
+    *translation_bytes = 0;
+    accepted = hd2ct_parse_free_response(&job, response, response_bytes,
+                                         translation, translation_bytes, &code);
+    if (code == NULL || strlen(code) + 1u > failure_capacity) return 0;
+    memcpy(failure_code, code, strlen(code) + 1u);
+    return accepted;
+}
+
+__declspec(dllexport) uint32_t __cdecl fixture_SelectAdapter(
+    const char *url, const char *model)
+{
+    return hd2ct_select_adapter(url, model);
+}
+
 __declspec(dllexport) int __cdecl fixture_BuildAiRequest(
     const char *url, uint32_t target_language, char *body, uint32_t body_capacity,
     wchar_t *request_path, uint32_t request_path_capacity)
@@ -700,6 +731,22 @@ def youdao_response(
     ).encode("utf-8")
 
 
+def free_success_response(text: str = "你好，绝地潜兵。") -> bytes:
+    return json.dumps(
+        {"success": True, "data": {"text": text, "reason": ""}},
+        ensure_ascii=False,
+        separators=(",", ":"),
+    ).encode("utf-8")
+
+
+def free_failure_response(reason: str) -> bytes:
+    return json.dumps(
+        {"success": False, "data": {"text": "", "reason": reason}},
+        ensure_ascii=False,
+        separators=(",", ":"),
+    ).encode("utf-8")
+
+
 class FakeState:
     def __init__(self) -> None:
         self.lock = threading.Lock()
@@ -905,8 +952,11 @@ class NativeHttpWorkerTests(unittest.TestCase):
             )
 
     @classmethod
-    def environment_test_dll(cls) -> Path:
-        dll = cls.temp_path / "hd2ct_http_environment_test.dll"
+    def environment_test_dll(cls, free_service_url: str | None = None) -> Path:
+        url_suffix = hashlib.sha256(
+            (free_service_url or "").encode("utf-8")
+        ).hexdigest()[:12]
+        dll = cls.temp_path / f"hd2ct_http_environment_test_{url_suffix}.dll"
         if dll.is_file():
             return dll
         wrapper = cls.temp_path / "hd2ct_http_environment_test.c"
@@ -955,6 +1005,8 @@ class NativeHttpWorkerTests(unittest.TestCase):
             "-ladvapi32",
             "-lbcrypt",
         ]
+        if free_service_url is not None:
+            command.append(f'-DHD2CT_FREE_SERVICE_URL="{free_service_url}"')
         completed = subprocess.run(
             command,
             cwd=ROOT,
@@ -975,12 +1027,13 @@ class NativeHttpWorkerTests(unittest.TestCase):
         expected_config: dict[str, str] | None = None,
         actions: list[dict] | None = None,
         timeout: float = 15.0,
+        free_service_url: str | None = None,
     ) -> dict:
         command = [
             sys.executable,
             "-c",
             ENVIRONMENT_CHILD,
-            str(self.environment_test_dll()),
+            str(self.environment_test_dll(free_service_url)),
             json.dumps(registry),
         ]
         if expected_config is not None:
@@ -1309,6 +1362,7 @@ class NativeHttpWorkerTests(unittest.TestCase):
                     target_languages.validate_catalogue(catalogue)
 
     def assert_environment_initialization_uses_registry(self) -> None:
+        free_service_url = self.url + "/translate"
         user_config = {
             "HD2CT_API_URL": "http://127.0.0.1:1/user",
             "HD2CT_MODEL": "fake-user-model",
@@ -1327,7 +1381,13 @@ class NativeHttpWorkerTests(unittest.TestCase):
             {"op": "submit", "token": "unknown-service-again", "body_hex": "73616665"},
             {"op": "wait", "token": "unknown-service-again"},
         ]
-        result = self.run_environment_child({}, actions=unknown_actions)
+        result = self.run_environment_child(
+            {"user": {
+                "HD2CT_API_URL": "http://127.0.0.1:1/unknown-service",
+                "HD2CT_MODEL": "",
+            }},
+            actions=unknown_actions,
+        )
         self.assertEqual(result["status"], 5)
         self.assertEqual(result["enabled"], 0)
         self.assertEqual([item.get("accepted") for item in result["actions"]],
@@ -1492,16 +1552,86 @@ class NativeHttpWorkerTests(unittest.TestCase):
             del user[missing_name]
             del machine[missing_name]
             with self.subTest(missing_registry_value=missing_name):
-                result = self.run_environment_child({"user": user, "machine": machine})
+                if missing_name == "HD2CT_API_URL":
+                    self.state.clear()
+                    self.state.response = free_success_response("free fallback")
+                    result = self.run_environment_child(
+                        {"user": user, "machine": machine},
+                        expected_config={
+                            "HD2CT_API_URL": free_service_url,
+                            "HD2CT_MODEL": "",
+                            "HD2CT_API_KEY": "",
+                            "HD2CT_APP_ID": "",
+                        },
+                        actions=[
+                            {"op": "submit", "token": "missing-url-free", "body_hex": "6869"},
+                            {"op": "wait", "token": "missing-url-free"},
+                        ],
+                        free_service_url=free_service_url,
+                    )
+                    self.assertEqual(result["status"], 0)
+                    self.assertEqual(result["enabled"], 1)
+                    self.assertEqual(result["selected_config_matches"], 1)
+                    self.assertEqual(result["actions"][1]["result"], "OK\nfree fallback")
+                    self.assertEqual(self.state.paths, ["/translate"])
+                else:
+                    result = self.run_environment_child({"user": user, "machine": machine})
                 if missing_name == "HD2CT_MODEL":
                     self.assertEqual(result["status"], 5)
                     self.assertEqual(result["enabled"], 0)
                     self.assertEqual(result["actions"][1]["result"], "ERR\nUNSUPPORTED_SERVICE")
-                else:
+                elif missing_name == "HD2CT_API_KEY":
                     self.assertEqual(result["status"], 1)
                     self.assertEqual(result["enabled"], 0)
                     self.assertEqual(result["submit"], 1)
                     self.assertEqual(result["actions"][1]["result"], "ERR\nMISSING_CONFIG")
+
+        self.state.clear()
+        self.state.response = free_success_response("empty-url free")
+        result = self.run_environment_child(
+            {
+                "user": {
+                    "HD2CT_API_URL": "",
+                    "HD2CT_MODEL": "invalid\nlegacy-model",
+                    "HD2CT_API_KEY": "invalid\nlegacy-key",
+                    "HD2CT_APP_ID": "invalid\nlegacy-app-id",
+                },
+                "machine": {
+                    "HD2CT_API_URL": self.url + "/Google/machine-fallback",
+                    "HD2CT_MODEL": "machine-model",
+                    "HD2CT_API_KEY": "machine-key",
+                },
+            },
+            expected_config={
+                "HD2CT_API_URL": free_service_url,
+                "HD2CT_MODEL": "",
+                "HD2CT_API_KEY": "",
+                "HD2CT_APP_ID": "",
+            },
+            actions=[
+                {"op": "submit", "token": "empty-url-free", "body_hex": "6869"},
+                {"op": "wait", "token": "empty-url-free"},
+            ],
+            free_service_url=free_service_url,
+        )
+        self.assertEqual(result["status"], 0)
+        self.assertEqual(result["enabled"], 1)
+        self.assertEqual(result["selected_config_matches"], 1)
+        self.assertEqual(result["actions"][1]["result"], "OK\nempty-url free")
+        self.assertEqual(self.state.paths, ["/translate"])
+
+        self.state.clear()
+        whitespace_url = self.run_environment_child(
+            {"user": {
+                "HD2CT_API_URL": " \t ",
+                "HD2CT_MODEL": "fake-model",
+                "HD2CT_API_KEY": "fake-key",
+            }}
+        )
+        self.assertEqual(whitespace_url["status"], 2)
+        self.assertEqual(whitespace_url["enabled"], 0)
+        self.assertEqual(whitespace_url["actions"][1]["result"], "ERR\nINVALID_CONFIG")
+        self.assertEqual(self.state.paths, [])
 
         result = self.run_environment_child(
             {"user": user_config, "machine": machine_config}, user_config
@@ -1741,6 +1871,124 @@ class NativeHttpWorkerTests(unittest.TestCase):
         )
         self.assertEqual(malformed["actions"][1]["result"], "ERR\nBAD_RESPONSE")
 
+        free_service_url = self.url + "/translate"
+        free_source = "集合，保持这个位置。"
+        free_config = {
+            "HD2CT_API_URL": "",
+            "HD2CT_MODEL": "invalid\nlegacy-model",
+            "HD2CT_API_KEY": "invalid\nlegacy-key",
+            "HD2CT_APP_ID": "invalid\nlegacy-app-id",
+        }
+        self.state.clear()
+        self.state.response = free_success_response(free_source)
+        free_result = self.run_environment_child(
+            {"user": free_config},
+            {
+                "HD2CT_API_URL": free_service_url,
+                "HD2CT_MODEL": "",
+                "HD2CT_API_KEY": "",
+                "HD2CT_APP_ID": "",
+            },
+            [
+                {"op": "submit", "token": "free-same", "body_hex": free_source.encode("utf-8").hex()},
+                {"op": "wait", "token": "free-same"},
+                {"op": "submit", "token": "free-same-cache", "body_hex": free_source.encode("utf-8").hex()},
+                {"op": "wait", "token": "free-same-cache"},
+            ],
+            free_service_url=free_service_url,
+        )
+        self.assertEqual(free_result["status"], 0)
+        self.assertEqual(free_result["enabled"], 1)
+        self.assertEqual(free_result["selected_config_matches"], 1)
+        self.assertEqual(free_result["actions"][1]["result"], "SKIP\n")
+        self.assertEqual(free_result["actions"][3]["result"], "SKIP\n")
+        self.assertEqual(free_result["cache_count"], 1)
+        self.assertEqual(self.state.paths, ["/translate"])
+        self.assertEqual(self.state.content_types[0], "application/json")
+        self.assertEqual(
+            set(self.state.payloads[0]),
+            {"key1", "key2", "text", "target_language"},
+        )
+        self.assertEqual(self.state.payloads[0]["key1"], "90d35d8b-646c-48f0-9a10-a82af86722d1")
+        self.assertEqual(len(self.state.payloads[0]["key2"]), 6)
+        self.assertTrue(self.state.payloads[0]["key2"].isdigit())
+        self.assertEqual(self.state.payloads[0]["text"], free_source)
+        self.assertEqual(
+            self.state.payloads[0]["target_language"],
+            TARGET_LANGUAGE_CATALOGUE["languages"][0]["youdao"],
+        )
+
+        self.state.clear()
+        self.state.response = free_failure_response("翻译凭据或签名无效")
+        free_error = self.run_environment_child(
+            {"user": free_config},
+            actions=[
+                {"op": "submit", "token": "free-auth-error", "body_hex": "6869"},
+                {"op": "wait", "token": "free-auth-error"},
+            ],
+            free_service_url=free_service_url,
+        )
+        self.assertEqual(free_error["actions"][1]["result"], "ERR\nAUTH_INVALID")
+
+        self.state.clear()
+        self.state.response = free_failure_response("remote secret reason")
+        free_unknown_error = self.run_environment_child(
+            {"user": free_config},
+            actions=[
+                {"op": "submit", "token": "free-unknown-error", "body_hex": "6869"},
+                {"op": "wait", "token": "free-unknown-error"},
+            ],
+            free_service_url=free_service_url,
+        )
+        self.assertEqual(
+            free_unknown_error["actions"][1]["result"], "ERR\nSERVICE_ERROR",
+        )
+        self.assertNotIn("remote secret reason", json.dumps(free_unknown_error))
+
+        for reason, expected_code in (
+            ("免费版的余额已用尽，请自行配置提供商", "FREE_QUOTA_EXCEEDED"),
+            ("服务器错误，请联系作者", "FREE_SERVER_ERROR"),
+        ):
+            self.state.clear()
+            self.state.response = free_failure_response(reason)
+            free_reason_error = self.run_environment_child(
+                {"user": free_config},
+                actions=[
+                    {"op": "submit", "token": "free-new-error", "body_hex": "6869"},
+                    {"op": "wait", "token": "free-new-error"},
+                ],
+                free_service_url=free_service_url,
+            )
+            self.assertEqual(
+                free_reason_error["actions"][1]["result"], "ERR\n" + expected_code,
+            )
+
+        self.state.clear()
+        self.state.response = b'{"success":true,"data":{"text":"bad","reason":"unexpected"}}'
+        free_malformed = self.run_environment_child(
+            {"user": free_config},
+            actions=[
+                {"op": "submit", "token": "free-malformed", "body_hex": "6869"},
+                {"op": "wait", "token": "free-malformed"},
+            ],
+            free_service_url=free_service_url,
+        )
+        self.assertEqual(free_malformed["actions"][1]["result"], "ERR\nFREE_SERVER_ERROR")
+
+        self.state.clear()
+        self.state.status = 503
+        self.state.response = b"private server error body"
+        free_http_error = self.run_environment_child(
+            {"user": free_config},
+            actions=[
+                {"op": "submit", "token": "free-http-503", "body_hex": "6869"},
+                {"op": "wait", "token": "free-http-503"},
+            ],
+            free_service_url=free_service_url,
+        )
+        self.assertEqual(free_http_error["actions"][1]["result"], "ERR\nFREE_SERVER_ERROR")
+        self.assertNotIn("private server error body", json.dumps(free_http_error))
+
     def test_endpoint_completion_covers_root_v1_and_custom_paths(self) -> None:
         cases = (
             ("", "/chat/completions"),
@@ -1772,6 +2020,109 @@ class NativeHttpWorkerTests(unittest.TestCase):
                 self.assertEqual(self.state.payloads[0]["response_format"], AI_RESPONSE_FORMAT)
 
         fixture = ctypes.CDLL(str(self.environment_test_dll()))
+        fixture.fixture_SelectAdapter.argtypes = [ctypes.c_char_p, ctypes.c_char_p]
+        fixture.fixture_SelectAdapter.restype = ctypes.c_uint32
+        self.assertEqual(fixture.fixture_SelectAdapter(b"", b"fake-model"), 6)
+        self.assertEqual(fixture.fixture_SelectAdapter(b" ", b"fake-model"), 1)
+        self.assertEqual(fixture.fixture_SelectAdapter(b"custom-url", b"fake-model"), 1)
+
+        fixture.fixture_Totp.argtypes = [
+            ctypes.POINTER(ctypes.c_ubyte), ctypes.c_uint32,
+            ctypes.c_uint64, ctypes.c_void_p,
+        ]
+        fixture.fixture_Totp.restype = ctypes.c_int
+        rfc_secret_bytes = b"12345678901234567890"
+        rfc_secret = ctypes.create_string_buffer(rfc_secret_bytes)
+        rfc_secret_pointer = ctypes.cast(
+            rfc_secret, ctypes.POINTER(ctypes.c_ubyte),
+        )
+        for unix_seconds, expected_code in (
+            (59, "287082"),
+            (1111111109, "081804"),
+            (1111111111, "050471"),
+            (1234567890, "005924"),
+            (2000000000, "279037"),
+            (20000000000, "353130"),
+        ):
+            with self.subTest(totp_time=unix_seconds):
+                code = ctypes.create_string_buffer(7)
+                self.assertEqual(
+                    fixture.fixture_Totp(
+                        rfc_secret_pointer, len(rfc_secret_bytes),
+                        unix_seconds, code,
+                    ),
+                    1,
+                )
+                self.assertEqual(code.value.decode("ascii"), expected_code)
+
+        fixture.fixture_ParseFreeResponse.argtypes = [
+            ctypes.c_void_p, ctypes.c_uint32, ctypes.c_void_p,
+            ctypes.POINTER(ctypes.c_uint32), ctypes.c_void_p, ctypes.c_uint32,
+        ]
+        fixture.fixture_ParseFreeResponse.restype = ctypes.c_int
+
+        def parse_free_fixture(response: bytes) -> tuple[bool, str, str]:
+            body = ctypes.create_string_buffer(response, len(response) + 1)
+            translation = ctypes.create_string_buffer(16385)
+            written = ctypes.c_uint32()
+            failure_code = ctypes.create_string_buffer(64)
+            accepted = fixture.fixture_ParseFreeResponse(
+                body, len(response), translation, ctypes.byref(written),
+                failure_code, len(failure_code),
+            )
+            return (
+                bool(accepted),
+                translation.raw[:written.value].decode("utf-8"),
+                failure_code.value.decode("ascii"),
+            )
+
+        accepted, translation, failure_code = parse_free_fixture(
+            free_success_response("fixture translation")
+        )
+        self.assertTrue(accepted)
+        self.assertEqual(translation, "fixture translation")
+        self.assertEqual(failure_code, "FREE_SERVER_ERROR")
+        for reason, expected_code in (
+            ("翻译凭据或签名无效", "AUTH_INVALID"),
+            ("翻译配置不完整", "MISSING_CONFIG"),
+            ("请求太频繁，请稍后再试", "RATE_LIMITED"),
+            ("翻译额度不足", "QUOTA_EXCEEDED"),
+            ("免费版的余额已用尽，请自行配置提供商", "FREE_QUOTA_EXCEEDED"),
+            ("服务器错误，请联系作者", "FREE_SERVER_ERROR"),
+            ("不支持此语言", "UNSUPPORTED_LANGUAGE"),
+            ("请求参数有误", "REQUEST_INVALID"),
+            ("请求超时", "TIMEOUT"),
+            ("网络连接失败", "NETWORK"),
+            ("返回内容无效", "BAD_RESPONSE"),
+            ("返回内容过长", "RESPONSE_TOO_LARGE"),
+            ("翻译服务异常", "SERVICE_ERROR"),
+            ("无权使用此翻译服务", "ACCESS_DENIED"),
+        ):
+            with self.subTest(free_reason=reason):
+                accepted, translation, failure_code = parse_free_fixture(
+                    free_failure_response(reason)
+                )
+                self.assertFalse(accepted)
+                self.assertEqual(translation, "")
+                self.assertEqual(failure_code, expected_code)
+        accepted, _, failure_code = parse_free_fixture(
+            free_failure_response("remote secret and arbitrary reason")
+        )
+        self.assertFalse(accepted)
+        self.assertEqual(failure_code, "SERVICE_ERROR")
+        for malformed_free_response in (
+            b'{"success":"true","data":{"text":"x","reason":""}}',
+            b'{"success":true,"data":{"text":"x"}}',
+            b'{"success":true,"data":{"text":"x","reason":"bad"}}',
+            b'{"success":true,"data":{"text":"","reason":""}}',
+            '{"success":false,"data":{"text":"remote secret","reason":"翻译服务异常"}}'.encode("utf-8"),
+            b'{"success":true,"success":false,"data":{"text":"x","reason":""}}',
+        ):
+            with self.subTest(malformed_free_response=malformed_free_response):
+                accepted, _, failure_code = parse_free_fixture(malformed_free_response)
+                self.assertFalse(accepted)
+                self.assertEqual(failure_code, "FREE_SERVER_ERROR")
+
         fixture.fixture_BuildAiRequest.argtypes = [
             ctypes.c_char_p, ctypes.c_uint32, ctypes.c_void_p, ctypes.c_uint32,
             ctypes.c_wchar_p, ctypes.c_uint32,
@@ -1815,6 +2166,9 @@ class NativeHttpWorkerTests(unittest.TestCase):
                     self.assertEqual(request_path, "")
                     self.assertEqual(payload, expected)
         fixture.fixture_BuildAiRequest = None
+        fixture.fixture_Totp = None
+        fixture.fixture_ParseFreeResponse = None
+        fixture.fixture_SelectAdapter = None
         del build_fixture
         fixture_handle = fixture._handle
         del fixture
@@ -1847,6 +2201,38 @@ class NativeHttpWorkerTests(unittest.TestCase):
             self.assertEqual(root_result["url"], self.url + path)
             self.assertEqual(custom_result["accepted"], 1)
             self.assertEqual(custom_result["url"], self.url + "/custom/Google")
+
+        free_service_url = self.url + "/translate"
+        free_normalized = self.run_environment_child(
+            {},
+            actions=[
+                {"op": "normalize", "adapter_id": 6, "url": free_service_url},
+                {"op": "normalize", "adapter_id": 6,
+                 "url": free_service_url + "?redirect=http://example.test"},
+                {"op": "normalize", "adapter_id": 6,
+                 "url": self.url + "/other"},
+                {"op": "normalize", "adapter_id": 1,
+                 "url": "http://120.55.188.249:8080/translate"},
+            ],
+            free_service_url=free_service_url,
+        )
+        self.assertEqual(free_normalized["actions"][0], {
+            "accepted": 1, "url": free_service_url,
+        })
+        self.assertEqual(free_normalized["actions"][1]["accepted"], 0)
+        self.assertEqual(free_normalized["actions"][2]["accepted"], 0)
+        self.assertEqual(free_normalized["actions"][3]["accepted"], 0)
+
+        production_free_url = "http://120.55.188.249:8080/translate"
+        production_free = self.run_environment_child(
+            {},
+            actions=[{
+                "op": "normalize", "adapter_id": 6, "url": production_free_url,
+            }],
+        )
+        self.assertEqual(production_free["actions"][0], {
+            "accepted": 1, "url": production_free_url,
+        })
 
         google_path = "/Google/Baidu/Youdao/custom"
         self.state.clear()

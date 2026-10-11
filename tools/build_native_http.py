@@ -27,12 +27,14 @@ NATIVE_SOURCES = (
     NATIVE_DIR / "adapter" / "google.c",
     NATIVE_DIR / "adapter" / "baidu.c",
     NATIVE_DIR / "adapter" / "youdao.c",
+    NATIVE_DIR / "adapter" / "free.c",
     NATIVE_DIR / "transport.c",
     NATIVE_DIR / "vendor" / "cjson" / "cJSON.c",
 )
 NATIVE_HEADERS = (
     NATIVE_DIR / "client.h",
     NATIVE_DIR / "internal.h",
+    NATIVE_DIR / "adapter" / "free_auth.h",
     NATIVE_DIR / "vendor" / "cjson" / "cJSON.h",
 )
 ALLOWED_IMPORTS = {

@@ -1,4 +1,5 @@
 #include "internal.h"
+#include "adapter/free_auth.h"
 
 #include <string.h>
 #include <stdio.h>
@@ -57,6 +58,11 @@ int hd2ct_normalize_url(const char *input, uint32_t adapter_id,
     if (input_length > HD2CT_MAX_URL ||
         normalized_capacity <= input_length) {
         return 0;
+    }
+    if (adapter_id == HD2CT_ADAPTER_FREE) {
+        if (strcmp(input, HD2CT_FREE_ENDPOINT) != 0) return 0;
+        memcpy(normalized, input, input_length + 1u);
+        return 1;
     }
     if (adapter_id == HD2CT_ADAPTER_UNKNOWN) {
         memcpy(normalized, input, input_length + 1u);

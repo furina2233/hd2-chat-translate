@@ -1,4 +1,5 @@
 #include "internal.h"
+#include "adapter/free_auth.h"
 
 #include <process.h>
 #include <stdio.h>
@@ -622,6 +623,7 @@ static int hd2ct_commit_config(const char *url, const char *model,
                                uint32_t *failure_status)
 {
     char normalized[HD2CT_MAX_URL + 1u];
+    const char *config_url = url;
     uint32_t adapter_id = hd2ct_select_adapter(url, model);
     const HD2CT_Adapter *adapter = hd2ct_adapter_for_id(adapter_id);
     size_t url_length = hd2ct_bounded_length(url, HD2CT_MAX_URL);
@@ -634,9 +636,12 @@ static int hd2ct_commit_config(const char *url, const char *model,
         key_length > HD2CT_MAX_KEY || app_id_length > HD2CT_MAX_KEY) {
         return 0;
     }
+    if (adapter_id == HD2CT_ADAPTER_FREE && url_length == 0) {
+        config_url = HD2CT_FREE_ENDPOINT;
+    }
     if (adapter_id != HD2CT_ADAPTER_UNKNOWN) {
         if (adapter == NULL || adapter->base == NULL) return 0;
-        if (url_length == 0 ||
+        if ((url_length == 0 && adapter_id != HD2CT_ADAPTER_FREE) ||
             (adapter->base->api_key_required && key_length == 0) ||
             (adapter->base->family == HD2CT_FAMILY_AI &&
              adapter->base->model_required && model_length == 0) ||
@@ -644,7 +649,7 @@ static int hd2ct_commit_config(const char *url, const char *model,
             *failure_status = HD2CT_STATUS_MISSING_CONFIG;
             return 0;
         }
-        if (!hd2ct_normalize_url(url, adapter_id, normalized, sizeof(normalized))) return 0;
+        if (!hd2ct_normalize_url(config_url, adapter_id, normalized, sizeof(normalized))) return 0;
         if (adapter->base->family == HD2CT_FAMILY_AI) {
             if (!hd2ct_valid_model_key(model, api_key)) return 0;
         } else if ((adapter->base->api_key_required &&
@@ -653,11 +658,11 @@ static int hd2ct_commit_config(const char *url, const char *model,
             return 0;
         }
     } else {
-        if (!hd2ct_normalize_url(url, adapter_id, normalized, sizeof(normalized))) return 0;
+        if (!hd2ct_normalize_url(config_url, adapter_id, normalized, sizeof(normalized))) return 0;
     }
     memcpy(g_url, normalized, strlen(normalized) + 1u);
     memcpy(g_model, model, model_length + 1u);
-    if (adapter_id != HD2CT_ADAPTER_UNKNOWN) {
+    if (adapter_id != HD2CT_ADAPTER_UNKNOWN && adapter_id != HD2CT_ADAPTER_FREE) {
         memcpy(g_api_key, api_key, key_length + 1u);
         if (signed_machine) memcpy(g_app_id, app_id, app_id_length + 1u);
     } else {
@@ -684,13 +689,17 @@ static unsigned __stdcall hd2ct_bootstrap_main(void *parameter)
 #ifdef HD2CT_TESTING
     InterlockedIncrement(&g_test_bootstrap_count);
 #endif
-    if (!hd2ct_read_environment_value(L"HD2CT_API_URL", url, sizeof(url), &value_present) ||
+    if (!hd2ct_read_environment_value(L"HD2CT_API_URL", url, sizeof(url), &value_present)) {
+        service_status = HD2CT_STATUS_INVALID_CONFIG;
+        goto configure_workers;
+    }
+    if (url[0] != '\0' &&
         !hd2ct_read_environment_value(L"HD2CT_MODEL", model, sizeof(model), &value_present)) {
         service_status = HD2CT_STATUS_INVALID_CONFIG;
         goto configure_workers;
     }
     adapter_id = hd2ct_select_adapter(url, model);
-    if (adapter_id != HD2CT_ADAPTER_UNKNOWN) {
+    if (adapter_id != HD2CT_ADAPTER_UNKNOWN && adapter_id != HD2CT_ADAPTER_FREE) {
         if (!hd2ct_read_environment_value(L"HD2CT_API_KEY", api_key,
                                          sizeof(api_key), &value_present)) {
             service_status = HD2CT_STATUS_INVALID_CONFIG;

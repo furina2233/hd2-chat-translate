@@ -10,6 +10,9 @@ static const HD2CT_AdapterBase g_ai_translation_base = {
 static const HD2CT_AdapterBase g_machine_translation_base = {
     HD2CT_FAMILY_MACHINE, 0, 1, 0
 };
+static const HD2CT_AdapterBase g_free_translation_base = {
+    HD2CT_FAMILY_MACHINE, 0, 0, 0
+};
 
 static int hd2ct_ascii_contains_ci(const char *text, const char *needle)
 {
@@ -35,7 +38,9 @@ static int hd2ct_ascii_contains_ci(const char *text, const char *needle)
 
 uint32_t hd2ct_select_adapter(const char *url, const char *model)
 {
-    size_t model_length = hd2ct_bounded_length(model, HD2CT_MAX_MODEL);
+    size_t model_length;
+    if (url == NULL || url[0] == '\0') return HD2CT_ADAPTER_FREE;
+    model_length = hd2ct_bounded_length(model, HD2CT_MAX_MODEL);
     if (g_ai_translation_base.model_required &&
         model_length <= HD2CT_MAX_MODEL && model_length != 0 &&
         !hd2ct_is_only_space(model, model_length)) {
@@ -202,7 +207,9 @@ static const HD2CT_Adapter g_adapters[] = {
      hd2ct_build_baidu_request, hd2ct_parse_baidu_response},
     {HD2CT_ADAPTER_YOUDAO, &g_machine_translation_base, 1, "/api",
      hd2ct_build_youdao_request, hd2ct_parse_youdao_response},
-    {HD2CT_ADAPTER_UNKNOWN, &g_machine_translation_base, 0, NULL, NULL, NULL}
+    {HD2CT_ADAPTER_UNKNOWN, &g_machine_translation_base, 0, NULL, NULL, NULL},
+    {HD2CT_ADAPTER_FREE, &g_free_translation_base, 0, "/translate",
+     hd2ct_build_free_request, hd2ct_parse_free_response}
 };
 
 const HD2CT_Adapter *hd2ct_adapter_for_id(uint32_t adapter_id)

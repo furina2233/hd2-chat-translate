@@ -57,11 +57,11 @@
 
 首次有效提交由原生客户端启动一次后台初始化，读取服务配置的 Windows 持久环境变量：先读 HKCU\Environment，再读 HKLM\SYSTEM\CurrentControlSet\Control\Session Manager\Environment。若用户变量存在，即使值为空或无效，也不回退到系统变量；不读取进程继承值。每个进程只初始化一次；服务选择、地址、凭据和配置有效性由 C 管理，启用状态与请求超时来自已应用的 Mod Options Menu 设置。
 
-HD2CT_MODEL 非空时选择 AI 翻译；缺失、为空或仅含空白时选择机器翻译，按 URL 中忽略大小写的 google、baidu、youdao 依次匹配。已支持服务需要 HD2CT_API_URL 与 HD2CT_API_KEY，百度、有道还需要 HD2CT_APP_ID。模型名最多 256 字节，密钥与应用 ID 各最多 4096 字节，URL 最多 2048 字节。旧变量 HD2CT_ENABLED 与 HD2CT_TIMEOUT_SECONDS 不再读取，缺失或无效的 Mod Options Menu 启用项默认开启，超时项默认20秒，可选10、20、30秒。密钥保存在进程内供请求使用；配置无效或后台初始化失败时会清零，菜单关闭不会清理凭据或停止 worker。
+HD2CT_API_URL 缺失或为空字符串时选择 FREE，使用固定端点且跳过 model、key、appid 读取；非空 URL 继续按原规则选择服务，纯空白仍按原校验处理。HD2CT_MODEL 非空时选择 AI 翻译；缺失、为空或仅含空白时选择机器翻译，按 URL 中忽略大小写的 google、baidu、youdao 依次匹配。已支持的 AI/机器翻译服务需要 HD2CT_API_URL 与 HD2CT_API_KEY，百度、有道还需要 HD2CT_APP_ID。模型名最多 256 字节，密钥与应用 ID 各最多 4096 字节，URL 最多 2048 字节。旧变量 HD2CT_ENABLED 与 HD2CT_TIMEOUT_SECONDS 不再读取，缺失或无效的 Mod Options Menu 启用项默认开启，超时项默认20秒，可选10、20、30秒。凭据保存在进程内供请求使用；配置无效或后台初始化失败时会清零，菜单关闭不会清理凭据或停止 worker。
 
 后台 worker 每次开始处理任务时，从 `%LOCALAPPDATA%\CowboyBingus\Helldivers2\Logs\ModOptionsMenu.values` 的同一份 primary/backup 文件快照读取本插件的目标语言、启用状态与超时。值缺失或无效时分别回退到简体中文、开启和20秒；启用值只接受小写 `true`/`false`，超时值是1起始的三项 choice 索引。可读且有记录的 primary 中若缺少某项或该项值无效，使用该项默认值，不从旧 backup 覆盖；primary 不可读、损坏或没有有效记录时才尝试 backup。提交、轮询和游戏线程不做该文件 I/O。
 
-AI 适配器把地址根路径补全为 /chat/completions，或把精确的 /v1、/v1/ 补全为 /v1/chat/completions。机器翻译适配器仅把根路径补全为各自接口；其他路径保持原样。已支持服务要求 HTTPS，只有 localhost、127.0.0.0/8 和 ::1 可使用 HTTP。拒绝 URL 凭据、查询、片段、反斜杠、空白和控制字符；禁用重定向、cookies 和自动认证。
+AI 与已有机器翻译适配器要求 HTTPS；只有 localhost、127.0.0.0/8 和 ::1 可使用 HTTP。FREE 只允许固定端点使用远端 HTTP。AI 适配器把地址根路径补全为 /chat/completions，或把精确的 /v1、/v1/ 补全为 /v1/chat/completions。已有机器翻译适配器仅把根路径补全为各自接口；其他路径保持原样。拒绝普通服务 URL 中的凭据、查询、片段、反斜杠、空白和控制字符；禁用重定向、cookies 和自动认证。
 
 AI 适配器使用 OpenAI-compatible Chat Completions 请求，只发送 `model`、`messages` 和 `response_format: {"type":"json_object"}`。请求不显式设置采样或思考参数，也不发送 `stream`；模型使用服务端默认策略及非流式默认行为。端点需同时实现兼容的 Chat Completions 与 JSON mode；供应商原生 API 不一定支持这两者。JSON mode 保证输出是合法 JSON 语法，不保证对象字段结构；提示词要求只返回 `is_target_language`（布尔值）和 `translation`（字符串），客户端再严格校验字段、类型、重复字段和额外字段。[DeepSeek Chat Completions 文档](https://api-docs.deepseek.com/api/create-chat-completion/)；[通义千问结构化输出文档](https://help.aliyun.com/zh/model-studio/qwen-structured-output)。完整简体中文请求示例见 [ai-request-example.json](ai-request-example.json)。
 
@@ -92,8 +92,11 @@ ABI 2 的 DLL 只导出三个函数，签名见 [client.h](../native/client.h)�
 | [Google Basic v2](https://docs.cloud.google.com/translate/docs/reference/rest/v2/translate) | POST /language/translate/v2；JSON q、target、format=text；[x-goog-api-key 请求头](https://docs.cloud.google.com/docs/authentication/api-keys-use)，不把密钥写入 URL | data.translations 的 translatedText、detectedSourceLanguage |
 | [百度通用翻译](https://fanyi-api.baidu.com/doc_bd/21) | POST /api/trans/vip/translate；UTF-8 表单 q、from=auto、to、appid、salt、sign；sign=MD5(appid+原始 q+salt+密钥)，小写十六进制 | from、trans_result 中的 dst |
 | [有道文本翻译](https://ai.youdao.com/DOCSIRMA/html/trans/api/wbfy/index.html) | POST /api；UTF-8 表单 q、from=auto、to、appKey、salt、curtime、signType=v3、sign、strict=true；sign=SHA256(appKey+input+salt+curtime+密钥) | errorCode=0、l、translation |
+| FREE | POST 固定端点；JSON key1、key2、text、target_language；key2 为 30 秒步长、6 位数字的 TOTP，使用 BCrypt HMAC-SHA1 与编译进 `free_auth.h` 的共享密钥 | 成功和失败都要求 `data.text`、`data.reason` 字符串；成功时 reason 为空，失败时 reason 只映射为固定短码 |
 
 有道 input 按 Unicode 码点计数：最多 20 个码点时为完整 q，否则为前 10 个码点、十进制码点总数、后 10 个码点。签名使用尚未 URL 编码的 UTF-8 文本，表单各字段随后编码；curtime 为 UTC Unix 秒。签名及随机 salt 使用 Windows BCrypt。
+
+FREE 的固定端点为 `http://120.55.188.249:8080/translate`，key1 和 20 字节 TOTP 共享密钥硬编码在 `native/adapter/free_auth.h`。只对 FREE 适配器放行该精确端点的远端 HTTP；其他适配器仍只允许 loopback HTTP，WinHTTP 禁止重定向。FREE 不读取或使用 model、API key、app ID；服务端使用全局共享的每分钟 100 次请求限制，客户端现有本地限流仍为每分钟 30 次。服务端余额耗尽映射为 `FREE_QUOTA_EXCEEDED`（“免费版的余额已用尽，请自行配置提供商”），服务端错误及 FREE 响应结构无效或 HTTP 5xx 映射为 `FREE_SERVER_ERROR`（“服务器错误，请联系作者”）。其他适配器的 `QUOTA_EXCEEDED` 提示保持“翻译额度不足”；FREE 仍兼容旧 reason 映射。
 
 机器翻译不发送 AI 提示词；Google 省略 source 参数启用自动检测，百度、有道使用 from=auto。target/to 使用目标语言目录中的服务商语言码，默认分别为 zh-CN、zh、zh-CHS。有道 strict=true 保证按指定目标处理，避免默认自动中译英。成功结果按实际译文与原文比较，不按源语言字段替换为原文；完全相同返回 SKIP，不同返回 OK。缓存保存完整的 OK 或 SKIP 结果，键包含原文与目标语言，命中时保持同一显示决定。
 

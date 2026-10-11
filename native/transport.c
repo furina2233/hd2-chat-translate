@@ -1,4 +1,5 @@
 #include "internal.h"
+#include "adapter/free_auth.h"
 
 #include <string.h>
 #include <stdio.h>
@@ -57,7 +58,8 @@ const char *hd2ct_winhttp_failure(uint64_t deadline, DWORD error)
     return "NETWORK";
 }
 
-static int hd2ct_prepare_url_parts(const char *url, HD2CT_UrlParts *out)
+static int hd2ct_prepare_url_parts(const char *url, uint32_t adapter_id,
+                                   HD2CT_UrlParts *out)
 {
     size_t length = strlen(url);
     memset(out, 0, sizeof(*out));
@@ -86,9 +88,12 @@ static int hd2ct_prepare_url_parts(const char *url, HD2CT_UrlParts *out)
     }
     if (out->components.nScheme == INTERNET_SCHEME_HTTP &&
         !hd2ct_local_http_host(out->host)) {
-        free(out->wide_url);
-        out->wide_url = NULL;
-        return 0;
+        if (adapter_id != HD2CT_ADAPTER_FREE ||
+            strcmp(url, HD2CT_FREE_ENDPOINT) != 0) {
+            free(out->wide_url);
+            out->wide_url = NULL;
+            return 0;
+        }
     }
     out->port = out->components.nPort;
     out->secure = out->components.nScheme == INTERNET_SCHEME_HTTPS;
@@ -134,7 +139,7 @@ void hd2ct_http_worker_request(HINTERNET session, const HD2CT_WorkerJob *job,
         failure_code = "CANCELLED";
         goto cleanup;
     }
-    if (!hd2ct_prepare_url_parts(job->url, &url_parts)) {
+    if (!hd2ct_prepare_url_parts(job->url, job->adapter_id, &url_parts)) {
         failure_code = "INVALID_URL";
         goto cleanup;
     }
@@ -248,7 +253,12 @@ void hd2ct_http_worker_request(HINTERNET session, const HD2CT_WorkerJob *job,
     }
     if (status_code < 200u || status_code >= 300u) {
         char code[32];
-        (void)snprintf(code, sizeof(code), "HTTP_%lu", (unsigned long)status_code);
+        if (job->adapter_id == HD2CT_ADAPTER_FREE &&
+            status_code >= 500u && status_code < 600u) {
+            (void)snprintf(code, sizeof(code), "%s", "FREE_SERVER_ERROR");
+        } else {
+            (void)snprintf(code, sizeof(code), "HTTP_%lu", (unsigned long)status_code);
+        }
         hd2ct_build_error(result, HD2CT_MAX_RESULT + 1u, result_bytes, code);
         ok = 1;
         goto cleanup;
