@@ -6,6 +6,9 @@ build/
 dist/
 /cmake-build-*/
 
+# 免费服务说明仅保存在服务器，避免重新纳入本地版本历史。
+free-service.md
+
 # Python 开发缓存。
 __pycache__/
 *.py[cod]
