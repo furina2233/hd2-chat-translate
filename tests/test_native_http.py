@@ -1909,7 +1909,7 @@ class NativeHttpWorkerTests(unittest.TestCase):
             set(self.state.payloads[0]),
             {"key1", "key2", "text", "target_language"},
         )
-        self.assertEqual(self.state.payloads[0]["key1"], "90d35d8b-646c-48f0-9a10-a82af86722d1")
+        self.assertEqual(self.state.payloads[0]["key1"], "a8cc00ad-556c-4bf2-af9a-6d3e229aa166")
         self.assertEqual(len(self.state.payloads[0]["key2"]), 6)
         self.assertTrue(self.state.payloads[0]["key2"].isdigit())
         self.assertEqual(self.state.payloads[0]["text"], free_source)
@@ -1948,6 +1948,7 @@ class NativeHttpWorkerTests(unittest.TestCase):
         for reason, expected_code in (
             ("免费版的余额已用尽，请自行配置提供商", "FREE_QUOTA_EXCEEDED"),
             ("服务器错误，请联系作者", "FREE_SERVER_ERROR"),
+            ("请升级hd2-chat-translate以继续使用免费版服务", "FREE_UPGRADE_REQUIRED"),
         ):
             self.state.clear()
             self.state.response = free_failure_response(reason)
@@ -2089,6 +2090,7 @@ class NativeHttpWorkerTests(unittest.TestCase):
             ("翻译额度不足", "QUOTA_EXCEEDED"),
             ("免费版的余额已用尽，请自行配置提供商", "FREE_QUOTA_EXCEEDED"),
             ("服务器错误，请联系作者", "FREE_SERVER_ERROR"),
+            ("请升级hd2-chat-translate以继续使用免费版服务", "FREE_UPGRADE_REQUIRED"),
             ("不支持此语言", "UNSUPPORTED_LANGUAGE"),
             ("请求参数有误", "REQUEST_INVALID"),
             ("请求超时", "TIMEOUT"),

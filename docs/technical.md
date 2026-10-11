@@ -96,7 +96,7 @@ ABI 2 的 DLL 只导出三个函数，签名见 [client.h](../native/client.h)�
 
 有道 input 按 Unicode 码点计数：最多 20 个码点时为完整 q，否则为前 10 个码点、十进制码点总数、后 10 个码点。签名使用尚未 URL 编码的 UTF-8 文本，表单各字段随后编码；curtime 为 UTC Unix 秒。签名及随机 salt 使用 Windows BCrypt。
 
-FREE 的固定端点为 `http://120.55.188.249:8080/translate`，key1 和 20 字节 TOTP 共享密钥硬编码在 `native/adapter/free_auth.h`。只对 FREE 适配器放行该精确端点的远端 HTTP；其他适配器仍只允许 loopback HTTP，WinHTTP 禁止重定向。FREE 不读取或使用 model、API key、app ID；服务端使用全局共享的每分钟 100 次请求限制，客户端现有本地限流仍为每分钟 30 次。服务端余额耗尽映射为 `FREE_QUOTA_EXCEEDED`（“免费版的余额已用尽，请自行配置提供商”），服务端错误及 FREE 响应结构无效或 HTTP 5xx 映射为 `FREE_SERVER_ERROR`（“服务器错误，请联系作者”）。其他适配器的 `QUOTA_EXCEEDED` 提示保持“翻译额度不足”；FREE 仍兼容旧 reason 映射。
+FREE 的固定端点为 `http://120.55.188.249:8080/translate`，key1 和 20 字节 TOTP 共享密钥硬编码在 `native/adapter/free_auth.h`。只对 FREE 适配器放行该精确端点的远端 HTTP；其他适配器仍只允许 loopback HTTP，WinHTTP 禁止重定向。FREE 不读取或使用 model、API key、app ID；服务端使用全局共享的每分钟 100 次请求限制，客户端现有本地限流仍为每分钟 30 次。服务端余额耗尽映射为 `FREE_QUOTA_EXCEEDED`（“免费版的余额已用尽，请自行配置提供商”），服务端错误及 FREE 响应结构无效或 HTTP 5xx 映射为 `FREE_SERVER_ERROR`（“服务器错误，请联系作者”），旧版本免费凭据需要更新时映射为 `FREE_UPGRADE_REQUIRED`（“请升级hd2-chat-translate以继续使用免费版服务”）。其他适配器的 `QUOTA_EXCEEDED` 提示保持“翻译额度不足”；FREE 仍兼容旧 reason 映射。
 
 机器翻译不发送 AI 提示词；Google 省略 source 参数启用自动检测，百度、有道使用 from=auto。target/to 使用目标语言目录中的服务商语言码，默认分别为 zh-CN、zh、zh-CHS。有道 strict=true 保证按指定目标处理，避免默认自动中译英。成功结果按实际译文与原文比较，不按源语言字段替换为原文；完全相同返回 SKIP，不同返回 OK。缓存保存完整的 OK 或 SKIP 结果，键包含原文与目标语言，命中时保持同一显示决定。
 

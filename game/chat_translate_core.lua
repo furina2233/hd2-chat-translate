@@ -544,6 +544,7 @@ local ERROR_MESSAGES = {
     QUOTA_EXCEEDED = "翻译额度不足",
     FREE_QUOTA_EXCEEDED = "免费版的余额已用尽，请自行配置提供商",
     FREE_SERVER_ERROR = "服务器错误，请联系作者",
+    FREE_UPGRADE_REQUIRED = "请升级hd2-chat-translate以继续使用免费版服务",
     UNSUPPORTED_LANGUAGE = "不支持此语言",
     REQUEST_INVALID = "请求参数有误",
     SERVICE_ERROR = "翻译服务异常",
