@@ -295,7 +295,7 @@ return function(ffi, kernel, bcrypt, hash_bytes, u16_ascii)
         local function resolve(name, signature)
             return function_pointer(kernel.GetProcAddress(library, name), signature)
         end
-        local c_submit = resolve("HD2CT_Submit", "HD2Probe_U32 (*)(const char *, const char *, HD2Probe_U32)")
+        local c_submit = resolve("HD2CT_Submit", "HD2Probe_U32 (*)(const char *, const char *, HD2Probe_U32, HD2Probe_U32)")
         local c_poll = resolve("HD2CT_Poll", "HD2Probe_U32 (*)(const char *, char *, HD2Probe_U32, HD2Probe_U32 *)")
         local c_cancel = resolve("HD2CT_Cancel", "HD2Probe_U32 (*)(const char *)")
         local api = {
@@ -354,7 +354,9 @@ return function(ffi, kernel, bcrypt, hash_bytes, u16_ascii)
             return completed
         end
 
-        function api.submit(token, body)
+        function api.submit(token, body, flags)
+            if flags == nil then flags = 0 end
+            if type(flags) ~= "number" or (flags ~= 0 and flags ~= 1) then return false end
             retry_cancels(4)
             if not safe_token(token) or type(body) ~= "string" or #body < 1 or #body > 1023
                 or accepted[token] or accepted_count >= 64 then
@@ -362,7 +364,7 @@ return function(ffi, kernel, bcrypt, hash_bytes, u16_ascii)
             end
             local buffer = ffi.new("char[?]", #body)
             ffi.copy(buffer, body, #body)
-            local ok, result = pcall(c_submit, token, buffer, #body)
+            local ok, result = pcall(c_submit, token, buffer, #body, flags)
             if not ok or tonumber(result) ~= 1 then return false end
             accepted[token] = true
             accepted_count = accepted_count + 1

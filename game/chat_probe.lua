@@ -1996,7 +1996,9 @@ local function initialize_probe()
             and numeric <= 9007199254740991 and string.format("%.0f", numeric) == counter
     end
 
-    local function observer_translate_publish_request(token, body)
+    local function observer_translate_publish_request(token, body, flags)
+        if flags == nil then flags = 0 end
+        if type(flags) ~= "number" or (flags ~= 0 and flags ~= 1) then return false end
         if STANDALONE_ENABLED then
             if not TRANSLATE_ENABLED or not translate_heartbeat_fresh
                 or not observer_translate_valid_token(token)
@@ -2007,7 +2009,7 @@ local function initialize_probe()
                 return false
             end
             local ok, submitted = pcall(function()
-                return native_transport_api.submit(token, body)
+                return native_transport_api.submit(token, body, flags)
             end)
             if not ok then return false, "SUBMIT_EXCEPTION" end
             return submitted == true

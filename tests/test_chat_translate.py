@@ -13,12 +13,13 @@ CORE_SCENARIOS = r'''
 local json_core = dofile([[SCAN_CORE_PATH]])
 local core = dofile([[TRANSLATE_CORE_PATH]])
 
-local function make_message(slot, body, event_slot, owner_id)
+local function make_message(slot, body, event_slot, owner_id, is_self)
     return {
         widget_slot = slot,
         event_slot = event_slot or slot,
         owner_id = owner_id or 6,
         body = body,
+        is_self = is_self,
         proof = {private = "PRIVATE_ADAPTER_PROOF"},
     }
 end
@@ -54,8 +55,8 @@ local function new_env()
             if message then return "ok", message end
             return "empty"
         end,
-        submit = function(token, body)
-            env.submit_calls[#env.submit_calls + 1] = {token = token, body = body}
+        submit = function(token, body, flags)
+            env.submit_calls[#env.submit_calls + 1] = {token = token, body = body, flags = flags}
             if env.submit_throw then error("PRIVATE_SUBMIT_SECRET") end
             return true
         end,
@@ -122,7 +123,7 @@ local function one_baseline_and_chinese_case()
     env.messages[0] = make_message(0, "已存在的旧消息", 4, 77)
     finish_baseline(env)
     local after_baseline = #env.submit_calls
-    env.messages[0] = make_message(0, "你好，队友", 5, 77)
+    env.messages[0] = make_message(0, "你好，队友", 5, 77, true)
     step(env)
     local token = env.submit_calls[1] and env.submit_calls[1].token
     assert(token, "Chinese source text was not submitted for model detection")
@@ -130,11 +131,21 @@ local function one_baseline_and_chinese_case()
     step(env)
     for _ = 1, 17 do step(env) end
     local manifest = core.manifest(env.state)
+    local function submit_flag_for(is_self)
+        local flag_env = new_env()
+        finish_baseline(flag_env)
+        flag_env.messages[0] = make_message(0, "flag source", 0, 77, is_self)
+        step(flag_env)
+        return flag_env.submit_calls[1] and flag_env.submit_calls[1].flags or -1
+    end
     return {
         after_baseline = after_baseline,
         submits = #env.submit_calls,
         applies = #env.apply_calls,
         submitted_body = env.submit_calls[1] and env.submit_calls[1].body or "",
+        self_flag = env.submit_calls[1] and env.submit_calls[1].flags or -1,
+        false_flag = submit_flag_for(false),
+        unknown_flag = submit_flag_for(nil),
         cancels = #env.cancel_calls,
         unchanged = manifest.counters.translation_unchanged,
         duplicates = manifest.counters.duplicates,
@@ -445,6 +456,9 @@ class ChatTranslateCoreTests(unittest.TestCase):
         self.assertEqual(baseline["after_baseline"], 0)
         self.assertEqual(baseline["submits"], 1)
         self.assertEqual(baseline["submitted_body"], "你好，队友")
+        self.assertEqual(baseline["self_flag"], 1)
+        self.assertEqual(baseline["false_flag"], 0)
+        self.assertEqual(baseline["unknown_flag"], 0)
         self.assertEqual(baseline["applies"], 0)
         self.assertEqual(baseline["unchanged"], 0)
         self.assertEqual(baseline["cancels"], 1)

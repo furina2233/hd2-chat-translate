@@ -499,7 +499,8 @@ local function submit_message(state, message)
         return false
     end
     bump(state, "submit_attempts")
-    local ok, submitted, error_code = pcall(state.adapter.submit, token, message.body)
+    local flags = message.is_self == true and 1 or 0
+    local ok, submitted, error_code = pcall(state.adapter.submit, token, message.body, flags)
     if not ok then
         bump(state, "adapter_errors")
         bump(state, "submit_failures")

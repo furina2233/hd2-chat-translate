@@ -507,6 +507,20 @@ native_transport_api = {
 }
 local standalone_heartbeat = translate_adapter.heartbeat()
 assert(standalone_heartbeat == "HD2CT1 4101\n" and not observer_faulted)
+local forwarded_submits = {}
+native_transport_api.submit = function(submit_token, submit_body, flags)
+    forwarded_submits[#forwarded_submits + 1] = {
+        token = submit_token, body = submit_body, flags = flags,
+    }
+    return true
+end
+assert(translate_adapter.submit(token, "Self standalone body", 1))
+assert(translate_adapter.submit(token, "Other standalone body", 0))
+assert(translate_adapter.submit(token, "Legacy standalone body"))
+assert(not translate_adapter.submit(token, "Invalid standalone body", 2))
+assert(#forwarded_submits == 3)
+assert(forwarded_submits[1].flags == 1 and forwarded_submits[2].flags == 0
+    and forwarded_submits[3].flags == 0)
 native_transport_api.submit = function() error("PRIVATE_NATIVE_SUBMIT") end
 local submit_error_result, submit_error_code = translate_adapter.submit(token, "Standalone body")
 assert(submit_error_result == false and submit_error_code == "SUBMIT_EXCEPTION" and not observer_faulted)
@@ -1305,6 +1319,15 @@ end
         self.assertEqual(result["failed_race_status"], "disabled")
         self.assertEqual(result["stale_results"], ["stale", "stale", "stale", "stale", "stale"])
         self.assertLessEqual(result["report_bytes"], 64 * 1024)
+
+        http_source = (ROOT / "game" / "chat_http_native.lua").read_text(encoding="utf-8")
+        self.assertIn(
+            'HD2CT_Submit", "HD2Probe_U32 (*)(const char *, const char *, HD2Probe_U32, HD2Probe_U32)"',
+            http_source,
+        )
+        self.assertIn("if flags == nil then flags = 0 end", http_source)
+        self.assertIn("(flags ~= 0 and flags ~= 1)", http_source)
+        self.assertIn("pcall(c_submit, token, buffer, #body, flags)", http_source)
 
         self.assertEqual(source.count("startup_report_retention.run"), 1)
         retention_start = source.index("--[[HD2_STARTUP_REPORT_RETENTION_BEGIN]]")
