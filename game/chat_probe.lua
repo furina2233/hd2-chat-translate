@@ -1835,6 +1835,7 @@ local function initialize_probe()
         cache_ready = false,
         cache_stopped = false,
         cache_attempts = 0,
+        last_failure_code = 0,
         submit_checks = 0,
         self_marked = 0,
         known_other = 0,
@@ -1893,16 +1894,16 @@ local function initialize_probe()
     local function observer_identity_read_base()
         local roster_global = observer_add(module_base_number, 0x347CED8)
         local getter_global = observer_add(module_base_number, 0x347CEF0)
-        if not roster_global or not getter_global then return nil end
+        if not roster_global or not getter_global then return nil, 1 end
         local roster_pointer = observer_read_pointer(roster_global)
         local getter_root = observer_read_pointer(getter_global)
-        if not roster_pointer or not getter_root then return nil end
+        if not roster_pointer or not getter_root then return nil, 2 end
         local local_peer_address = observer_add(getter_root, 0xB398)
-        if not local_peer_address then return nil end
+        if not local_peer_address then return nil, 2 end
         local local_key = observer_read(local_peer_address, 8)
-        if not local_key or local_key == IDENTITY_ZERO_KEY then return nil end
+        if not local_key or local_key == IDENTITY_ZERO_KEY then return nil, 3 end
         local roster_bytes = observer_read(roster_pointer, IDENTITY_ROSTER_COUNT * IDENTITY_ROSTER_STRIDE)
-        if not roster_bytes then return nil end
+        if not roster_bytes then return nil, 4 end
 
         local peers_by_key = {}
         local peers = {}
@@ -1913,11 +1914,11 @@ local function initialize_probe()
             if key ~= IDENTITY_ZERO_KEY then
                 local name_bytes = roster_bytes:sub(offset + 9, offset + 137)
                 local name = observer_translate_decode_bounded_name(name_bytes, true)
-                if name == nil then return nil end
+                if name == nil then return nil, 5 end
                 if name ~= "" then
                     local previous = peers_by_key[key]
                     if previous then
-                        if previous.name ~= name then return nil end
+                        if previous.name ~= name then return nil, 5 end
                     else
                         local peer = {key = key, name = name}
                         peers_by_key[key] = peer
@@ -1928,7 +1929,7 @@ local function initialize_probe()
         end
 
         local local_peer = peers_by_key[local_key]
-        if not local_peer then return nil end
+        if not local_peer then return nil, 6 end
         local snapshot = {
             roster_global = roster_global,
             getter_global = getter_global,
@@ -1940,20 +1941,20 @@ local function initialize_probe()
             peer_count = #peers,
             roster_bytes = roster_bytes,
         }
-        if not observer_identity_verify_base(snapshot) then return nil end
+        if not observer_identity_verify_base(snapshot) then return nil, 7 end
         return snapshot
     end
 
     local function observer_identity_read_local_palette(snapshot)
         local count_address = observer_add(snapshot.getter_root, 0x16390)
         local entries_address = observer_add(snapshot.getter_root, 0x16398)
-        if not count_address or not entries_address then return nil end
+        if not count_address or not entries_address then return nil, 11 end
         local count_bytes = observer_read(count_address, 4)
-        if not count_bytes then return nil end
+        if not count_bytes then return nil, 11 end
         local count = observer_u32(count_bytes, 0)
-        if count == nil or count < 1 or count > IDENTITY_PALETTE_LIMIT then return nil end
+        if count == nil or count < 1 or count > IDENTITY_PALETTE_LIMIT then return nil, 11 end
         local entries = observer_read(entries_address, count * 0x20)
-        if not entries then return nil end
+        if not entries then return nil, 12 end
         local matching_count = 0
         local selector
         for index = 0, count - 1 do
@@ -1963,19 +1964,19 @@ local function initialize_probe()
                 selector = observer_u32(entries, offset + 0x14)
             end
         end
-        if matching_count ~= 1 or selector == nil or selector >= 4 then return nil end
+        if matching_count ~= 1 or selector == nil or selector >= 4 then return nil, 13 end
 
         local vector_rva = 0x21D4160 + selector * 16
         local vector_address = observer_add(module_base_number, vector_rva)
-        if not vector_address then return nil end
+        if not vector_address then return nil, 14 end
         local palette = observer_read(vector_address, 16)
-        if not palette then return nil end
+        if not palette then return nil, 14 end
         local verify_count = observer_read(count_address, 4)
         local verify_entries = observer_read(entries_address, #entries)
         local verify_palette = observer_read(vector_address, 16)
         if not verify_count or verify_count ~= count_bytes or not verify_entries or verify_entries ~= entries
             or not verify_palette or verify_palette ~= palette or not observer_identity_verify_base(snapshot) then
-            return nil
+            return nil, 15
         end
         return palette
     end
@@ -2006,19 +2007,26 @@ local function initialize_probe()
             return
         end
 
-        local snapshot = observer_identity_read_base()
-        if not snapshot then return end
+        local snapshot, base_failure = observer_identity_read_base()
+        if not snapshot then
+            state.last_failure_code = base_failure or 0
+            return
+        end
         if snapshot.peer_count > 1 then
             state.phase = "stopped"
             state.cache_stopped = true
             return
         end
         if snapshot.peer_count ~= 1 then return end
-        local palette = observer_identity_read_local_palette(snapshot)
-        if not palette then return end
+        local palette, palette_failure = observer_identity_read_local_palette(snapshot)
+        if not palette then
+            state.last_failure_code = palette_failure or 0
+            return
+        end
         state.cache_name = snapshot.local_name
         state.cache_palette = palette
         state.cache_ready = true
+        state.last_failure_code = 0
         state.phase = "ready"
     end
 
@@ -2947,6 +2955,9 @@ local function initialize_probe()
                 cache_attempts = observer_translate_safe_count(
                     translate_identity.state.cache_attempts, 9007199254740991)
                     and translate_identity.state.cache_attempts or 0,
+                last_failure_code = observer_translate_safe_count(
+                    translate_identity.state.last_failure_code, 15)
+                    and translate_identity.state.last_failure_code or 0,
                 submit_checks = observer_translate_safe_count(
                     translate_identity.state.submit_checks, 9007199254740991)
                     and translate_identity.state.submit_checks or 0,

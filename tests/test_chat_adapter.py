@@ -951,10 +951,13 @@ do
     query_fail_address = identity_fixture.roster
     translate_adapter.scan_plan()
     query_fail_address = nil
-    assert(identity_state.phase == "pending" and not identity_state.cache_ready)
+    assert(identity_state.phase == "pending" and not identity_state.cache_ready
+        and identity_state.last_failure_code == 4,
+        "initial roster read failure did not record the base-read stage")
     observer_now = observer_now + 1000
     translate_adapter.scan_plan()
-    assert(identity_state.cache_ready and identity_state.cache_name == identity_fixture.local_name,
+    assert(identity_state.cache_ready and identity_state.cache_name == identity_fixture.local_name
+        and identity_state.last_failure_code == 0,
         "cache did not retry after initial roster read failure")
 
     -- 缓存完成后，后台scan_plan继续读取历史但不再接触sender roster。
@@ -995,7 +998,7 @@ end
 local safe_identity = observer_translate_sanitize_report({}).identity
 assert(safe_identity.cache_ready == true and safe_identity.submit_checks >= 5
     and safe_identity.self_marked >= 2 and safe_identity.known_other >= 1
-    and safe_identity.fallback >= 3)
+    and safe_identity.fallback >= 3 and safe_identity.last_failure_code == 0)
 
 RESULT = json_core.encode_json({
     status = "translate fake Win32/kernel checks ok",
@@ -1513,9 +1516,11 @@ end
         self.assertEqual(
             set(identity),
             {"signature_ready", "cache_ready", "cache_stopped", "cache_attempts",
-             "submit_checks", "self_marked", "known_other", "fallback"},
+             "last_failure_code", "submit_checks", "self_marked", "known_other", "fallback"},
         )
         self.assertTrue(identity["signature_ready"] and identity["cache_ready"])
+        self.assertGreaterEqual(identity["last_failure_code"], 0)
+        self.assertLessEqual(identity["last_failure_code"], 15)
         self.assertGreaterEqual(identity["cache_attempts"], 2)
         self.assertGreaterEqual(identity["self_marked"], 2)
         self.assertGreaterEqual(identity["known_other"], 1)
