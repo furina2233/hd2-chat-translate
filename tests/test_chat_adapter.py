@@ -201,6 +201,14 @@ end
 
 -- 初次重同步覆盖全槽；稳态只重试latest两次，其余计划每次轮转两个槽。
 prepare_widget_case()
+assert(find_region(tonumber(module_base) + 0x21D4160)
+    and find_region(tonumber(module_base) + 0x21D4160).type == 0x1000000
+    and find_region(tonumber(module_base) + 0x21D4160).allocation_base == tonumber(module_base))
+find_region(tonumber(module_base) + 0x21D4160).protect = 0x20
+observer_read_budget = 0
+assert(observer_read(tonumber(module_base) + 0x21D4160, 16) == nil,
+    "ordinary observer_read accepted the executable-protected palette vector")
+observer_read_budget = 0
 translate_adapter.test_scan_hint.write_history(1, 64)
 translate_adapter.test_scan_hint.initial_plan = translate_adapter.scan_plan()
 assert(type(translate_adapter.test_scan_hint.initial_plan) == "table" and translate_adapter.test_scan_hint.initial_plan.owner_id > 0
@@ -209,7 +217,8 @@ assert(type(translate_adapter.test_scan_hint.initial_plan) == "table" and transl
 assert(translate_identity.state.cache_ready and translate_identity.state.signature_ready
     and translate_identity.state.cache_name == identity_fixture.local_name
     and translate_identity.state.cache_palette == identity_fixture.colors[0]
-    and identity_signature_reads == 6,
+    and identity_signature_reads == 6 and identity_signature_fixture.__constant_mock.reads >= 2
+    and identity_signature_fixture.__constant_mock.exec_reads >= 2,
     "stable initial solo identity was not cached behind all six signature gates")
 translate_adapter.test_scan_hint.owner_before = translate_adapter.test_scan_hint.initial_plan.owner_id
 translate_adapter.test_scan_hint.covered_slots = {}
@@ -960,6 +969,55 @@ do
         and identity_state.last_failure_code == 0,
         "cache did not retry after initial roster read failure")
 
+    -- 模块常量首次读取失败和稳定复核变化分别报告限定阶段码。
+    identity_state.phase = "pending"
+    identity_state.cache_ready = false
+    identity_state.cache_stopped = false
+    identity_state.cache_name = nil
+    identity_state.cache_palette = nil
+    identity_state.started_ms = observer_now
+    identity_state.next_attempt_ms = nil
+    identity_state.last_failure_code = 0
+    identity_fixture.set_world({{name = identity_fixture.local_name}}, 0)
+    prepare_widget_case()
+    translate_adapter.test_scan_hint.write_history(2, 4)
+    identity_signature_fixture.__constant_mock.fail_rva = 0x21D4160
+    translate_adapter.scan_plan()
+    identity_signature_fixture.__constant_mock.fail_rva = nil
+    assert(not identity_state.cache_ready and identity_state.last_failure_code == 14,
+        "module constant read failure did not report stage 14")
+
+    identity_state.phase = "pending"
+    identity_state.cache_ready = false
+    identity_state.cache_stopped = false
+    identity_state.cache_name = nil
+    identity_state.cache_palette = nil
+    identity_state.started_ms = observer_now
+    identity_state.next_attempt_ms = nil
+    identity_signature_fixture.__constant_mock.reads_by_rva[0x21D4160] = 0
+    identity_signature_fixture.__constant_mock.change_rva = 0x21D4160
+    prepare_widget_case()
+    translate_adapter.test_scan_hint.write_history(2, 4)
+    translate_adapter.scan_plan()
+    identity_signature_fixture.__constant_mock.change_rva = nil
+    assert(not identity_state.cache_ready and identity_state.last_failure_code == 15,
+        "module constant verification change did not report stage 15")
+
+    identity_state.phase = "pending"
+    identity_state.cache_ready = false
+    identity_state.cache_stopped = false
+    identity_state.cache_name = nil
+    identity_state.cache_palette = nil
+    identity_state.started_ms = observer_now
+    identity_state.next_attempt_ms = nil
+    identity_signature_fixture.__constant_mock.reads_by_rva[0x21D4160] = 0
+    observer_now = observer_now + 1000
+    prepare_widget_case()
+    translate_adapter.test_scan_hint.write_history(2, 4)
+    translate_adapter.scan_plan()
+    assert(identity_state.cache_ready and identity_state.last_failure_code == 0,
+        "successful module constant cache did not clear the failure code")
+
     -- 缓存完成后，后台scan_plan继续读取历史但不再接触sender roster。
     identity_fixture.set_world({{name = identity_fixture.local_name}}, 0)
     prepare_widget_case()
@@ -1424,11 +1482,37 @@ local translate_owned_tokens = {}
 local translate_file_sequence = 0
 local identity_signature_fixture = {__IDENTITY_SIGNATURE_ROWS__}
 local identity_signature_reads = 0
+identity_signature_fixture.__constant_mock = {reads = 0, exec_reads = 0, reads_by_rva = {}}
 local function read_memory(rva, length, executable)
-    identity_signature_reads = identity_signature_reads + 1
-    if executable ~= true then return nil end
-    local bytes = identity_signature_fixture[rva]
-    if type(bytes) ~= "string" or #bytes ~= length then return nil end
+    if executable == true then
+        identity_signature_reads = identity_signature_reads + 1
+        local bytes = identity_signature_fixture[rva]
+        if type(bytes) ~= "string" or #bytes ~= length then return nil end
+        return bytes
+    end
+    if executable ~= false or length ~= 16
+        or (rva ~= 0x21D4160 and rva ~= 0x21D4170
+            and rva ~= 0x21D4180 and rva ~= 0x21D4190) then return nil end
+    identity_signature_fixture.__constant_mock.reads = identity_signature_fixture.__constant_mock.reads + 1
+    local address = tonumber(module_base) + rva
+    local region = find_region(address)
+    if not region or address + length > region.base + region.size
+        or region.allocation_base ~= tonumber(module_base) or region.type ~= 0x1000000
+        or region.state ~= 0x1000
+        or (region.protect ~= 0x02 and region.protect ~= 0x04 and region.protect ~= 0x08
+            and region.protect ~= 0x20 and region.protect ~= 0x40 and region.protect ~= 0x80) then
+        return nil
+    end
+    if region.protect == 0x20 or region.protect == 0x40 or region.protect == 0x80 then
+        identity_signature_fixture.__constant_mock.exec_reads = identity_signature_fixture.__constant_mock.exec_reads + 1
+    end
+    local count = (identity_signature_fixture.__constant_mock.reads_by_rva[rva] or 0) + 1
+    identity_signature_fixture.__constant_mock.reads_by_rva[rva] = count
+    if identity_signature_fixture.__constant_mock.fail_rva == rva then return nil end
+    local bytes = ffi.string(region.data + (address - region.base), length)
+    if identity_signature_fixture.__constant_mock.change_rva == rva and count == 2 then
+        return string.rep("Q", 16)
+    end
     return bytes
 end
 local translate_layout

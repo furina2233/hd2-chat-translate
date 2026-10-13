@@ -1845,6 +1845,15 @@ local function initialize_probe()
     local IDENTITY_ROSTER_COUNT = 8
     local IDENTITY_ROSTER_STRIDE = 0xC0
     local IDENTITY_PALETTE_LIMIT = 64
+    local function observer_identity_read_constant(vector_rva)
+        if vector_rva ~= 0x21D4160 and vector_rva ~= 0x21D4170
+            and vector_rva ~= 0x21D4180 and vector_rva ~= 0x21D4190 then
+            return nil
+        end
+        local ok, bytes = pcall(read_memory, vector_rva, 16, false)
+        if not ok or type(bytes) ~= "string" or #bytes ~= 16 then return nil end
+        return bytes
+    end
 
     local function observer_identity_increment(name)
         local value = translate_identity_state[name]
@@ -1969,11 +1978,11 @@ local function initialize_probe()
         local vector_rva = 0x21D4160 + selector * 16
         local vector_address = observer_add(module_base_number, vector_rva)
         if not vector_address then return nil, 14 end
-        local palette = observer_read(vector_address, 16)
+        local palette = observer_identity_read_constant(vector_rva)
         if not palette then return nil, 14 end
         local verify_count = observer_read(count_address, 4)
         local verify_entries = observer_read(entries_address, #entries)
-        local verify_palette = observer_read(vector_address, 16)
+        local verify_palette = observer_identity_read_constant(vector_rva)
         if not verify_count or verify_count ~= count_bytes or not verify_entries or verify_entries ~= entries
             or not verify_palette or verify_palette ~= palette or not observer_identity_verify_base(snapshot) then
             return nil, 15
