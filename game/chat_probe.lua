@@ -1579,7 +1579,8 @@ local function initialize_probe()
 
     local function observer_widget_verify_values(
         context, count_address, count_bytes, entries_address, entries_bytes,
-        event_address, event_bytes, body_address, body_bytes
+        event_address, event_bytes, body_address, body_bytes,
+        sender_name_address, sender_name_bytes, sender_palette_address, sender_palette_bytes
     )
         local stable, reason = observer_widget_verify_base(
             context, count_address, count_bytes, entries_address, entries_bytes)
@@ -1592,7 +1593,46 @@ local function initialize_probe()
             if not verify_body then return false, "read_failed" end
             if verify_body ~= body_bytes then return false, "unstable" end
         end
+        if sender_name_bytes ~= nil then
+            local verify_name = observer_read(sender_name_address, 129)
+            if not verify_name then return false, "read_failed" end
+            if verify_name ~= sender_name_bytes then return false, "unstable" end
+        end
+        if sender_palette_bytes ~= nil then
+            local verify_palette = observer_read(sender_palette_address, 16)
+            if not verify_palette then return false, "read_failed" end
+            if verify_palette ~= sender_palette_bytes then return false, "unstable" end
+        end
         return true
+    end
+
+    local function observer_translate_decode_bounded_name(bytes, allow_truncated)
+        if type(bytes) ~= "string" or #bytes ~= 129 then return nil end
+        local terminator = bytes:find("\0", 1, true)
+        local name
+        if terminator then
+            name = bytes:sub(1, terminator - 1)
+        elseif allow_truncated == true then
+            name = bytes:sub(1, 128)
+            if translate_core and type(translate_core.valid_text) == "function"
+                and not translate_core.valid_text(name, 128)
+                and bytes:byte(129) >= 0x80 and bytes:byte(129) <= 0xbf then
+                local index = #name
+                while index > 0 do
+                    local byte = name:byte(index)
+                    if byte < 0x80 or byte > 0xbf then break end
+                    index = index - 1
+                end
+                if index > 0 then name = name:sub(1, index - 1) end
+            end
+        else
+            return nil
+        end
+        if name ~= "" and (not translate_core or type(translate_core.valid_text) ~= "function"
+            or not translate_core.valid_text(name, 128)) then
+            return nil
+        end
+        return name
     end
 
     local function observer_widget_read_widget_slot(slot, allow_body)
@@ -1778,6 +1818,289 @@ local function initialize_probe()
         end
         return "no_match"
     end
+
+    local translate_identity = (function()
+    local TRANSLATE_IDENTITY_SIGNATURES = {
+        {0x12F2F9B, "4C8B1D369F180233C049391B7417FFC04981C3C000000083F80872ED"},
+        {0x185D73D, "41B881000000498BD1488BCEE8B2E28700488D9680000000448BC30FB60224C03C8075110FB642FF488D52FF24C041FFC03C8074EF492BF033D2488D8E81000000E81DD38200"},
+        {0x185D79C, "488B44245033D20F28000F11843998000000"},
+        {0x1382650, "4883EC28488B05B5992B014833C448894424104C8B0D86A80F024C8BD233C0418B919063010085D27416498D89986301004C39017435FFC04883C1203BC272F1"},
+        {0x13826BB, "48C1E005428B8C08AC63010083F90473C48BC1488D0D8B1AE5004803C04803C00F1004C1"},
+        {0x13829F0, "488B05F9A40F024533C94C8B1DD7A40F02458BC1498BCB4C8B9098B3000066904C3911741341FFC04881C1C00000004183F80872EB"},
+    }
+    local translate_identity_state = {
+        phase = "pending",
+        signature_checked = false,
+        signature_ready = false,
+        cache_ready = false,
+        cache_stopped = false,
+        cache_attempts = 0,
+        submit_checks = 0,
+        self_marked = 0,
+        known_other = 0,
+        fallback = 0,
+    }
+    local IDENTITY_ZERO_KEY = string.rep("\0", 8)
+    local IDENTITY_ROSTER_COUNT = 8
+    local IDENTITY_ROSTER_STRIDE = 0xC0
+    local IDENTITY_PALETTE_LIMIT = 64
+
+    local function observer_identity_increment(name)
+        local value = translate_identity_state[name]
+        if type(value) == "number" and value < 9007199254740991 then
+            translate_identity_state[name] = value + 1
+        end
+    end
+
+    local function observer_identity_hex_bytes(hex)
+        if type(hex) ~= "string" or #hex == 0 or #hex % 2 ~= 0 then return nil end
+        local output = {}
+        for index = 1, #hex, 2 do
+            local value = tonumber(hex:sub(index, index + 1), 16)
+            if value == nil then return nil end
+            output[#output + 1] = string.char(value)
+        end
+        return table.concat(output)
+    end
+
+    local function observer_translate_identity_signature_gate()
+        if translate_identity_state.signature_checked then
+            return translate_identity_state.signature_ready
+        end
+        translate_identity_state.signature_checked = true
+        for _, item in ipairs(TRANSLATE_IDENTITY_SIGNATURES) do
+            local expected = observer_identity_hex_bytes(item[2])
+            if not expected then return false end
+            local ok, actual = pcall(read_memory, item[1], #expected, true)
+            if not ok or actual ~= expected then return false end
+        end
+        translate_identity_state.signature_ready = true
+        return true
+    end
+
+    local function observer_identity_verify_base(snapshot)
+        local roster_pointer = observer_read_pointer(snapshot.roster_global)
+        local getter_root = observer_read_pointer(snapshot.getter_global)
+        if roster_pointer ~= snapshot.roster_pointer or getter_root ~= snapshot.getter_root then return false end
+        local local_peer = observer_add(snapshot.getter_root, 0xB398)
+        if not local_peer then return false end
+        local local_key = observer_read(local_peer, 8)
+        if not local_key or local_key ~= snapshot.local_key then return false end
+        local roster = observer_read(snapshot.roster_pointer, IDENTITY_ROSTER_COUNT * IDENTITY_ROSTER_STRIDE)
+        return roster ~= nil and roster == snapshot.roster_bytes
+    end
+
+    local function observer_identity_read_base()
+        local roster_global = observer_add(module_base_number, 0x347CED8)
+        local getter_global = observer_add(module_base_number, 0x347CEF0)
+        if not roster_global or not getter_global then return nil end
+        local roster_pointer = observer_read_pointer(roster_global)
+        local getter_root = observer_read_pointer(getter_global)
+        if not roster_pointer or not getter_root then return nil end
+        local local_peer_address = observer_add(getter_root, 0xB398)
+        if not local_peer_address then return nil end
+        local local_key = observer_read(local_peer_address, 8)
+        if not local_key or local_key == IDENTITY_ZERO_KEY then return nil end
+        local roster_bytes = observer_read(roster_pointer, IDENTITY_ROSTER_COUNT * IDENTITY_ROSTER_STRIDE)
+        if not roster_bytes then return nil end
+
+        local peers_by_key = {}
+        local peers = {}
+        for index = 0, IDENTITY_ROSTER_COUNT - 1 do
+            local offset = index * IDENTITY_ROSTER_STRIDE
+            local key = roster_bytes:sub(offset + 1, offset + 8)
+            -- 只把非零身份键和非空合法姓名组成的槽作为可识别发送者。
+            if key ~= IDENTITY_ZERO_KEY then
+                local name_bytes = roster_bytes:sub(offset + 9, offset + 137)
+                local name = observer_translate_decode_bounded_name(name_bytes, true)
+                if name == nil then return nil end
+                if name ~= "" then
+                    local previous = peers_by_key[key]
+                    if previous then
+                        if previous.name ~= name then return nil end
+                    else
+                        local peer = {key = key, name = name}
+                        peers_by_key[key] = peer
+                        peers[#peers + 1] = peer
+                    end
+                end
+            end
+        end
+
+        local local_peer = peers_by_key[local_key]
+        if not local_peer then return nil end
+        local snapshot = {
+            roster_global = roster_global,
+            getter_global = getter_global,
+            roster_pointer = roster_pointer,
+            getter_root = getter_root,
+            local_key = local_key,
+            local_name = local_peer.name,
+            peers = peers,
+            peer_count = #peers,
+            roster_bytes = roster_bytes,
+        }
+        if not observer_identity_verify_base(snapshot) then return nil end
+        return snapshot
+    end
+
+    local function observer_identity_read_local_palette(snapshot)
+        local count_address = observer_add(snapshot.getter_root, 0x16390)
+        local entries_address = observer_add(snapshot.getter_root, 0x16398)
+        if not count_address or not entries_address then return nil end
+        local count_bytes = observer_read(count_address, 4)
+        if not count_bytes then return nil end
+        local count = observer_u32(count_bytes, 0)
+        if count == nil or count < 1 or count > IDENTITY_PALETTE_LIMIT then return nil end
+        local entries = observer_read(entries_address, count * 0x20)
+        if not entries then return nil end
+        local matching_count = 0
+        local selector
+        for index = 0, count - 1 do
+            local offset = index * 0x20
+            if entries:sub(offset + 1, offset + 8) == snapshot.local_key then
+                matching_count = matching_count + 1
+                selector = observer_u32(entries, offset + 0x14)
+            end
+        end
+        if matching_count ~= 1 or selector == nil or selector >= 4 then return nil end
+
+        local vector_rva = 0x21D4160 + selector * 16
+        local vector_address = observer_add(module_base_number, vector_rva)
+        if not vector_address then return nil end
+        local palette = observer_read(vector_address, 16)
+        if not palette then return nil end
+        local verify_count = observer_read(count_address, 4)
+        local verify_entries = observer_read(entries_address, #entries)
+        local verify_palette = observer_read(vector_address, 16)
+        if not verify_count or verify_count ~= count_bytes or not verify_entries or verify_entries ~= entries
+            or not verify_palette or verify_palette ~= palette or not observer_identity_verify_base(snapshot) then
+            return nil
+        end
+        return palette
+    end
+
+    local function observer_translate_identity_cache_step()
+        local state = translate_identity_state
+        if state.phase ~= "pending" then return end
+        local now = observer_now
+        if type(now) ~= "number" or now ~= now or now == math.huge or now == -math.huge
+            or now < 0 or now ~= math.floor(now) then
+            state.phase = "stopped"
+            state.cache_stopped = true
+            return
+        end
+        if state.started_ms == nil then
+            state.started_ms = now
+        elseif now < state.started_ms or now - state.started_ms >= 60000 then
+            state.phase = "stopped"
+            state.cache_stopped = true
+            return
+        end
+        if state.next_attempt_ms ~= nil and now < state.next_attempt_ms then return end
+        state.next_attempt_ms = now + 1000
+        observer_identity_increment("cache_attempts")
+        if not observer_translate_identity_signature_gate() then
+            state.phase = "stopped"
+            state.cache_stopped = true
+            return
+        end
+
+        local snapshot = observer_identity_read_base()
+        if not snapshot then return end
+        if snapshot.peer_count > 1 then
+            state.phase = "stopped"
+            state.cache_stopped = true
+            return
+        end
+        if snapshot.peer_count ~= 1 then return end
+        local palette = observer_identity_read_local_palette(snapshot)
+        if not palette then return end
+        state.cache_name = snapshot.local_name
+        state.cache_palette = palette
+        state.cache_ready = true
+        state.phase = "ready"
+    end
+
+    local function observer_identity_verify_message(message, sender_name_address, sender_name_bytes,
+        sender_palette_address, sender_palette_bytes)
+        if type(message) ~= "table" or type(message.proof) ~= "table"
+            or type(message.proof.context) ~= "table" or message.proof.body ~= message.body
+            or message.proof.event_slot ~= message.event_slot then return false end
+        local proof = message.proof
+        local stable = observer_widget_verify_values(
+            proof.context, proof.count_address, proof.count_bytes, proof.entries_address, proof.entries_bytes,
+            proof.event_address, proof.event_bytes, proof.body_address, proof.body_bytes,
+            sender_name_address, sender_name_bytes, sender_palette_address, sender_palette_bytes)
+        return stable == true
+    end
+
+    local function observer_translate_identity_classify(message)
+        local state = translate_identity_state
+        if not state.cache_ready or state.phase ~= "ready" then return nil end
+        if not observer_identity_verify_message(message) then return nil end
+        local proof = message.proof
+        local sender_name_address = observer_add(proof.event_address, 0x14)
+        if not sender_name_address then return nil end
+        local sender_name_bytes = observer_read(sender_name_address, 129)
+        if not sender_name_bytes then return nil end
+        local sender_name = observer_translate_decode_bounded_name(sender_name_bytes)
+        if sender_name == nil then
+            observer_identity_verify_message(message, sender_name_address, sender_name_bytes)
+            return nil
+        end
+        if sender_name ~= state.cache_name then
+            if not observer_identity_verify_message(message, sender_name_address, sender_name_bytes) then return nil end
+            return false
+        end
+
+        local snapshot = observer_identity_read_base()
+        if not snapshot or snapshot.local_name ~= state.cache_name then return nil end
+
+        local duplicates = 0
+        for _, peer in ipairs(snapshot.peers) do
+            if peer.name == state.cache_name then duplicates = duplicates + 1 end
+        end
+        local result
+        local sender_palette_address
+        local sender_palette
+        if duplicates <= 1 then
+            result = true
+        else
+            local palette = observer_identity_read_local_palette(snapshot)
+            if not palette or palette ~= state.cache_palette then return nil end
+            sender_palette_address = observer_add(proof.event_address, 0x98)
+            if not sender_palette_address then return nil end
+            sender_palette = observer_read(sender_palette_address, 16)
+            if not sender_palette then return nil end
+            result = sender_palette == state.cache_palette
+        end
+        if not observer_identity_verify_message(message, sender_name_address, sender_name_bytes,
+            sender_palette_address, sender_palette) then return nil end
+        if not observer_identity_verify_base(snapshot) then return nil end
+        return result
+    end
+
+    local function observer_translate_is_self_message(message)
+        observer_identity_increment("submit_checks")
+        local ok, result = pcall(observer_translate_identity_classify, message)
+        if not ok then result = nil end
+        if result == true then
+            observer_identity_increment("self_marked")
+        elseif result == false then
+            observer_identity_increment("known_other")
+        else
+            observer_identity_increment("fallback")
+        end
+        return result
+    end
+
+    return {
+        state = translate_identity_state,
+        cache_step = observer_translate_identity_cache_step,
+        is_self_message = observer_translate_is_self_message,
+    }
+    end)()
 
     local function observer_display_setter(widget_argument, buffer)
         if not DISPLAY_TEST_ENABLED or not observer_display_native_gate then return false end
@@ -2240,6 +2563,7 @@ local function initialize_probe()
         if context.active_count == 0 then
             local stable = observer_widget_verify_context(context)
             if not stable then return nil end
+            translate_identity.cache_step()
             translate_scan_state.owner_id = owner_id
             translate_scan_state.head = nil
             translate_scan_state.count = nil
@@ -2268,6 +2592,7 @@ local function initialize_probe()
         end
         local stable = observer_widget_verify_context(context)
         if not stable then return nil end
+        translate_identity.cache_step()
 
         local previous_head = translate_scan_state.head
         local previous_count = translate_scan_state.count
@@ -2615,6 +2940,26 @@ local function initialize_probe()
                 and value.baseline_remaining or 0,
             pending_count = observer_translate_safe_count(value.pending_count, 32) and value.pending_count or 0,
             counters = counters,
+            identity = {
+                signature_ready = translate_identity.state.signature_ready == true,
+                cache_ready = translate_identity.state.cache_ready == true,
+                cache_stopped = translate_identity.state.cache_stopped == true,
+                cache_attempts = observer_translate_safe_count(
+                    translate_identity.state.cache_attempts, 9007199254740991)
+                    and translate_identity.state.cache_attempts or 0,
+                submit_checks = observer_translate_safe_count(
+                    translate_identity.state.submit_checks, 9007199254740991)
+                    and translate_identity.state.submit_checks or 0,
+                self_marked = observer_translate_safe_count(
+                    translate_identity.state.self_marked, 9007199254740991)
+                    and translate_identity.state.self_marked or 0,
+                known_other = observer_translate_safe_count(
+                    translate_identity.state.known_other, 9007199254740991)
+                    and translate_identity.state.known_other or 0,
+                fallback = observer_translate_safe_count(
+                    translate_identity.state.fallback, 9007199254740991)
+                    and translate_identity.state.fallback or 0,
+            },
             layout = {
                 verified = translate_layout.verified == true,
                 reflows_confirmed = 0,
@@ -2995,6 +3340,7 @@ local function initialize_probe()
             return plan
         end
         adapter.submit = protect(observer_translate_publish_request, "submit")
+        adapter.is_self_message = translate_identity.is_self_message
         adapter.response = protect(observer_translate_read_response, "response")
         adapter.apply = protect(observer_translate_apply, "apply_total")
         adapter.cancel = protect(observer_translate_cancel)

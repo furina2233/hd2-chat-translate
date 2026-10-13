@@ -8,7 +8,7 @@
 - [game/chat_probe_core.lua](../game/chat_probe_core.lua) 校验固定游戏构建及代码签名，并限制内存读取。
 - [game/chat_translate_core.lua](../game/chat_translate_core.lua) 管理新消息、请求队列、响应、过期和回写状态。
 - [game/chat_http_native.lua](../game/chat_http_native.lua) 校验并加载随包嵌入的原生 DLL。
-- [game/settings.lua](../game/settings.lua) 向 Mod Options Menu 注册目标语言选项，不读取或控制翻译服务配置。
+- [game/settings.lua](../game/settings.lua) 向 Mod Options Menu 注册目标语言、启用、自己消息过滤和请求超时选项，不读取服务凭据。
 - [native/client.c](../native/client.c) 管理公开 ABI、后台线程、队列、缓存与限流；原生客户端各模块共同链接为一个 DLL。
 - [tools/build_package.py](../tools/build_package.py) 将 Lua addon 和原生模块构建为含前置或需单独安装前置的 Arsenal 安装包。
 
@@ -55,11 +55,11 @@
 
 ## 配置与 HTTP/JSON 协议
 
-首次有效提交由原生客户端启动一次后台初始化，读取服务配置的 Windows 持久环境变量：先读 HKCU\Environment，再读 HKLM\SYSTEM\CurrentControlSet\Control\Session Manager\Environment。若用户变量存在，即使值为空或无效，也不回退到系统变量；不读取进程继承值。每个进程只初始化一次；服务选择、地址、凭据和配置有效性由 C 管理，启用状态与请求超时来自已应用的 Mod Options Menu 设置。
+首次有效提交由原生客户端启动一次后台初始化，读取服务配置的 Windows 持久环境变量：先读 HKCU\Environment，再读 HKLM\SYSTEM\CurrentControlSet\Control\Session Manager\Environment。若用户变量存在，即使值为空或无效，也不回退到系统变量；不读取进程继承值。每个进程只初始化一次；服务选择、地址、凭据和配置有效性由 C 管理，启用状态、自己消息过滤和请求超时来自已应用的 Mod Options Menu 设置。
 
-HD2CT_API_URL 缺失或为空字符串时选择 FREE，使用固定端点且跳过 model、key、appid 读取；非空 URL 继续按原规则选择服务，纯空白仍按原校验处理。HD2CT_MODEL 非空时选择 AI 翻译；缺失、为空或仅含空白时选择机器翻译，按 URL 中忽略大小写的 google、baidu、youdao 依次匹配。已支持的 AI/机器翻译服务需要 HD2CT_API_URL 与 HD2CT_API_KEY，百度、有道还需要 HD2CT_APP_ID。模型名最多 256 字节，密钥与应用 ID 各最多 4096 字节，URL 最多 2048 字节。旧变量 HD2CT_ENABLED 与 HD2CT_TIMEOUT_SECONDS 不再读取，缺失或无效的 Mod Options Menu 启用项默认开启，超时项默认20秒，可选10、20、30秒。凭据保存在进程内供请求使用；配置无效或后台初始化失败时会清零，菜单关闭不会清理凭据或停止 worker。
+HD2CT_API_URL 缺失或为空字符串时选择 FREE，使用固定端点且跳过 model、key、appid 读取；非空 URL 继续按原规则选择服务，纯空白仍按原校验处理。HD2CT_MODEL 非空时选择 AI 翻译；缺失、为空或仅含空白时选择机器翻译，按 URL 中忽略大小写的 google、baidu、youdao 依次匹配。已支持的 AI/机器翻译服务需要 HD2CT_API_URL 与 HD2CT_API_KEY，百度、有道还需要 HD2CT_APP_ID。模型名最多 256 字节，密钥与应用 ID 各最多 4096 字节，URL 最多 2048 字节。旧变量 HD2CT_ENABLED 与 HD2CT_TIMEOUT_SECONDS 不再读取，缺失或无效的 Mod Options Menu 启用项和自己消息过滤项默认开启，超时项默认20秒，可选10、20、30秒。凭据保存在进程内供请求使用；配置无效或后台初始化失败时会清零，菜单关闭不会清理凭据或停止 worker。
 
-后台 worker 每次开始处理任务时，从 `%LOCALAPPDATA%\CowboyBingus\Helldivers2\Logs\ModOptionsMenu.values` 的同一份 primary/backup 文件快照读取本插件的目标语言、启用状态与超时。值缺失或无效时分别回退到简体中文、开启和20秒；启用值只接受小写 `true`/`false`，超时值是1起始的三项 choice 索引。可读且有记录的 primary 中若缺少某项或该项值无效，使用该项默认值，不从旧 backup 覆盖；primary 不可读、损坏或没有有效记录时才尝试 backup。提交、轮询和游戏线程不做该文件 I/O。
+后台 worker 每次开始处理任务时，从 `%LOCALAPPDATA%\CowboyBingus\Helldivers2\Logs\ModOptionsMenu.values` 的同一份 primary/backup 文件快照读取本插件的目标语言、启用状态、自己消息过滤状态与超时。值缺失或无效时分别回退到简体中文、开启、开启和20秒；启用及自己消息过滤值只接受小写 `true`/`false`，超时值是1起始的三项 choice 索引。可读且有记录的 primary 中若缺少某项或该项值无效，使用该项默认值，不从旧 backup 覆盖；primary 不可读、损坏或没有有效记录时才尝试 backup。提交、轮询和游戏线程不做该文件 I/O。
 
 AI 与已有机器翻译适配器要求 HTTPS；只有 localhost、127.0.0.0/8 和 ::1 可使用 HTTP。FREE 只允许固定端点使用远端 HTTP。AI 适配器把地址根路径补全为 /chat/completions，或把精确的 /v1、/v1/ 补全为 /v1/chat/completions。已有机器翻译适配器仅把根路径补全为各自接口；其他路径保持原样。拒绝普通服务 URL 中的凭据、查询、片段、反斜杠、空白和控制字符；禁用重定向、cookies 和自动认证。
 
@@ -71,15 +71,15 @@ AI 适配器使用 OpenAI-compatible Chat Completions 请求，只发送 `model`
 
 ## 原生任务接口
 
-ABI 2 的 DLL 只导出三个函数，签名见 [client.h](../native/client.h)：
+ABI 3 的 DLL 仍只导出三个函数，签名见 [client.h](../native/client.h)：
 
 | 接口 | 语义 |
 | --- | --- |
-| `HD2CT_Submit(token, body, bytes)` | 校验并接收任务，返回 1 表示入队；无效参数、重复 token、队列已满或锁忙返回 0。首次提交触发后台初始化，调用方不等待配置读取或网络请求。 |
+| `HD2CT_Submit(token, body, bytes, flags)` | 校验并接收任务，返回 1 表示入队；无效参数、重复 token、队列已满或锁忙返回 0。`flags` 的 `HD2CT_MESSAGE_SELF` 位标记已识别的自身消息；其他或无法确认的发送者使用0。首次提交触发后台初始化，调用方不等待配置读取或网络请求。 |
 | `HD2CT_Poll(token, out, capacity, written)` | 非阻塞轮询；返回 1 时写入结果，written 不含末尾 NUL。未完成、token 不存在、锁忙或缓冲区不足返回 0。读取结果后由调用方取消该 token 以释放槽位。 |
 | `HD2CT_Cancel(token)` | 取消任务或释放已完成槽位；token 不存在也返回 1，单项取消遇锁忙返回 0，可重试。传入 NULL 取消全部当前任务，锁忙时由 C 记录并延后处理，保留服务配置与工作线程。 |
 
-结果统一为 `OK\n译文`、精确的 `SKIP\n` 或 `ERR\n固定错误码`。Lua 对 OK 组合“原文 + 换行 + 译文： + 译文”，对 SKIP 保留原文并结束任务，对 ERR 显示短提示，不依据翻译方式或文本相等作决定。C 对服务响应解析后的 UTF-8 译文和原文按字节长度及内容作精确比较，相同则返回 SKIP，不去除空白、转换大小写或做 Unicode 归一化。菜单关闭后，开始处理的任务返回 SKIP，不查缓存、不占限流、不发 HTTP，也不缓存该结果；服务配置仍保留，重新启用后即可继续。普通缺失、无效或未知服务配置由 worker 对已接收任务返回固定错误；bootstrap、线程创建或 WinHTTP session 硬失败由 Poll 返回 `SERVICE_ERROR`，任务 token 保留供取消。
+结果统一为 `OK\n译文`、精确的 `SKIP\n` 或 `ERR\n固定错误码`。Lua 对 OK 组合“原文 + 换行 + 译文： + 译文”，对 SKIP 保留原文并结束任务，对 ERR 显示短提示，不依据翻译方式或文本相等作决定。C 对服务响应解析后的 UTF-8 译文和原文按字节长度及内容作精确比较，相同则返回 SKIP，不去除空白、转换大小写或做 Unicode 归一化。`ignore_self` 开启且 Submit 标记了自身消息时，worker 返回 SKIP，Lua 保留原文；该判断不发起 HTTP 请求。菜单关闭时，开始处理的任务也返回 SKIP，不查缓存、不占限流、不发 HTTP，也不缓存该结果；服务配置仍保留，重新启用后即可继续。普通缺失、无效或未知服务配置由 worker 对已接收任务返回固定错误；bootstrap、线程创建或 WinHTTP session 硬失败由 Poll 返回 `SERVICE_ERROR`，任务 token 保留供取消。
 
 后台初始化在普通线程中执行，不在 DllMain 中读取注册表或执行网络工作。初始化后总是尝试启动两个 WinHTTP worker，包括服务配置缺失、无效或未知时；配置错误任务不会创建 HTTP 请求。worker 为每个任务快照启用状态和超时，已开始的任务不会被后续 APPLY 改写。请求超时从开始网络请求时起算，截止时间是该任务设置的请求超时与提交后60秒总时限两者中的较早值；Lua pending TTL 也为60秒。Lua 的心跳只表示传输模块已加载且本地时钟有效。异常、结束或复用 Lua 实例时，通过取消接口清理任务；C 服务生命周期独立于菜单启用项。
 
@@ -106,15 +106,15 @@ FREE 的固定端点为 `http://120.55.188.249:8080/translate`，key1 和 20 字
 
 ## 游戏内设置
 
-菜单使用 [Mod Options Menu v1.2](https://github.com/CowboyBingus/ModOptionsMenu/releases/tag/v1.2) 的原生 MODS 页、toggle/choice 类型及 APPLY 保存行为。安装包合并其未经修改的 Lua 资源和 0BSD 许可；三个选项 ID 分别为 `hd2chattranslate.target_language`、`hd2chattranslate.enabled`、`hd2chattranslate.timeout`，共用 mod_id `hd2chattranslate`。默认值分别为索引1（简体中文）、true、索引2（20秒）。使用说明见[游戏内设置](settings.md)。
+菜单使用 [Mod Options Menu v1.2](https://github.com/CowboyBingus/ModOptionsMenu/releases/tag/v1.2) 的原生 MODS 页、toggle/choice 类型及 APPLY 保存行为。安装包合并其未经修改的 Lua 资源和 0BSD 许可；四个选项 ID 分别为 `hd2chattranslate.target_language`、`hd2chattranslate.enabled`、`hd2chattranslate.ignore_self`、`hd2chattranslate.timeout`，共用 mod_id `hd2chattranslate`。默认值分别为索引1（简体中文）、true、true、索引2（20秒）。使用说明见[游戏内设置](settings.md)。
 
 菜单文本由[resources/menu_locales.json](../resources/menu_locales.json)提供15种游戏UI语言的完整字符串；[tools/scripts/menu_locales.py](../tools/scripts/menu_locales.py)在构建时严格校验locale集合、字段、长度和超时占位符。打包器将一次读取的本地化快照编码进设置Lua模块。每个展示回调只用 rawget 读取 `_G.BingusTranslations` 的 version 与 canonical `game_language`，按精确locale、基础语言、英语的顺序选择文本；未知或无效注册表安全回退英语。回调不创建或修改注册表，也不读取游戏内存或Steam设置。MOM在每次打开ESC菜单时更新语言并重新求值函数文本，因此游戏语言变更在重新打开菜单后生效；游戏运行期间不读取语言文件。
 
-[resources/target_languages.json](../resources/target_languages.json) 的 schema 2 是三项菜单定义、AI 目标语言与三个机器翻译语言码的共同来源。[tools/scripts/target_languages.py](../tools/scripts/target_languages.py) 校验目录并在原生构建目录生成 C 表头，包含选项 ID、默认值和超时映射；打包时从同一目录生成 Lua 菜单项。语言保存值是从 1 开始的索引，已有语言顺序必须保持稳定。构建 metadata 的 `target_languages_sha256` 覆盖整个目录，安装包构建器拒绝 DLL 与菜单目录不一致的组合。
+[resources/target_languages.json](../resources/target_languages.json) 的 schema 2 是四项菜单定义、AI 目标语言与三个机器翻译语言码的共同来源。[tools/scripts/target_languages.py](../tools/scripts/target_languages.py) 校验目录并在原生构建目录生成 C 表头，包含选项 ID、默认值和超时映射；打包时从同一目录生成 Lua 菜单项。语言保存值是从 1 开始的索引，已有语言顺序必须保持稳定。构建 metadata 的 `target_languages_sha256` 覆盖整个目录，安装包构建器拒绝 DLL 与菜单目录不一致的组合。
 
 C 在后台 worker 开始处理任务时读取 `%LOCALAPPDATA%\CowboyBingus\Helldivers2\Logs\ModOptionsMenu.values`，不在 Submit、Poll 或游戏更新帧中执行设置文件 I/O。只校验本插件的选项值；主文件缺失、不可读或没有制表符分隔记录时尝试 `.bak`，主文件已有记录而本插件项缺失或无效时直接使用默认中文。其他模组的开关、滑块等值不会导致读取旧备份。读取上限为 512 KiB，拒绝非普通文件与 reparse point，并允许菜单原子替换文件。此路径对应随包 loader 的默认日志目录；不支持其他 loader 自定义的日志目录。
 
-目标语言在该任务内保持不变，已开始的请求不会因 APPLY 改变，后续开始处理的任务使用新选择；缓存按语言隔离。Lua 设置模块不读取已选值、服务凭据或启用状态；它只为菜单展示读取上述本地化注册表。公开 C ABI 仍只有提交、轮询、取消三个函数。
+目标语言、启用状态、自己消息过滤和超时在该任务内保持不变，已开始的请求不会因 APPLY 改变，后续开始处理的任务使用新选择；缓存按语言隔离。Lua 设置模块不读取这些选项或服务凭据；它只为菜单展示读取上述本地化注册表。公开 C ABI 仍只有提交、轮询、取消三个函数。
 
 ## 调度、队列与数据上限
 
@@ -136,11 +136,13 @@ C 在后台 worker 开始处理任务时读取 `%LOCALAPPDATA%\CowboyBingus\Hell
 
 请求前会检查正文属性、活动事件环指针和事件类型。类型不匹配的槽样本在提交请求前被过滤；slot_event_filtered 计数的是采样次数，同一可见事件可能多次采样，不能当作通知数量。没有基于“发现”“巢穴”等正文关键词的过滤规则。当前 tag 的代码路径关联不足以证明它专属于玩家消息或系统通知类别，因而不能据此保证完整分类。
 
+缓存可用时，Lua 在新消息将要提交前读取身份事实，并把可确认的自身消息标记传给 C；只有该任务的 `ignore_self` 设置开启时，worker 才跳过请求。首次稳定的单人发送者列表快照用于保存玩家姓名和当时的颜色。若当前发送者列表中该姓名唯一，则按姓名识别自身消息；若出现同名，先确认当前本地姓名仍匹配且本地颜色仍等于启动时记录的颜色，再比较事件姓名和颜色。同名情况下自己的颜色已改变，或所需的姓名、颜色、发送者列表及事件快照无法确认时，消息照常翻译。初始化通过既有扫描计划重试，最多持续60秒；成功保存或确认已有多个发送者后，不再后台读取身份列表。缓存初始化期间只借用既有扫描计划尝试获取快照；缓存完成或停止后，身份读取只发生在新消息将要提交前，不增加常规扫描对旧消息的姓名或颜色读取。身份字段受固定构建签名门禁保护，签名不匹配时不启用该过滤。状态报告中的 identity 项只包含门禁与缓存状态布尔值及计数，不包含姓名、peer key 或颜色内容。
+
 事件记录没有已证实的唯一 epoch。根指针、事件槽、控件属性、正文和历史的多次核验可以减少误回写风险，但无法完全排除同槽快速复用且正文又相同的情况。后续游戏构建不在当前兼容范围内。
 
 ## 原生模块安全加载
 
-DLL 随 Lua addon 嵌入，构建器要求 metadata 的 ABI 为 2，并核验字节长度和 SHA-256。Lua 侧将其写入 %LOCALAPPDATA%\HD2ChatTranslate\native 目录，DLL 文件名使用其 SHA-256 值；再从已核验的绝对路径使用 LoadLibraryExW，并将依赖搜索限制在 System32，按三个任务接口解析函数。路径及文件句柄拒绝 reparse point；文件大小和哈希在加载前复核。C 在启动后台初始化前使用 GetModuleHandleExW pin 保持至游戏进程结束。
+DLL 随 Lua addon 嵌入，构建器要求 metadata 的 ABI 为 3，并核验字节长度和 SHA-256。Lua 侧将其写入 %LOCALAPPDATA%\HD2ChatTranslate\native 目录，DLL 文件名使用其 SHA-256 值；再从已核验的绝对路径使用 LoadLibraryExW，并将依赖搜索限制在 System32，按三个任务接口解析函数。路径及文件句柄拒绝 reparse point；文件大小和哈希在加载前复核。C 在启动后台初始化前使用 GetModuleHandleExW pin 保持至游戏进程结束。
 
 Lua FFI 的 BY_HANDLE_FILE_INFORMATION 定义为 52 字节，并核对 dwVolumeSerialNumber 偏移 28、nFileSizeHigh 偏移 32、nFileIndexLow 偏移 48。原生构建限定为 Win64 PE、三个任务接口导出和 Windows 系统依赖，不接受额外 MinGW 运行库。
 

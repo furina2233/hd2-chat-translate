@@ -500,6 +500,10 @@ local function submit_message(state, message)
     end
     bump(state, "submit_attempts")
     local flags = message.is_self == true and 1 or 0
+    if type(state.adapter.is_self_message) == "function" then
+        local identity_ok, is_self = pcall(state.adapter.is_self_message, message)
+        flags = identity_ok and is_self == true and 1 or 0
+    end
     local ok, submitted, error_code = pcall(state.adapter.submit, token, message.body, flags)
     if not ok then
         bump(state, "adapter_errors")

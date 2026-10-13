@@ -24,7 +24,7 @@ local function make_message(slot, body, event_slot, owner_id, is_self)
     }
 end
 
-local function new_env()
+local function new_env(identity_callback)
     local env = {
         now = 0,
         heartbeat_age = 0,
@@ -35,6 +35,8 @@ local function new_env()
         response_throw = false,
         apply_throw = false,
         submit_calls = {},
+        identity_calls = 0,
+        identity_message = nil,
         response_calls = {},
         apply_calls = {},
         cancel_calls = {},
@@ -82,6 +84,13 @@ local function new_env()
             env.output_calls[#env.output_calls + 1] = json_core.encode_json(manifest)
         end,
     }
+    if identity_callback then
+        adapter.is_self_message = function(message)
+            env.identity_calls = env.identity_calls + 1
+            env.identity_message = message
+            return identity_callback(message)
+        end
+    end
     env.state = core.new(adapter, {target_verified = true, session_id = "test_session",
         scan_interval_ms = 0, response_poll_ms = 0})
     return env
@@ -138,6 +147,24 @@ local function one_baseline_and_chinese_case()
         step(flag_env)
         return flag_env.submit_calls[1] and flag_env.submit_calls[1].flags or -1
     end
+    local function submit_callback_case(callback, message_is_self)
+        local flag_env = new_env(callback)
+        finish_baseline(flag_env)
+        local calls_after_baseline = flag_env.identity_calls
+        local message = make_message(0, "callback flag source", 0, 77, message_is_self)
+        flag_env.messages[0] = message
+        step(flag_env)
+        flag_env.state.next_slot = 0
+        step(flag_env)
+        return {
+            flags = flag_env.submit_calls[1] and flag_env.submit_calls[1].flags or -1,
+            baseline_calls = calls_after_baseline,
+            callback_calls = flag_env.identity_calls,
+            same_message = flag_env.identity_message == message,
+            submits = #flag_env.submit_calls,
+            failures = counters(flag_env).submit_failures,
+        }
+    end
     return {
         after_baseline = after_baseline,
         submits = #env.submit_calls,
@@ -146,6 +173,12 @@ local function one_baseline_and_chinese_case()
         self_flag = env.submit_calls[1] and env.submit_calls[1].flags or -1,
         false_flag = submit_flag_for(false),
         unknown_flag = submit_flag_for(nil),
+        identity_callbacks = {
+            self_result = submit_callback_case(function() return true end, false),
+            other_result = submit_callback_case(function() return false end, true),
+            unknown_result = submit_callback_case(function() return nil end, true),
+            exception = submit_callback_case(function() error("PRIVATE_IDENTITY_CALLBACK") end, true),
+        },
         cancels = #env.cancel_calls,
         unchanged = manifest.counters.translation_unchanged,
         duplicates = manifest.counters.duplicates,
@@ -459,6 +492,17 @@ class ChatTranslateCoreTests(unittest.TestCase):
         self.assertEqual(baseline["self_flag"], 1)
         self.assertEqual(baseline["false_flag"], 0)
         self.assertEqual(baseline["unknown_flag"], 0)
+        callbacks = baseline["identity_callbacks"]
+        self.assertEqual(callbacks["self_result"]["flags"], 1)
+        self.assertEqual(callbacks["other_result"]["flags"], 0)
+        self.assertEqual(callbacks["unknown_result"]["flags"], 0)
+        self.assertEqual(callbacks["exception"]["flags"], 0)
+        for case in callbacks.values():
+            self.assertEqual(case["baseline_calls"], 0)
+            self.assertEqual(case["callback_calls"], 1)
+            self.assertTrue(case["same_message"])
+            self.assertEqual(case["submits"], 1)
+            self.assertEqual(case["failures"], 0)
         self.assertEqual(baseline["applies"], 0)
         self.assertEqual(baseline["unchanged"], 0)
         self.assertEqual(baseline["cancels"], 1)

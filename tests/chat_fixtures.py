@@ -548,4 +548,95 @@ local function prepare_widget_case(options)
     observer_read_budget = 0
     return event_slot, pointer
 end
+
+local identity_fixture = (function()
+    local local_key = pack64(0x1122334455667788)
+    local other_key = pack64(0x8877665544332211)
+    local module = tonumber(module_base)
+    local roster_global = module + 0x347CED8
+    local getter_global = module + 0x347CEF0
+    local global_page = math.floor(roster_global / 4096) * 4096
+    add_region(global_page, 4096, module, 0x1000000, 0x02)
+
+    local roster = 0x8000000
+    local getter_root = 0x9000000
+    local roster_region = add_region(roster, 8 * 0xC0, roster, 0x20000, 0x04)
+    local getter_region = add_region(getter_root, 0x17000, getter_root, 0x20000, 0x04)
+    local color_page = module + 0x21D4000
+    local default_page = module + 0x23CA000
+    add_region(color_page, 4096, module, 0x1000000, 0x02)
+    add_region(default_page, 4096, module, 0x1000000, 0x02)
+    local colors = {
+        [0] = string.rep("A", 16),
+        [1] = string.rep("B", 16),
+        [2] = string.rep("C", 16),
+        [3] = string.rep("D", 16),
+    }
+    for selector = 0, 3 do
+        write_bytes(module + 0x21D4160 + selector * 16, colors[selector])
+    end
+    local fallback_color = string.rep("Z", 16)
+    write_bytes(module + 0x23CA600, fallback_color)
+
+    local function bounded_name(name)
+        assert(type(name) == "string" and #name > 0 and #name <= 128)
+        return name .. "\0" .. string.rep("\0", 128 - #name)
+    end
+
+    local function set_world(players, local_selector)
+        write_bytes(roster_global, pack64(roster))
+        write_bytes(getter_global, pack64(getter_root))
+        write_bytes(getter_root + 0xB398, local_key)
+        write_bytes(roster, string.rep("\0", 8 * 0xC0))
+        for index, player in ipairs(players) do
+            local slot = index - 1
+            local key = player.key or local_key
+            write_bytes(roster + slot * 0xC0, key .. bounded_name(player.name))
+        end
+        local count = #players
+        local entries = getter_root + 0x16398
+        write_bytes(getter_root + 0x16390, pack32(count))
+        write_bytes(entries, string.rep("\0", 64 * 0x20))
+        for index, player in ipairs(players) do
+            local key = player.key or local_key
+            local selector = key == local_key and local_selector or (player.selector or 1)
+            local row = key .. string.rep("\0", 12) .. pack32(selector) .. string.rep("\0", 8)
+            write_bytes(entries + (index - 1) * 0x20, row)
+        end
+    end
+
+    local function set_event(index, name, palette)
+        local record = widget_record_address(index)
+        write_bytes(record + 0x14, bounded_name(name))
+        write_bytes(record + 0x98, palette or colors[0])
+    end
+
+    local function set_raw_local_name(bytes)
+        assert(type(bytes) == "string" and #bytes == 129)
+        write_bytes(roster + 8, bytes)
+    end
+
+    local function event_palette(selector)
+        return colors[selector]
+    end
+
+    local function counts()
+        return roster, getter_root + 0x16390, roster_region, getter_region
+    end
+
+    set_world({{name = "SoloPeer"}}, 0)
+    return {
+        set_world = set_world,
+        set_event = set_event,
+        set_raw_local_name = set_raw_local_name,
+        event_palette = event_palette,
+        local_key = local_key,
+        other_key = other_key,
+        local_name = "SoloPeer",
+        colors = colors,
+        counts = counts,
+        roster = roster,
+        palette_count = getter_root + 0x16390,
+    }
+end)()
 '''

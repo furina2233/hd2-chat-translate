@@ -167,6 +167,8 @@ translate_adapter.heartbeat()
 prepare_widget_case({body = widget_body_bytes("Meet us at extraction")})
 local direct_status = observer_widget_read_widget_slot(0, true)
 assert(direct_status == "ok", tostring(direct_status))
+assert(read_counts[widget_event_record + 0x14] == nil and read_counts[widget_event_record + 0x98] == nil,
+    "baseline/background message read sampled sender identity fields")
 prepare_widget_case({body = widget_body_bytes("Meet us at extraction")})
 local status, message = translate_adapter.read_slot(0)
 assert(status == "ok" and message.body == "Meet us at extraction", tostring(status) .. ":" .. tostring(message and message.body))
@@ -204,6 +206,11 @@ translate_adapter.test_scan_hint.initial_plan = translate_adapter.scan_plan()
 assert(type(translate_adapter.test_scan_hint.initial_plan) == "table" and translate_adapter.test_scan_hint.initial_plan.owner_id > 0
     and #translate_adapter.test_scan_hint.initial_plan.slots == 64 and translate_adapter.test_scan_hint.initial_plan.slots[1] == 0,
     "initial history hint did not request a bounded full resync")
+assert(translate_identity.state.cache_ready and translate_identity.state.signature_ready
+    and translate_identity.state.cache_name == identity_fixture.local_name
+    and translate_identity.state.cache_palette == identity_fixture.colors[0]
+    and identity_signature_reads == 6,
+    "stable initial solo identity was not cached behind all six signature gates")
 translate_adapter.test_scan_hint.owner_before = translate_adapter.test_scan_hint.initial_plan.owner_id
 translate_adapter.test_scan_hint.covered_slots = {}
 translate_adapter.test_scan_hint.plan = translate_adapter.scan_plan()
@@ -643,6 +650,7 @@ assert(report_move.flags == 0x1 and report_move.new == report_path,
     "translation report did not replace the final file atomically")
 assert(not sanitized:find(private_message, 1, true))
 assert(not sanitized:find("PRIVATE_", 1, true))
+assert(not sanitized:find(identity_fixture.local_name, 1, true), "report exposed the cached player name")
 assert(sanitized:find('"status":"stopped"', 1, true))
 assert(sanitized:find('"baseline_remaining":0', 1, true))
 assert(sanitized:find('"pending_count":0', 1, true))
@@ -836,6 +844,159 @@ local byte_registry = rawget(_G, TRANSLATE_PIN_TABLE)
 assert(byte_capacity_buffer == nil and byte_capacity_status == "capacity")
 assert(byte_registry.bytes == 17418 * 481 and byte_registry.bytes <= 8 * 1024 * 1024)
 
+do
+    local identity_state = translate_identity.state
+    local event_slot = 4
+    local status, message
+
+    -- 唯一姓名按姓名识别；即使本地颜色已变化，也不读取当前色板表。
+    identity_fixture.set_world({{name = identity_fixture.local_name}}, 1)
+    prepare_widget_case({body = widget_body_bytes("unique sender identity")})
+    identity_fixture.set_event(event_slot, identity_fixture.local_name, identity_fixture.colors[0])
+    status, message = observer_widget_read_widget_slot(0, true)
+    assert(status == "ok")
+    local palette_reads_before = read_counts[identity_fixture.palette_count] or 0
+    assert(translate_adapter.is_self_message(message) == true)
+    assert((read_counts[identity_fixture.palette_count] or 0) == palette_reads_before,
+        "unique-name identification unnecessarily read the current palette map")
+    assert(read_counts[widget_event_record + 0x14] == 2 and read_counts[widget_event_record + 0x98] == nil,
+        "unique-name identity was not limited to guarded name sampling")
+
+    -- 重名时用启动颜色区分本人，其他同名颜色是已知的其他玩家。
+    identity_fixture.set_world({
+        {name = identity_fixture.local_name},
+        {key = identity_fixture.other_key, name = identity_fixture.local_name, selector = 1},
+    }, 0)
+    prepare_widget_case({body = widget_body_bytes("duplicate sender identity")})
+    identity_fixture.set_event(event_slot, identity_fixture.local_name, identity_fixture.colors[0])
+    status, message = observer_widget_read_widget_slot(0, true)
+    assert(status == "ok" and translate_adapter.is_self_message(message) == true,
+        "same-name sender with the cached palette was not identified")
+    assert(read_counts[widget_event_record + 0x14] == 2
+        and read_counts[widget_event_record + 0x98] == 2,
+        "duplicate-name identity did not limit event fields to one read and one guard")
+    prepare_widget_case({body = widget_body_bytes("other duplicate sender")})
+    identity_fixture.set_event(event_slot, identity_fixture.local_name, identity_fixture.colors[1])
+    status, message = observer_widget_read_widget_slot(0, true)
+    assert(status == "ok" and translate_adapter.is_self_message(message) == false,
+        "same-name sender with another palette was not classified as other")
+
+    -- 重名期间本地颜色变化后身份变为未知，调用方仍按普通消息翻译。
+    identity_fixture.set_world({
+        {name = identity_fixture.local_name},
+        {key = identity_fixture.other_key, name = identity_fixture.local_name, selector = 2},
+    }, 1)
+    prepare_widget_case({body = widget_body_bytes("changed duplicate palette")})
+    identity_fixture.set_event(event_slot, identity_fixture.local_name, identity_fixture.colors[0])
+    status, message = observer_widget_read_widget_slot(0, true)
+    assert(status == "ok" and translate_adapter.is_self_message(message) == nil,
+        "changed local palette did not fall back to translation")
+
+    identity_fixture.set_world({
+        {name = identity_fixture.local_name},
+        {key = identity_fixture.other_key, name = identity_fixture.local_name, selector = 2},
+    }, 4)
+    prepare_widget_case({body = widget_body_bytes("invalid local selector")})
+    identity_fixture.set_event(event_slot, identity_fixture.local_name, identity_fixture.colors[0])
+    status, message = observer_widget_read_widget_slot(0, true)
+    assert(status == "ok" and translate_adapter.is_self_message(message) == nil
+        and read_counts[widget_event_record + 0x98] == nil,
+        "invalid palette selector was treated as a confirmed identity")
+
+    -- 资料读取失败、profile快照变化以及尚未缓存时都不能误标为本人。
+    identity_fixture.set_world({{name = identity_fixture.local_name}}, 0)
+    prepare_widget_case({body = widget_body_bytes("identity read failure")})
+    identity_fixture.set_event(event_slot, identity_fixture.local_name, identity_fixture.colors[0])
+    status, message = observer_widget_read_widget_slot(0, true)
+    assert(status == "ok")
+    query_fail_address = identity_fixture.roster
+    assert(translate_adapter.is_self_message(message) == nil)
+    query_fail_address = nil
+
+    prepare_widget_case({body = widget_body_bytes("identity snapshot race")})
+    identity_fixture.set_event(event_slot, identity_fixture.local_name, identity_fixture.colors[0])
+    status, message = observer_widget_read_widget_slot(0, true)
+    read_mutation = function(address, count)
+        if address == identity_fixture.roster and count == 2 then
+            identity_fixture.set_world({
+                {name = identity_fixture.local_name},
+                {key = identity_fixture.other_key, name = identity_fixture.local_name, selector = 1},
+            }, 0)
+        end
+    end
+    assert(status == "ok" and translate_adapter.is_self_message(message) == nil,
+        "unstable sender roster was accepted")
+    read_mutation = nil
+
+    prepare_widget_case({body = widget_body_bytes("identity not cached")})
+    identity_fixture.set_event(event_slot, identity_fixture.local_name, identity_fixture.colors[0])
+    status, message = observer_widget_read_widget_slot(0, true)
+    local cache_ready = identity_state.cache_ready
+    identity_state.cache_ready = false
+    assert(status == "ok" and translate_adapter.is_self_message(message) == nil,
+        "uncached identity was treated as self")
+    identity_state.cache_ready = cache_ready
+
+    -- 启动资料尚未就绪时不锁死缓存；现有计划下一秒可重试并成功封存。
+    identity_state.phase = "pending"
+    identity_state.cache_ready = false
+    identity_state.cache_stopped = false
+    identity_state.cache_name = nil
+    identity_state.cache_palette = nil
+    identity_state.started_ms = observer_now
+    identity_state.next_attempt_ms = nil
+    identity_fixture.set_world({{name = identity_fixture.local_name}}, 0)
+    prepare_widget_case()
+    translate_adapter.test_scan_hint.write_history(2, 4)
+    query_fail_address = identity_fixture.roster
+    translate_adapter.scan_plan()
+    query_fail_address = nil
+    assert(identity_state.phase == "pending" and not identity_state.cache_ready)
+    observer_now = observer_now + 1000
+    translate_adapter.scan_plan()
+    assert(identity_state.cache_ready and identity_state.cache_name == identity_fixture.local_name,
+        "cache did not retry after initial roster read failure")
+
+    -- 缓存完成后，后台scan_plan继续读取历史但不再接触sender roster。
+    identity_fixture.set_world({{name = identity_fixture.local_name}}, 0)
+    prepare_widget_case()
+    translate_adapter.test_scan_hint.write_history(2, 4)
+    translate_adapter.scan_plan()
+    local roster_reads_after_plan = read_counts[identity_fixture.roster] or 0
+    translate_adapter.scan_plan()
+    assert((read_counts[identity_fixture.roster] or 0) == roster_reads_after_plan
+        and read_counts[widget_event_record + 0x14] == nil
+        and read_counts[widget_event_record + 0x98] == nil,
+        "idle scan_plan read sender identity after cache completion")
+
+    -- roster姓名即使恰好截在UTF-8码点中间，也按已验证写入边界安全回退。
+    local saved_name = identity_state.cache_name
+    local saved_palette = identity_state.cache_palette
+    identity_state.phase = "pending"
+    identity_state.cache_ready = false
+    identity_state.cache_stopped = false
+    identity_state.cache_name = nil
+    identity_state.cache_palette = nil
+    identity_state.started_ms = observer_now
+    identity_state.next_attempt_ms = nil
+    identity_fixture.set_world({{name = "temporary"}}, 0)
+    identity_fixture.set_raw_local_name(string.rep("a", 126) .. string.char(0xe4, 0xb8, 0xad))
+    prepare_widget_case()
+    translate_adapter.test_scan_hint.write_history(3, 5)
+    translate_adapter.scan_plan()
+    assert(identity_state.cache_ready and identity_state.cache_name == string.rep("a", 126),
+        "roster UTF-8 truncation did not backtrack over an incomplete code point")
+    identity_state.cache_name = saved_name
+    identity_state.cache_palette = saved_palette
+    identity_state.cache_ready = true
+    identity_state.phase = "ready"
+end
+
+local safe_identity = observer_translate_sanitize_report({}).identity
+assert(safe_identity.cache_ready == true and safe_identity.submit_checks >= 5
+    and safe_identity.self_marked >= 2 and safe_identity.known_other >= 1
+    and safe_identity.fallback >= 3)
+
 RESULT = json_core.encode_json({
     status = "translate fake Win32/kernel checks ok",
     published = request_path,
@@ -845,6 +1006,7 @@ RESULT = json_core.encode_json({
     native_calls = successful_spy_calls,
     stale_results = {changed_body, changed_event, changed_map, changed_root, changed_ring},
     failed_race_status = race_result,
+    identity = safe_identity,
 })
 '''
 
@@ -1194,10 +1356,23 @@ class ChatTranslateAdapterTests(unittest.TestCase):
             r"TRANSLATE_ENABLED\s+and\s+(.+?)\s+or\s+(.+)$",
             budget.group(1).strip() if budget else "",
         )
+        identity_signatures = re.search(
+            r"local TRANSLATE_IDENTITY_SIGNATURES = \{(.*?)\n    \}", source, re.S
+        )
+        signature_pairs = re.findall(
+            r"\{(0x[0-9A-Fa-f]+),\s*\"([0-9A-Fa-f]+)\"\}",
+            identity_signatures.group(1) if identity_signatures else "",
+        )
         self.assertIsNotNone(declaration)
         self.assertIsNotNone(budget)
         self.assertIsNotNone(apply_reserve)
         self.assertIsNotNone(translated_budget)
+        self.assertEqual(len(signature_pairs), 6)
+
+        signature_rows = []
+        for rva, hexadecimal in signature_pairs:
+            escaped = "".join(f"\\{value:03d}" for value in bytes.fromhex(hexadecimal))
+            signature_rows.append(f"[{rva}] = \"{escaped}\"")
 
         initialize_start = source.index("local function initialize_probe()")
         wide_start = source.index("    local function append_wide_ascii(", initialize_start)
@@ -1240,6 +1415,15 @@ local translate_heartbeat_next_poll, translate_cached_heartbeat
 local translate_heartbeat_fresh = false
 local translate_owned_tokens = {}
 local translate_file_sequence = 0
+local identity_signature_fixture = {__IDENTITY_SIGNATURE_ROWS__}
+local identity_signature_reads = 0
+local function read_memory(rva, length, executable)
+    identity_signature_reads = identity_signature_reads + 1
+    if executable ~= true then return nil end
+    local bytes = identity_signature_fixture[rva]
+    if type(bytes) ~= "string" or #bytes ~= length then return nil end
+    return bytes
+end
 local translate_layout
 translate_layout = {
     verified = true,
@@ -1273,6 +1457,8 @@ end
 '''
         prelude = prelude.replace(
             "__FULL_APPLY_READ_RESERVE__", apply_reserve.group(1).strip()
+        ).replace(
+            "__IDENTITY_SIGNATURE_ROWS__", ", ".join(signature_rows)
         )
         script = LUA_OBSERVER_ADAPTER_HARNESS.replace(
             "__FFI_DECL__", declaration.group(1)
@@ -1319,6 +1505,17 @@ end
         self.assertEqual(result["failed_race_status"], "disabled")
         self.assertEqual(result["stale_results"], ["stale", "stale", "stale", "stale", "stale"])
         self.assertLessEqual(result["report_bytes"], 64 * 1024)
+        identity = result["identity"]
+        self.assertEqual(
+            set(identity),
+            {"signature_ready", "cache_ready", "cache_stopped", "cache_attempts",
+             "submit_checks", "self_marked", "known_other", "fallback"},
+        )
+        self.assertTrue(identity["signature_ready"] and identity["cache_ready"])
+        self.assertGreaterEqual(identity["cache_attempts"], 2)
+        self.assertGreaterEqual(identity["self_marked"], 2)
+        self.assertGreaterEqual(identity["known_other"], 1)
+        self.assertGreaterEqual(identity["fallback"], 3)
 
         http_source = (ROOT / "game" / "chat_http_native.lua").read_text(encoding="utf-8")
         self.assertIn(
