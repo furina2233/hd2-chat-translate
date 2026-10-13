@@ -1368,6 +1368,10 @@ class ChatTranslateAdapterTests(unittest.TestCase):
         self.assertIsNotNone(apply_reserve)
         self.assertIsNotNone(translated_budget)
         self.assertEqual(len(signature_pairs), 6)
+        self.assertIn(
+            (0x13826BB, "48C1E005428B8C08AC63010083F90473C48BC1488D0D8B1AE5004803C00F1004C1"),
+            [(int(rva, 16), hexadecimal) for rva, hexadecimal in signature_pairs],
+        )
 
         signature_rows = []
         for rva, hexadecimal in signature_pairs:
