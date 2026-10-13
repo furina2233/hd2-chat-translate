@@ -71,6 +71,7 @@ typedef struct HD2CT_WorkerJob {
     uint32_t slot_index;
     uint64_t serial;
     uint64_t submitted_ms;
+    uint32_t flags;
     char token[HD2CT_MAX_TOKEN + 1u];
     char source[HD2CT_MAX_SOURCE + 1u];
     uint32_t source_bytes;
@@ -82,12 +83,14 @@ typedef struct HD2CT_WorkerJob {
     uint32_t target_language;
     uint32_t timeout_seconds;
     uint32_t menu_enabled;
+    uint32_t ignore_self;
 } HD2CT_WorkerJob;
 
 typedef struct HD2CT_RuntimeSettings {
     uint32_t target_language;
     uint32_t timeout_seconds;
     uint32_t enabled;
+    uint32_t ignore_self;
 } HD2CT_RuntimeSettings;
 
 typedef struct HD2CT_TargetLanguage {

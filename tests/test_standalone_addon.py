@@ -157,7 +157,7 @@ def fake_metadata(dll: bytes) -> bytes:
     return json.dumps(
         {
             "schema_version": 1,
-            "abi_version": 2,
+            "abi_version": 3,
             "filename": "hd2ct_http.dll",
             "size": len(dll),
             "sha256": hashlib.sha256(dll).hexdigest(),
@@ -391,8 +391,8 @@ local function run_loader()
 
     local exports = {}
     exports.HD2CT_Submit = ffi.cast(
-        "HD2Probe_U32 (*)(const char *, const char *, HD2Probe_U32)",
-        function(_, _, _) submitted = submitted + 1; return 1 end)
+        "HD2Probe_U32 (*)(const char *, const char *, HD2Probe_U32, HD2Probe_U32)",
+        function(_, _, _, _) submitted = submitted + 1; return 1 end)
     exports.HD2CT_Poll = ffi.cast(
         "HD2Probe_U32 (*)(const char *, char *, HD2Probe_U32, HD2Probe_U32 *)",
         function(_, output, capacity, written)
@@ -699,6 +699,14 @@ class StandaloneBuilderTests(unittest.TestCase):
             english_values = [english[key] for key in menu_locales.TEXT_KEYS]
             english_values.extend(english["target_languages"].values())
             self.assertTrue(all(value.isascii() for value in english_values))
+            self.assertEqual(
+                localizations["locales"]["zh-Hans"]["ignore_self_label"],
+                "不翻译自己说的话",
+            )
+            self.assertEqual(
+                localizations["locales"]["zh-Hans"]["ignore_self_description"],
+                "开启后不翻译识别为自己发送的消息；无法确认发送者时照常翻译。",
+            )
 
             with self.assertRaisesRegex(ValueError, "重复JSON键"):
                 menu_locales.parse_catalogue(
@@ -735,6 +743,10 @@ class StandaloneBuilderTests(unittest.TestCase):
                     + builder._lua_string_literal(translated["enabled_label"]) + ")\n",
                     "assert(enabled_spec.description() == "
                     + builder._lua_string_literal(translated["enabled_description"]) + ")\n",
+                    "assert(ignore_self_spec.label() == "
+                    + builder._lua_string_literal(translated["ignore_self_label"]) + ")\n",
+                    "assert(ignore_self_spec.description() == "
+                    + builder._lua_string_literal(translated["ignore_self_description"]) + ")\n",
                     "assert(timeout_spec.label() == "
                     + builder._lua_string_literal(translated["timeout_label"]) + ")\n",
                     "assert(timeout_spec.description() == "
@@ -777,9 +789,10 @@ class StandaloneBuilderTests(unittest.TestCase):
                 "assert(step(2000) == false and #calls == 2)\n"
                 "assert(calls[1] == 'hd2chattranslate.target_language' and calls[2] == 'hd2chattranslate.enabled')\n"
                 "assert(step(2500) == false and #calls == 2)\n"
-                "assert(step(3000) == true and #calls == 4)\n"
-                "assert(calls[3] == 'hd2chattranslate.enabled' and calls[4] == 'hd2chattranslate.timeout')\n"
-                "assert(step(4000) == true and #calls == 4)\n"
+                "assert(step(3000) == true and #calls == 5)\n"
+                "assert(calls[3] == 'hd2chattranslate.enabled' and calls[4] == 'hd2chattranslate.ignore_self' "
+                "and calls[5] == 'hd2chattranslate.timeout')\n"
+                "assert(step(4000) == true and #calls == 5)\n"
                 "local language_spec = saved_specs['hd2chattranslate.target_language']\n"
                 "assert(language_spec.type == 'choice' and type(language_spec.label) == 'function')\n"
                 "assert(language_spec.mod == 'HD2 Chat Translate' and language_spec.mod_id == 'hd2chattranslate')\n"
@@ -789,6 +802,10 @@ class StandaloneBuilderTests(unittest.TestCase):
                 "assert(enabled_spec.type == 'toggle' and enabled_spec.default == true)\n"
                 "assert(type(enabled_spec.label) == 'function' and type(enabled_spec.description) == 'function')\n"
                 "assert(enabled_spec.mod_id == 'hd2chattranslate')\n"
+                "local ignore_self_spec = saved_specs['hd2chattranslate.ignore_self']\n"
+                "assert(ignore_self_spec.type == 'toggle' and ignore_self_spec.default == true)\n"
+                "assert(type(ignore_self_spec.label) == 'function' and type(ignore_self_spec.description) == 'function')\n"
+                "assert(ignore_self_spec.mod_id == 'hd2chattranslate')\n"
                 "local timeout_spec = saved_specs['hd2chattranslate.timeout']\n"
                 "assert(timeout_spec.type == 'choice' and timeout_spec.default == 2)\n"
                 "assert(type(timeout_spec.label) == 'function' and type(timeout_spec.description) == 'function')\n"
@@ -797,12 +814,16 @@ class StandaloneBuilderTests(unittest.TestCase):
                 "_G.BingusTranslations = nil\n"
                 "assert(language_spec.label() == 'Target language')\n"
                 "assert(enabled_spec.description() == 'The chat box is monitored whether this is enabled or not. To remove the mod completely, uninstall it in the mod manager.')\n"
+                "assert(ignore_self_spec.label() == 'Do not translate my messages')\n"
+                "assert(ignore_self_spec.description() == "
+                + builder._lua_string_literal(localizations["locales"]["en"]["ignore_self_description"])
+                + ")\n"
                 "assert(timeout_spec.choices[2]() == '20 seconds')\n"
                 "_G.BingusTranslations = {version = 1, game_language = 'en'}\n"
                 "local language_registry = _G.BingusTranslations\n"
                 + "".join(locale_assertions)
                 + "assert(_G.BingusTranslations == language_registry and language_registry.version == 1)\n"
-                + "assert(#calls == 4 and calls[1] == 'hd2chattranslate.target_language' and calls[4] == 'hd2chattranslate.timeout')\n"
+                + "assert(#calls == 5 and calls[1] == 'hd2chattranslate.target_language' and calls[5] == 'hd2chattranslate.timeout')\n"
                 + "assert(language_spec.default == 1 and timeout_spec.default == 2 and #language_spec.choices == 10)\n"
                 + "_G.BingusTranslations.game_language = 'fr-CA'; assert(language_spec.label() == "
                 + builder._lua_string_literal(localizations["locales"]["fr"]["target_language_label"]) + ")\n"
@@ -816,7 +837,7 @@ class StandaloneBuilderTests(unittest.TestCase):
                 + "_G.BingusTranslations = setmetatable({}, {__index = function() error('registry metamethod called') end})\n"
                 + "assert(language_spec.label() == 'Target language')\n"
                 + "_G.BingusTranslations = 'invalid'; assert(language_spec.label() == 'Target language')\n"
-                + "assert(#calls == 4 and language_spec.default == 1 and timeout_spec.default == 2)\n"
+                + "assert(#calls == 5 and language_spec.default == 1 and timeout_spec.default == 2)\n"
                 "local logs, failed_step = {}, module.new()\n"
                 "_G.print = function(message) logs[#logs + 1] = message end\n"
                 "local failed_calls, failed_once = {}, true\n"
@@ -826,9 +847,9 @@ class StandaloneBuilderTests(unittest.TestCase):
                 "return true end}\n"
                 "assert(failed_step(0) == false and #failed_calls == 2 and #logs == 1)\n"
                 "assert(failed_step(500) == false and #failed_calls == 2 and #logs == 1)\n"
-                "assert(failed_step(1000) == true and #failed_calls == 4 and #logs == 1)\n"
+                "assert(failed_step(1000) == true and #failed_calls == 5 and #logs == 1)\n"
                 "assert(failed_calls[1] == 'hd2chattranslate.target_language' and failed_calls[3] == 'hd2chattranslate.enabled')\n"
-                "assert(failed_calls[4] == 'hd2chattranslate.timeout')\n"
+                "assert(failed_calls[4] == 'hd2chattranslate.ignore_self' and failed_calls[5] == 'hd2chattranslate.timeout')\n"
                 "local clock_calls, step_calls, game_calls, now = 0, 0, 0, 0\n"
                 "local wrapped = module.wrap_update(function(...) game_calls = game_calls + 1; return 'game', nil, ... end, "
                 "function(time) step_calls = step_calls + 1; return time >= 10 end, "
@@ -1063,7 +1084,7 @@ class StandaloneBuilderTests(unittest.TestCase):
     def test_loader_holds_verified_read_lock_through_absolute_hardened_load(self):
         result = self.run_loader("positive")
         self.assertEqual(result[0:4], ["loaded", "1", "true", "true"])
-        self.assertEqual(result[4:8], ["false", "false", "true", "2"])
+        self.assertEqual(result[4:8], ["false", "false", "true", "3"])
         self.assertEqual(result[10:12], ["OK\ntranslated", "true"])
 
     def test_loader_rejects_bad_payload_file_size_sha_and_reparse_paths(self):

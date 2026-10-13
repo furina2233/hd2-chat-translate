@@ -14,6 +14,8 @@ typedef struct HD2CT_ParsedValues {
     uint32_t target_valid;
     uint32_t enabled;
     uint32_t enabled_valid;
+    uint32_t ignore_self;
+    uint32_t ignore_self_valid;
     uint32_t timeout_index;
     uint32_t timeout_valid;
 } HD2CT_ParsedValues;
@@ -159,11 +161,13 @@ static int hd2ct_parse_values_text(const unsigned char *text, size_t length,
 {
     static const char target_option_id[] = HD2CT_TARGET_LANGUAGE_OPTION_ID;
     static const char enabled_option_id[] = HD2CT_ENABLED_OPTION_ID;
+    static const char ignore_self_option_id[] = HD2CT_IGNORE_SELF_OPTION_ID;
     static const char timeout_option_id[] = HD2CT_TIMEOUT_OPTION_ID;
     size_t cursor = 0u;
     memset(parsed, 0, sizeof(*parsed));
     parsed->target_language = HD2CT_DEFAULT_TARGET_LANGUAGE;
     parsed->enabled = HD2CT_ENABLED_DEFAULT;
+    parsed->ignore_self = HD2CT_IGNORE_SELF_DEFAULT;
     parsed->timeout_index = HD2CT_DEFAULT_TIMEOUT_INDEX;
     while (cursor < length) {
         size_t line_start = cursor;
@@ -175,6 +179,7 @@ static int hd2ct_parse_values_text(const unsigned char *text, size_t length,
         size_t value_length;
         int target_line;
         int enabled_line;
+        int ignore_self_line;
         int timeout_line;
         while (cursor < length && text[cursor] != '\r' && text[cursor] != '\n') {
             if (text[cursor] == '\t' && tab == SIZE_MAX) tab = cursor;
@@ -193,6 +198,9 @@ static int hd2ct_parse_values_text(const unsigned char *text, size_t length,
         enabled_line = tab - line_start == sizeof(enabled_option_id) - 1u &&
             memcmp(text + line_start, enabled_option_id,
                    sizeof(enabled_option_id) - 1u) == 0;
+        ignore_self_line = tab - line_start == sizeof(ignore_self_option_id) - 1u &&
+            memcmp(text + line_start, ignore_self_option_id,
+                   sizeof(ignore_self_option_id) - 1u) == 0;
         timeout_line = tab - line_start == sizeof(timeout_option_id) - 1u &&
             memcmp(text + line_start, timeout_option_id,
                    sizeof(timeout_option_id) - 1u) == 0;
@@ -213,6 +221,10 @@ static int hd2ct_parse_values_text(const unsigned char *text, size_t length,
             parsed->enabled = HD2CT_ENABLED_DEFAULT;
             parsed->enabled_valid = !extra_tab && hd2ct_parse_boolean(
                 value, value_length, &parsed->enabled);
+        } else if (ignore_self_line) {
+            parsed->ignore_self = HD2CT_IGNORE_SELF_DEFAULT;
+            parsed->ignore_self_valid = !extra_tab && hd2ct_parse_boolean(
+                value, value_length, &parsed->ignore_self);
         } else if (timeout_line) {
             parsed->timeout_index = HD2CT_DEFAULT_TIMEOUT_INDEX;
             parsed->timeout_valid = !extra_tab && hd2ct_parse_index(
@@ -242,6 +254,9 @@ static void hd2ct_apply_parsed_values(const HD2CT_ParsedValues *parsed,
     if (parsed->enabled_valid != 0u) {
         settings->enabled = parsed->enabled;
     }
+    if (parsed->ignore_self_valid != 0u) {
+        settings->ignore_self = parsed->ignore_self;
+    }
     if (parsed->timeout_valid != 0u) {
         settings->timeout_seconds =
             g_hd2ct_timeout_seconds[parsed->timeout_index - 1u];
@@ -259,6 +274,7 @@ void hd2ct_read_applied_settings(HD2CT_RuntimeSettings *settings)
     settings->target_language = HD2CT_DEFAULT_TARGET_LANGUAGE;
     settings->timeout_seconds = HD2CT_DEFAULT_TIMEOUT_SECONDS;
     settings->enabled = HD2CT_ENABLED_DEFAULT;
+    settings->ignore_self = HD2CT_IGNORE_SELF_DEFAULT;
     if (!hd2ct_values_primary_path(path,
                                   sizeof(path) / sizeof(path[0]))) {
         return;

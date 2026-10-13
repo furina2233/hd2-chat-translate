@@ -104,7 +104,7 @@ def write_metadata(dll_path: Path, metadata_path: Path, compiler_path: Path,
         raise RuntimeError("构建产物是空 DLL")
     manifest: dict[str, object] = {
         "schema_version": 1,
-        "abi_version": 2,
+        "abi_version": 3,
         "filename": "hd2ct_http.dll",
         "size": len(binary),
         "sha256": hashlib.sha256(binary).hexdigest(),

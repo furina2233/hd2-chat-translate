@@ -17,8 +17,9 @@ _ROOT_KEYS = {
     "schema_version", "option_id", "mod_id", "default_index", "menu_options", "languages"
 }
 _LANGUAGE_KEYS = {"id", "label", "ai_target", "google", "baidu", "youdao"}
-_MENU_OPTIONS_KEYS = {"enabled", "timeout"}
+_MENU_OPTIONS_KEYS = {"enabled", "ignore_self", "timeout"}
 _ENABLED_OPTION_KEYS = {"option_id", "type", "label", "default", "description"}
+_IGNORE_SELF_OPTION_KEYS = {"option_id", "type", "label", "default", "description"}
 _TIMEOUT_OPTION_KEYS = {
     "option_id", "type", "label", "default_index", "description", "choices"
 }
@@ -65,7 +66,7 @@ def validate_catalogue(value: Any) -> dict[str, Any]:
 
     menu_options = value["menu_options"]
     if not isinstance(menu_options, dict) or set(menu_options) != _MENU_OPTIONS_KEYS:
-        raise ValueError("menu_options必须包含enabled与timeout")
+        raise ValueError("menu_options必须包含enabled、ignore_self与timeout")
     enabled = menu_options["enabled"]
     if not isinstance(enabled, dict) or set(enabled) != _ENABLED_OPTION_KEYS:
         raise ValueError("enabled菜单项字段不符合schema")
@@ -80,6 +81,24 @@ def validate_catalogue(value: Any) -> dict[str, Any]:
     if (enabled["type"] != "toggle" or type(enabled["default"]) is not bool
             or not enabled["default"]):
         raise ValueError("enabled菜单项必须是默认开启的toggle")
+
+    ignore_self = menu_options["ignore_self"]
+    if not isinstance(ignore_self, dict) or set(ignore_self) != _IGNORE_SELF_OPTION_KEYS:
+        raise ValueError("ignore_self菜单项字段不符合schema")
+    ignore_self_id = _plain_text(
+        ignore_self["option_id"], "menu_options.ignore_self.option_id")
+    if not _OPTION_ID.fullmatch(ignore_self_id):
+        raise ValueError("ignore_self菜单项option_id格式无效")
+    ignore_self_label = _plain_text(
+        ignore_self["label"], "menu_options.ignore_self.label")
+    if len(ignore_self_label) > _LABEL_MAX_CHARACTERS:
+        raise ValueError("ignore_self菜单项label超过48字符")
+    ignore_self_description = _plain_text(
+        ignore_self["description"], "menu_options.ignore_self.description")
+    if (ignore_self["type"] != "toggle"
+            or type(ignore_self["default"]) is not bool
+            or not ignore_self["default"]):
+        raise ValueError("ignore_self菜单项必须是默认开启的toggle")
 
     timeout = menu_options["timeout"]
     if not isinstance(timeout, dict) or set(timeout) != _TIMEOUT_OPTION_KEYS:
@@ -109,7 +128,7 @@ def validate_catalogue(value: Any) -> dict[str, Any]:
                 or label != expected_labels[index]):
             raise ValueError("timeout choices必须依序为10、20、30秒")
         normalized_choices.append({"label": label, "seconds": seconds})
-    if len({option_id, enabled_id, timeout_id}) != 3:
+    if len({option_id, enabled_id, ignore_self_id, timeout_id}) != 4:
         raise ValueError("菜单option_id必须互不重复")
     normalized_menu_options = {
         "enabled": {
@@ -118,6 +137,13 @@ def validate_catalogue(value: Any) -> dict[str, Any]:
             "label": enabled_label,
             "default": True,
             "description": enabled_description,
+        },
+        "ignore_self": {
+            "option_id": ignore_self_id,
+            "type": "toggle",
+            "label": ignore_self_label,
+            "default": True,
+            "description": ignore_self_description,
         },
         "timeout": {
             "option_id": timeout_id,
@@ -238,6 +264,8 @@ def c_header_text(catalogue: dict[str, Any] | None = None) -> str:
         f"#define HD2CT_TARGET_LANGUAGE_OPTION_ID {_c_string(source['option_id'])}",
         f"#define HD2CT_ENABLED_OPTION_ID {_c_string(source['menu_options']['enabled']['option_id'])}",
         "#define HD2CT_ENABLED_DEFAULT 1u",
+        f"#define HD2CT_IGNORE_SELF_OPTION_ID {_c_string(source['menu_options']['ignore_self']['option_id'])}",
+        "#define HD2CT_IGNORE_SELF_DEFAULT 1u",
         f"#define HD2CT_TIMEOUT_OPTION_ID {_c_string(source['menu_options']['timeout']['option_id'])}",
         f"#define HD2CT_DEFAULT_TIMEOUT_INDEX {source['menu_options']['timeout']['default_index']}u",
         f"#define HD2CT_TIMEOUT_CHOICE_COUNT {len(source['menu_options']['timeout']['choices'])}u",

@@ -11,6 +11,7 @@ typedef struct HD2CT_JobSlot {
     uint32_t state;
     uint32_t cancelled;
     uint32_t timeout_reported;
+    uint32_t flags;
     uint64_t serial;
     uint64_t submitted_ms;
     uint64_t request_deadline_ms;
@@ -406,6 +407,7 @@ static int hd2ct_take_next_job_locked(HD2CT_WorkerJob *copy)
     copy->slot_index = selected;
     copy->serial = g_jobs[selected].serial;
     copy->submitted_ms = g_jobs[selected].submitted_ms;
+    copy->flags = g_jobs[selected].flags;
     memcpy(copy->token, g_jobs[selected].token, sizeof(copy->token));
     memcpy(copy->source, g_jobs[selected].source, sizeof(copy->source));
     copy->source_bytes = g_jobs[selected].source_bytes;
@@ -438,7 +440,9 @@ static void hd2ct_process_job(HINTERNET session, HD2CT_WorkerJob *job)
     job->target_language = settings.target_language;
     job->timeout_seconds = settings.timeout_seconds;
     job->menu_enabled = settings.enabled;
-    if (job->menu_enabled == 0u) {
+    job->ignore_self = settings.ignore_self;
+    if (job->menu_enabled == 0u ||
+        (job->ignore_self != 0u && (job->flags & HD2CT_MESSAGE_SELF) != 0u)) {
         hd2ct_complete_job(job, "SKIP\n", 5u, 0, 0);
         return;
     }
@@ -770,13 +774,15 @@ static void hd2ct_start_bootstrap(void)
     CloseHandle((HANDLE)thread);
 }
 
-uint32_t HD2CT_Submit(const char *token, const char *body, uint32_t bytes)
+uint32_t HD2CT_Submit(const char *token, const char *body, uint32_t bytes,
+                      uint32_t flags)
 {
     size_t token_length;
     uint32_t i;
     uint32_t free_slot = HD2CT_JOB_COUNT;
     uint64_t serial;
-    if (body == NULL || bytes == 0 ||
+    if ((flags & ~HD2CT_MESSAGE_SELF) != 0u ||
+        body == NULL || bytes == 0 ||
         bytes > HD2CT_MAX_SOURCE || !hd2ct_valid_token(token, &token_length) ||
         !hd2ct_valid_utf8((const unsigned char *)body, bytes, 1)) {
         return 0u;
@@ -811,6 +817,7 @@ uint32_t HD2CT_Submit(const char *token, const char *body, uint32_t bytes)
     g_jobs[free_slot].state = HD2CT_SLOT_QUEUED;
     g_jobs[free_slot].serial = serial;
     g_jobs[free_slot].submitted_ms = GetTickCount64();
+    g_jobs[free_slot].flags = flags;
     memcpy(g_jobs[free_slot].token, token, token_length);
     g_jobs[free_slot].token[token_length] = '\0';
     memcpy(g_jobs[free_slot].source, body, bytes);

@@ -202,7 +202,7 @@ def main() -> int:
     binary = output.read_bytes()
     manifest = {
         "schema_version": 1,
-        "abi_version": 2,
+        "abi_version": 3,
         "filename": "hd2ct_http.dll",
         "size": len(binary),
         "sha256": hashlib.sha256(binary).hexdigest(),

@@ -76,7 +76,7 @@ lib.fixture_ConfigMatches.argtypes = [
 lib.fixture_ConfigMatches.restype = ctypes.c_int
 lib.fixture_ReadRuntimeSettings.argtypes = [
     ctypes.POINTER(ctypes.c_uint32), ctypes.POINTER(ctypes.c_uint32),
-    ctypes.POINTER(ctypes.c_uint32),
+    ctypes.POINTER(ctypes.c_uint32), ctypes.POINTER(ctypes.c_uint32),
 ]
 lib.fixture_ReadRuntimeSettings.restype = None
 lib.fixture_RequestDeadlineRemaining.argtypes = [ctypes.c_char_p]
@@ -109,7 +109,9 @@ lib.fixture_StartLockHold.argtypes = [ctypes.c_uint32]
 lib.fixture_StartLockHold.restype = ctypes.c_int
 lib.fixture_ReleaseLock.argtypes = []
 lib.fixture_ReleaseLock.restype = None
-lib.HD2CT_Submit.argtypes = [ctypes.c_char_p, ctypes.c_void_p, ctypes.c_uint32]
+lib.HD2CT_Submit.argtypes = [
+    ctypes.c_char_p, ctypes.c_void_p, ctypes.c_uint32, ctypes.c_uint32,
+]
 lib.HD2CT_Submit.restype = ctypes.c_uint32
 lib.HD2CT_Poll.argtypes = [
     ctypes.c_char_p, ctypes.c_void_p, ctypes.c_uint32,
@@ -158,11 +160,11 @@ for hive_name, hive in (("user", 0), ("machine", 1)):
         if not lib.fixture_SetRegistryValue(hive, name, value):
             raise RuntimeError("fixture registry value was rejected")
 
-def submit(token, body_hex="73616665"):
+def submit(token, body_hex="73616665", flags=0):
     body = bytes.fromhex(body_hex)
     backing = ctypes.create_string_buffer(body if body else b"\0", max(1, len(body)))
     return lib.HD2CT_Submit(
-        token.encode("ascii"), ctypes.cast(backing, ctypes.c_void_p), len(body),
+        token.encode("ascii"), ctypes.cast(backing, ctypes.c_void_p), len(body), flags,
     )
 
 def poll(token):
@@ -194,7 +196,9 @@ for action in actions:
     op = action["op"]
     if op == "submit":
         started = time.perf_counter()
-        accepted = submit(action["token"], action.get("body_hex", ""))
+        accepted = submit(
+            action["token"], action.get("body_hex", ""), action.get("flags", 0)
+        )
         action_results.append({
             "accepted": accepted,
             "elapsed_ms": (time.perf_counter() - started) * 1000.0,
@@ -261,14 +265,16 @@ for action in actions:
         target_language = ctypes.c_uint32()
         timeout_seconds = ctypes.c_uint32()
         menu_enabled = ctypes.c_uint32()
+        ignore_self = ctypes.c_uint32()
         lib.fixture_ReadRuntimeSettings(
             ctypes.byref(target_language), ctypes.byref(timeout_seconds),
-            ctypes.byref(menu_enabled),
+            ctypes.byref(menu_enabled), ctypes.byref(ignore_self),
         )
         action_results.append({
             "target_language": target_language.value,
             "timeout_seconds": timeout_seconds.value,
             "menu_enabled": menu_enabled.value,
+            "ignore_self": ignore_self.value,
         })
     elif op == "request_remaining":
         remaining = lib.fixture_RequestDeadlineRemaining(action["token"].encode("ascii"))
@@ -285,9 +291,10 @@ enabled = lib.fixture_Enabled()
 target_language = ctypes.c_uint32()
 timeout_seconds = ctypes.c_uint32()
 menu_enabled = ctypes.c_uint32()
+ignore_self = ctypes.c_uint32()
 lib.fixture_ReadRuntimeSettings(
     ctypes.byref(target_language), ctypes.byref(timeout_seconds),
-    ctypes.byref(menu_enabled),
+    ctypes.byref(menu_enabled), ctypes.byref(ignore_self),
 )
 result = {
     "status": status,
@@ -298,6 +305,7 @@ result = {
     "timeout": timeout_seconds.value,
     "target_language": target_language.value,
     "menu_enabled": menu_enabled.value,
+    "ignore_self": ignore_self.value,
     "cache_count": lib.fixture_CacheCount(),
     "rate_count": lib.fixture_RateCount(),
     "actions": action_results,
@@ -530,13 +538,15 @@ __declspec(dllexport) int __cdecl fixture_ConfigMatches(
 }
 
 __declspec(dllexport) void __cdecl fixture_ReadRuntimeSettings(
-    uint32_t *target_language, uint32_t *timeout_seconds, uint32_t *enabled)
+    uint32_t *target_language, uint32_t *timeout_seconds, uint32_t *enabled,
+    uint32_t *ignore_self)
 {
     HD2CT_RuntimeSettings settings;
     hd2ct_read_applied_settings(&settings);
     if (target_language != NULL) *target_language = settings.target_language;
     if (timeout_seconds != NULL) *timeout_seconds = settings.timeout_seconds;
     if (enabled != NULL) *enabled = settings.enabled;
+    if (ignore_self != NULL) *ignore_self = settings.ignore_self;
 }
 
 __declspec(dllexport) uint64_t __cdecl fixture_RequestDeadlineRemaining(
@@ -901,6 +911,7 @@ class NativeHttpWorkerTests(unittest.TestCase):
         enabled_value: str = "true",
         target_language_index: int = 1,
         model: str = "fake-model",
+        ignore_self_value: str | None = None,
     ) -> dict:
         selected_url = url if url is not None else self.url + "/"
         config = {
@@ -920,7 +931,8 @@ class NativeHttpWorkerTests(unittest.TestCase):
                 "user": config,
                 "__target_values_path": str(values_path),
                 "__target_primary": self._runtime_values_text(
-                    target_language_index, enabled_value, timeout_index
+                    target_language_index, enabled_value, timeout_index,
+                    ignore_self_value,
                 ),
             }
             return self.run_environment_child(
@@ -1191,13 +1203,19 @@ class NativeHttpWorkerTests(unittest.TestCase):
     @staticmethod
     def _runtime_values_text(
         target_index: int = 1, enabled_value: str = "true", timeout_index: int = 2,
+        ignore_self_value: str | None = None,
     ) -> str:
         options = TARGET_LANGUAGE_CATALOGUE["menu_options"]
-        return "".join((
+        values = [
             f"{TARGET_LANGUAGE_CATALOGUE['option_id']}\t{target_index}\n",
             f"{options['enabled']['option_id']}\t{enabled_value}\n",
             f"{options['timeout']['option_id']}\t{timeout_index}\n",
-        ))
+        ]
+        if ignore_self_value is not None:
+            values.append(
+                f"{options['ignore_self']['option_id']}\t{ignore_self_value}\n"
+            )
+        return "".join(values)
 
     def _exercise_target_values_fallbacks(self) -> None:
         cases = (
@@ -1327,11 +1345,15 @@ class NativeHttpWorkerTests(unittest.TestCase):
             [10, 20, 30],
         )
         self.assertEqual(menu_options["timeout"]["default_index"], 2)
+        self.assertEqual(menu_options["ignore_self"]["option_id"],
+                         "hd2chattranslate.ignore_self")
+        self.assertIs(menu_options["ignore_self"]["default"], True)
         self.assertEqual(
             len({TARGET_LANGUAGE_CATALOGUE["option_id"],
                  menu_options["enabled"]["option_id"],
+                 menu_options["ignore_self"]["option_id"],
                  menu_options["timeout"]["option_id"]}),
-            3,
+            4,
         )
         invalid_catalogues = []
         duplicate_id = json.loads(json.dumps(TARGET_LANGUAGE_CATALOGUE))
@@ -1376,10 +1398,11 @@ class NativeHttpWorkerTests(unittest.TestCase):
 
         self.state.clear()
         unknown_actions = [
+            {"op": "submit", "token": "unknown-service-self",
+             "body_hex": "73616665", "flags": 1},
+            {"op": "wait", "token": "unknown-service-self"},
             {"op": "submit", "token": "unknown-service", "body_hex": "73616665"},
             {"op": "wait", "token": "unknown-service"},
-            {"op": "submit", "token": "unknown-service-again", "body_hex": "73616665"},
-            {"op": "wait", "token": "unknown-service-again"},
         ]
         result = self.run_environment_child(
             {"user": {
@@ -1392,7 +1415,7 @@ class NativeHttpWorkerTests(unittest.TestCase):
         self.assertEqual(result["enabled"], 0)
         self.assertEqual([item.get("accepted") for item in result["actions"]],
                          [1, None, 1, None])
-        self.assertEqual(result["actions"][1]["result"], "ERR\nUNSUPPORTED_SERVICE")
+        self.assertEqual(result["actions"][1]["result"], "SKIP\n")
         self.assertEqual(result["actions"][3]["result"], "ERR\nUNSUPPORTED_SERVICE")
         self.assertEqual(result["cache_count"], 0)
         self.assertEqual(result["rate_count"], 0)
@@ -1450,6 +1473,7 @@ class NativeHttpWorkerTests(unittest.TestCase):
                     "target_language": 1,
                     "timeout_seconds": expected_timeout,
                     "menu_enabled": 1,
+                    "ignore_self": 1,
                 })
 
         settings = self.run_menu_child(
@@ -1459,10 +1483,12 @@ class NativeHttpWorkerTests(unittest.TestCase):
             "target_language": 1,
             "timeout_seconds": 20,
             "menu_enabled": 1,
+            "ignore_self": 1,
         })
         settings = self.run_menu_child(
             {}, self._runtime_values_text(
                 target_index=99, enabled_value="True", timeout_index=4,
+                ignore_self_value="True",
             ),
             actions=[{"op": "read_settings"}],
         )
@@ -1470,11 +1496,19 @@ class NativeHttpWorkerTests(unittest.TestCase):
             "target_language": 1,
             "timeout_seconds": 20,
             "menu_enabled": 1,
+            "ignore_self": 1,
         })
+
+        settings = self.run_menu_child(
+            {}, self._runtime_values_text(ignore_self_value="false"),
+            actions=[{"op": "read_settings"}],
+        )
+        self.assertEqual(settings["actions"][0]["ignore_self"], 0)
 
         primary_with_other_mod = "othermod.some_option\t2\n"
         backup_settings = self._runtime_values_text(
             target_index=3, enabled_value="false", timeout_index=3,
+            ignore_self_value="false",
         )
         settings = self.run_menu_child(
             {}, primary_with_other_mod,
@@ -1485,6 +1519,7 @@ class NativeHttpWorkerTests(unittest.TestCase):
             "target_language": 1,
             "timeout_seconds": 20,
             "menu_enabled": 1,
+            "ignore_self": 1,
         })
         settings = self.run_menu_child(
             {}, "corrupt\n",
@@ -1495,6 +1530,7 @@ class NativeHttpWorkerTests(unittest.TestCase):
             "target_language": 3,
             "timeout_seconds": 30,
             "menu_enabled": 0,
+            "ignore_self": 0,
         })
 
         self.state.clear()
@@ -2445,6 +2481,50 @@ class NativeHttpWorkerTests(unittest.TestCase):
         self.assertEqual(len(self.state.paths), 1)
 
         self.state.clear()
+        source_shared = "Hold this position together."
+        self.state.response = provider_response(
+            result_content("Hold position together translated", is_target_language=False))
+        self_filtered = self.run_child(
+            actions=[
+                {"op": "submit", "token": "other-sender",
+                 "body_hex": source_shared.encode("utf-8").hex()},
+                {"op": "wait", "token": "other-sender"},
+                {"op": "submit", "token": "self-sender", "flags": 1,
+                 "body_hex": source_shared.encode("utf-8").hex()},
+                {"op": "wait", "token": "self-sender"},
+                {"op": "submit", "token": "other-sender-cache",
+                 "body_hex": source_shared.encode("utf-8").hex()},
+                {"op": "wait", "token": "other-sender-cache"},
+                {"op": "submit", "token": "unknown-flags", "flags": 2,
+                 "body_hex": source_shared.encode("utf-8").hex()},
+            ],
+        )
+        self.assertEqual(self_filtered["actions"][1]["result"],
+                         "OK\nHold position together translated")
+        self.assertEqual(self_filtered["actions"][3]["result"], "SKIP\n")
+        self.assertEqual(self_filtered["actions"][5]["result"],
+                         "OK\nHold position together translated")
+        self.assertEqual(self_filtered["actions"][6]["accepted"], 0)
+        self.assertEqual(len(self.state.paths), 1)
+        self.assertEqual(self_filtered["cache_count"], 1)
+        self.assertEqual(self_filtered["rate_count"], 1)
+
+        self.state.clear()
+        self.state.response = provider_response(
+            result_content("Self messages enabled", is_target_language=False))
+        allowed_self = self.run_child(
+            actions=[
+                {"op": "submit", "token": "self-messages-enabled", "flags": 1,
+                 "body_hex": "73656c66206d657373616765"},
+                {"op": "wait", "token": "self-messages-enabled"},
+            ],
+            ignore_self_value="false",
+        )
+        self.assertEqual(allowed_self["actions"][1]["result"],
+                         "OK\nSelf messages enabled")
+        self.assertEqual(len(self.state.paths), 1)
+
+        self.state.clear()
         self.state.response = provider_response(result_content("打得不错", is_target_language=False))
         raw_gg = "\tGgS \r\n"
         translated_gg = self.run_child(
@@ -2456,7 +2536,7 @@ class NativeHttpWorkerTests(unittest.TestCase):
         self.assertEqual(translated_gg["actions"][1]["result"], "OK\n打得不错")
         self.assertEqual(self.state.payloads[0]["messages"][1]["content"], raw_gg)
     def test_http401_is_redacted_and_invalid_model_result_is_classified(self) -> None:
-        self.assertEqual(self.meta_json["abi_version"], 2)
+        self.assertEqual(self.meta_json["abi_version"], 3)
         self.assertEqual(
             self.meta_json["target_languages_sha256"],
             target_languages.catalogue_sha256(TARGET_LANGUAGE_CATALOGUE),

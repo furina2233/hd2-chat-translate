@@ -11,6 +11,13 @@
       "default": true,
       "description": "无论是否启用，都会监听聊天框。要想完全移除，请在模组管理器中卸载模组。"
     },
+    "ignore_self": {
+      "option_id": "hd2chattranslate.ignore_self",
+      "type": "toggle",
+      "label": "不翻译自己说的话",
+      "default": true,
+      "description": "开启后不翻译识别为自己发送的消息；无法确认发送者时照常翻译。"
+    },
     "timeout": {
       "option_id": "hd2chattranslate.timeout",
       "type": "choice",

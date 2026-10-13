@@ -95,7 +95,7 @@ def validate_native_dll(
         type(meta.get("schema_version")) is not int
         or meta.get("schema_version") != 1
         or type(meta.get("abi_version")) is not int
-        or meta.get("abi_version") != 2
+        or meta.get("abi_version") != 3
         or meta.get("filename") != "hd2ct_http.dll"
         or meta.get("architecture") != "x86_64"
         or isinstance(meta.get("size"), bool)
@@ -169,7 +169,7 @@ def standalone_module_source(
     if len(template) + size * 2 > MAX_SOURCE_BYTES:
         raise ValueError("DLL hex载荷将超过512 KiB Lua源码上限；请将结果交由主控评估")
     payload = (
-        "local HD2CT_ABI_VERSION = 2\n"
+        "local HD2CT_ABI_VERSION = 3\n"
         f"local HD2CT_DLL_SIZE = {size}\n"
         f'local HD2CT_DLL_SHA256 = "{digest}"\n'
         f'local HD2CT_DLL_HEX = "{dll.hex()}"\n'
@@ -211,6 +211,16 @@ def target_language_settings_source(
         "            label = " + _lua_string_literal(enabled["label"]) + ",",
         "            default = true,",
         "            description = " + _lua_string_literal(enabled["description"]) + ",",
+        "        },",
+    ])
+    ignore_self = data["menu_options"]["ignore_self"]
+    lines.extend([
+        "        ignore_self = {",
+        "            option_id = " + _lua_string_literal(ignore_self["option_id"]) + ",",
+        "            type = " + _lua_string_literal(ignore_self["type"]) + ",",
+        "            label = " + _lua_string_literal(ignore_self["label"]) + ",",
+        "            default = true,",
+        "            description = " + _lua_string_literal(ignore_self["description"]) + ",",
         "        },",
     ])
     timeout = data["menu_options"]["timeout"]

@@ -97,6 +97,17 @@ local function new_registration_step()
             },
         },
         {
+            option_id = catalogue.menu_options.ignore_self.option_id,
+            spec = {
+                type = catalogue.menu_options.ignore_self.type,
+                label = text_callback("ignore_self_label"),
+                mod = "HD2 Chat Translate",
+                mod_id = catalogue.mod_id,
+                default = catalogue.menu_options.ignore_self.default,
+                description = text_callback("ignore_self_description"),
+            },
+        },
+        {
             option_id = catalogue.menu_options.timeout.option_id,
             spec = {
                 type = catalogue.menu_options.timeout.type,
