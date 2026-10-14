@@ -42,7 +42,7 @@ if (-not (Test-Path -LiteralPath artifacts/Mod-Options-Menu-v1.2.zip)) {
 
 native/vendor/cjson/ 已包含固定的 [cJSON v1.7.19](https://github.com/DaveGamble/cJSON/tree/v1.7.19) 源码与 MIT 许可。无需另行下载、安装 HD2SDK 或提取游戏资源。
 
-免费服务的发布配置单独存放在 Git 忽略的 `config/free-service.private.json`。从 `config/free-service.example.json` 复制该文件，填写 `endpoint_url` 和 UUID 格式的 `key1`；构建器不会自动生成校验码。此文件用于编译 FREE 适配器，普通玩家安装 ZIP 时不需要它。缺少或无效的私有配置会阻止构建。
+FREE 后备服务的发布配置单独存放在 Git 忽略的 `config/free-service.private.json`。从 `config/free-service.example.json` 复制该文件，填写 `endpoint_url` 和 UUID 格式的 `key1`；构建器不会自动生成校验码。此文件用于编译 Bing 失败时调用的 FREE 后备服务，普通玩家安装 ZIP 时不需要它。Bing 网页会话参数由客户端自动获取，不需要用户提供 API 密钥。缺少或无效的私有配置会阻止构建。
 
 ~~~pwsh
 Copy-Item -LiteralPath config/free-service.example.json -Destination config/free-service.private.json

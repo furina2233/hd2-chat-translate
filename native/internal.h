@@ -88,6 +88,39 @@ typedef struct HD2CT_WorkerJob {
     uint32_t ignore_self;
 } HD2CT_WorkerJob;
 
+#define HD2CT_BING_IG_CAPACITY 129u
+#define HD2CT_BING_IID_CAPACITY 129u
+#define HD2CT_BING_KEY_CAPACITY 14u
+#define HD2CT_BING_TOKEN_CAPACITY 513u
+
+typedef struct HD2CT_BingState {
+    HINTERNET session;
+    uint32_t use_china_endpoint;
+    char ig[HD2CT_BING_IG_CAPACITY];
+    char iid[HD2CT_BING_IID_CAPACITY];
+    char key[HD2CT_BING_KEY_CAPACITY];
+    char token[HD2CT_BING_TOKEN_CAPACITY];
+    uint64_t initialized_ms;
+    uint64_t cooldown_until_ms;
+    uint32_t translation_count;
+    uint32_t ready;
+} HD2CT_BingState;
+
+typedef struct HD2CT_BingContext {
+    HD2CT_BingState *state;
+    const HD2CT_WorkerJob *job;
+    uint64_t deadline;
+    int *request_attempted;
+    const char **failure_code;
+} HD2CT_BingContext;
+
+enum {
+    HD2CT_BING_FALLBACK = 0,
+    HD2CT_BING_TRANSLATED = 1,
+    HD2CT_BING_CANCELLED = 2,
+    HD2CT_BING_RATE_LIMITED = 3
+};
+
 typedef struct HD2CT_RuntimeSettings {
     uint32_t target_language;
     uint32_t timeout_seconds;
@@ -201,13 +234,29 @@ int hd2ct_build_free_request(const HD2CT_WorkerJob *job, HD2CT_BuiltRequest *req
 int hd2ct_parse_free_response(const HD2CT_WorkerJob *job, char *body,
                               size_t body_bytes, char *translation,
                               uint32_t *translation_bytes, const char **failure_code);
+int hd2ct_bing_state_init(HD2CT_BingState *state);
+void hd2ct_bing_state_destroy(HD2CT_BingState *state);
+int hd2ct_bing_translate(HD2CT_BingContext *context, char *translation,
+                         uint32_t *translation_bytes);
+#ifdef HD2CT_TESTING
+int hd2ct_bing_test_parse_page(const char *html, size_t html_bytes,
+                               char *ig, size_t ig_capacity,
+                               char *iid, size_t iid_capacity,
+                               char *key, size_t key_capacity,
+                               char *token, size_t token_capacity);
+int hd2ct_bing_test_parse_response(const char *body, size_t body_bytes,
+                                   const char *target, char *translation,
+                                   uint32_t *translation_bytes,
+                                   const char **failure_code);
+#endif
 /* 传输层只调用核心提供的取消与限流钩子。 */
 int hd2ct_job_cancelled(uint32_t slot_index, uint64_t serial);
 int hd2ct_take_rate_slot(void);
 uint32_t hd2ct_remaining_ms(uint64_t deadline);
 int hd2ct_set_remaining_timeouts(HINTERNET handle, uint64_t deadline);
 const char *hd2ct_winhttp_failure(uint64_t deadline, DWORD error);
-void hd2ct_http_worker_request(HINTERNET session, const HD2CT_WorkerJob *job,
+void hd2ct_http_worker_request(HINTERNET session, HD2CT_BingState *bing_state,
+                               const HD2CT_WorkerJob *job,
                                char *result, uint32_t *result_bytes,
                                int *successful, int *request_attempted,
                                uint64_t request_deadline);

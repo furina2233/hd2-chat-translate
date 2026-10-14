@@ -29,6 +29,8 @@
 | [adapter/google.c](../native/adapter/google.c) | Google Basic v2 请求与响应解析 |
 | [adapter/baidu.c](../native/adapter/baidu.c) | 百度通用翻译请求与响应解析 |
 | [adapter/youdao.c](../native/adapter/youdao.c) | 有道文本翻译请求与响应解析 |
+| [adapter/bing.c](../native/adapter/bing.c) | FREE 首选的 Bing 网页会话、请求与响应解析 |
+| [adapter/free.c](../native/adapter/free.c) | FREE 后备服务的请求、姓名哈希与响应解析 |
 | [transport.c](../native/transport.c) | WinHTTP 传输、请求截止时间、取消检查与网络资源清理 |
 
 各 `.c` 文件独立编译，私有函数只在 DLL 内链接。队列及线程共享状态集中在入口模块，通过少量私有函数协作；JSON 解析使用仓库内的 cJSON v1.7.19。
@@ -57,11 +59,11 @@
 
 首次有效提交由原生客户端启动一次后台初始化，读取服务配置的 Windows 持久环境变量：先读 HKCU\Environment，再读 HKLM\SYSTEM\CurrentControlSet\Control\Session Manager\Environment。若用户变量存在，即使值为空或无效，也不回退到系统变量；不读取进程继承值。每个进程只初始化一次；服务选择、地址、凭据和配置有效性由 C 管理，启用状态、自己消息过滤和请求超时来自已应用的 Mod Options Menu 设置。
 
-HD2CT_API_URL 缺失或为空字符串时选择 FREE，使用固定端点且跳过 model、key、appid 读取；非空 URL 继续按原规则选择服务，纯空白仍按原校验处理。HD2CT_MODEL 非空时选择 AI 翻译；缺失、为空或仅含空白时选择机器翻译，按 URL 中忽略大小写的 google、baidu、youdao 依次匹配。已支持的 AI/机器翻译服务需要 HD2CT_API_URL 与 HD2CT_API_KEY，百度、有道还需要 HD2CT_APP_ID。模型名最多 256 字节，密钥与应用 ID 各最多 4096 字节，URL 最多 2048 字节。旧变量 HD2CT_ENABLED 与 HD2CT_TIMEOUT_SECONDS 不再读取，缺失或无效的 Mod Options Menu 启用项和自己消息过滤项默认开启，超时项默认20秒，可选10、20、30秒。凭据保存在进程内供请求使用；配置无效或后台初始化失败时会清零，菜单关闭不会清理凭据或停止 worker。
+HD2CT_API_URL 缺失或为空字符串时选择 FREE，优先使用 Bing 网页翻译，失败时调用编译时配置的后备免费服务，跳过 model、key、appid 读取；非空 URL 继续按服务配置选择，纯空白仍按原校验处理。HD2CT_MODEL 非空时选择 AI 翻译；缺失、为空或仅含空白时选择机器翻译，按 URL 中忽略大小写的 google、baidu、youdao 依次匹配。已支持的 AI/机器翻译服务需要 HD2CT_API_URL 与 HD2CT_API_KEY，百度、有道还需要 HD2CT_APP_ID。模型名最多 256 字节，密钥与应用 ID 各最多 4096 字节，URL 最多 2048 字节。旧变量 HD2CT_ENABLED 与 HD2CT_TIMEOUT_SECONDS 不再读取，缺失或无效的 Mod Options Menu 启用项和自己消息过滤项默认开启，超时项默认20秒，可选10、20、30秒。凭据保存在进程内供请求使用；配置无效或后台初始化失败时会清零，菜单关闭不会清理凭据或停止 worker。
 
 后台 worker 每次开始处理任务时，从 `%LOCALAPPDATA%\CowboyBingus\Helldivers2\Logs\ModOptionsMenu.values` 的同一份 primary/backup 文件快照读取本插件的目标语言、启用状态、自己消息过滤状态与超时。值缺失或无效时分别回退到简体中文、开启、开启和20秒；启用及自己消息过滤值只接受小写 `true`/`false`，超时值是1起始的三项 choice 索引。可读且有记录的 primary 中若缺少某项或该项值无效，使用该项默认值，不从旧 backup 覆盖；primary 不可读、损坏或没有有效记录时才尝试 backup。提交、轮询和游戏线程不做该文件 I/O。
 
-AI 与已有机器翻译适配器要求 HTTPS；只有 localhost、127.0.0.0/8 和 ::1 可使用 HTTP。FREE 只允许固定端点使用远端 HTTP。AI 适配器把地址根路径补全为 /chat/completions，或把精确的 /v1、/v1/ 补全为 /v1/chat/completions。已有机器翻译适配器仅把根路径补全为各自接口；其他路径保持原样。拒绝普通服务 URL 中的凭据、查询、片段、反斜杠、空白和控制字符；禁用重定向、cookies 和自动认证。
+AI、Google、百度和有道适配器要求 HTTPS；只有 localhost、127.0.0.0/8 和 ::1 可使用 HTTP。FREE 后备服务只允许编译时固定端点使用远端 HTTP；Bing 网页请求使用固定的 HTTPS 域名。AI 适配器把地址根路径补全为 /chat/completions，或把精确的 /v1、/v1/ 补全为 /v1/chat/completions。已有机器翻译适配器仅把根路径补全为各自接口；其他路径保持原样。拒绝普通服务 URL 中的凭据、查询、片段、反斜杠、空白和控制字符；普通服务请求禁用重定向、cookies 和自动认证；Bing 使用独立的网页 Cookie 会话，地区跳转规则见下文。
 
 AI 适配器使用 OpenAI-compatible Chat Completions 请求，只发送 `model`、`messages` 和 `response_format: {"type":"json_object"}`。请求不显式设置采样或思考参数，也不发送 `stream`；模型使用服务端默认策略及非流式默认行为。端点需同时实现兼容的 Chat Completions 与 JSON mode；供应商原生 API 不一定支持这两者。JSON mode 保证输出是合法 JSON 语法，不保证对象字段结构；提示词要求只返回 `is_target_language`（布尔值）和 `translation`（字符串），客户端再严格校验字段、类型、重复字段和额外字段。[DeepSeek Chat Completions 文档](https://api-docs.deepseek.com/api/create-chat-completion/)；[通义千问结构化输出文档](https://help.aliyun.com/zh/model-studio/qwen-structured-output)。完整简体中文请求示例见 [ai-request-example.json](ai-request-example.json)。
 
@@ -92,13 +94,18 @@ ABI 4 的 DLL 仍只导出三个函数，签名见 [client.h](../native/client.h
 | [Google Basic v2](https://docs.cloud.google.com/translate/docs/reference/rest/v2/translate) | POST /language/translate/v2；JSON q、target、format=text；[x-goog-api-key 请求头](https://docs.cloud.google.com/docs/authentication/api-keys-use)，不把密钥写入 URL | data.translations 的 translatedText、detectedSourceLanguage |
 | [百度通用翻译](https://fanyi-api.baidu.com/doc_bd/21) | POST /api/trans/vip/translate；UTF-8 表单 q、from=auto、to、appid、salt、sign；sign=MD5(appid+原始 q+salt+密钥)，小写十六进制 | from、trans_result 中的 dst |
 | [有道文本翻译](https://ai.youdao.com/DOCSIRMA/html/trans/api/wbfy/index.html) | POST /api；UTF-8 表单 q、from=auto、to、appKey、salt、curtime、signType=v3、sign、strict=true；sign=SHA256(appKey+input+salt+curtime+密钥) | errorCode=0、l、translation |
-| FREE | POST 编译时配置的端点；JSON key1、key2、text、target_language；key2 是本地玩家姓名精确 UTF-8 字节的 SHA-256 小写十六进制，不裁剪空白、不转换大小写或进行 Unicode 归一化 | 成功和失败都要求 `data.text`、`data.reason` 字符串；成功时 reason 为空，失败时 reason 只映射为固定短码 |
+| FREE（首选 Bing） | GET /translator 获取网页会话，POST /ttranslatev3；表单 fromLang=auto-detect、text、to、网页 key、token；URL 参数 isVertical、IG、IID | 单条结果数组中的 translations[0].text，to 必须与目标语言匹配 |
+| FREE（后备服务） | POST 编译时配置的端点；JSON key1、key2、text、target_language；key2 是本地玩家姓名精确 UTF-8 字节的 SHA-256 小写十六进制，不裁剪空白、不转换大小写或进行 Unicode 归一化 | 成功和失败都要求 `data.text`、`data.reason` 字符串；成功时 reason 为空，失败时 reason 只映射为固定短码 |
 
 有道 input 按 Unicode 码点计数：最多 20 个码点时为完整 q，否则为前 10 个码点、十进制码点总数、后 10 个码点。签名使用尚未 URL 编码的 UTF-8 文本，表单各字段随后编码；curtime 为 UTC Unix 秒。签名及随机 salt 使用 Windows BCrypt。
 
-FREE 的端点和 key1 由 Git 忽略的 `config/free-service.private.json` 提供，字段为 `endpoint_url` 与 `key1`。构建器校验配置并生成 `free_service.generated.h`，将配置编入 DLL；metadata 保存私有配置文件摘要，打包时核对摘要，避免组合不一致的配置与 DLL。只对 FREE 放行该编译时精确端点的远端 HTTP；其他适配器仍只允许 loopback HTTP，WinHTTP 禁止重定向。FREE 不读取或使用 model、API key、app ID。本地姓名在稳定身份快照中缓存，名字哈希在 C 后台 worker 构造 FREE 请求时计算，不增加逐帧读取。无法获得本地姓名时，FREE 返回 `FREE_PLAYER_UNKNOWN`，不发起网络请求；其他适配器不依赖姓名。
+FREE 的 Bing 请求由 [bing.c](../native/adapter/bing.c) 在后台处理，参考 [XUnity 的 Bing 网页端点](https://github.com/bbepis/XUnity.AutoTranslator/blob/08324a58dcb26b76fc08e0fb2121098164579e73/src/Translators/BingTranslate/BingTranslateEndpoint.cs)。每个 worker 独立保存 Cookie、IG、IID 和页面 `params_AbusePreventionHelper` 中的临时 key/token，不读取浏览器用户 Cookie，也不执行网页脚本。页面存在多个 IID 时取第一个并校验其合法性，IG 和参数赋值要求唯一。简体中文使用 zh-Hans，繁体中文使用 zh-Hant，其余目标使用目录中的 Google 语言码。网页与响应最多1MB，JSON 有深度、节点和成员数量限制；HTTP 200 错误体、无效译文及目标不匹配都触发回退。
 
-服务端保持全局每分钟100次限制，并使用独立 Redis 命名空间对每个姓名哈希限制每日50次；额度按北京时间每日00:00重置。只有通过鉴权、输入校验、全局及每日限额的请求计入次数和原文 Unicode 字符总数，上游翻译失败仍计入，超额拒绝不计入。Redis 不可用时返回服务器错误，不调用翻译上游。每日00:00将前一日每个哈希的次数、字符总数，以及所有哈希的请求总数、最少次数、最多次数写入服务器日志；空日报的最小值和最大值为0。客户端本地限流仍为每分钟30次。
+Bing 首先访问 `https://www.bing.com/translator`；只接受该 GET 跳转至 HTTPS、443端口、无用户信息且路径为 `/translator` 的 `cn.bing.com` 地址，随后在同一请求时限内使用固定 CN 地址，跳转查询参数不转发。其他跳转和 POST 跳转不跟随。会话最多缓存10分钟或75次翻译；失败后清理会话，该 worker 在60秒内直接使用后备服务。Bing 阶段最多使用剩余总时限的一半，且不超过6秒；后备服务使用同一总截止时间的剩余部分。取消、总超时耗尽或本地限流时停止，不再回退。Bing 成功时不访问后备服务器，也不消耗服务器的每日额度。
+
+FREE 后备服务的端点和 key1 由 Git 忽略的 `config/free-service.private.json` 提供，字段为 `endpoint_url` 与 `key1`。构建器校验配置并生成 `free_service.generated.h`，将配置编入 DLL；metadata 保存私有配置文件摘要，打包时核对摘要，避免组合不一致的配置与 DLL。只对 FREE 放行该编译时精确端点的远端 HTTP；其他适配器仍只允许 loopback HTTP，WinHTTP 禁止重定向。FREE 不读取或使用 model、API key、app ID。本地姓名在稳定身份快照中缓存，名字哈希在 C 后台 worker 构造 FREE 请求时计算，不增加逐帧读取。Bing 不依赖玩家姓名。需要回退但无法获得本地姓名时返回 `FREE_PLAYER_UNKNOWN`，不请求后备服务；其他适配器不依赖姓名。
+
+服务端保持全局每分钟100次限制，并使用独立 Redis 命名空间对每个姓名哈希限制每日50次；额度按北京时间每日00:00重置。只有通过鉴权、输入校验、全局及每日限额的请求计入次数和原文 Unicode 字符总数，上游翻译失败仍计入，超额拒绝不计入。Redis 不可用时返回服务器错误，不调用翻译上游。每日00:00将前一日每个哈希的次数、字符总数，以及所有哈希的请求总数、最少次数、最多次数写入服务器日志；空日报的最小值和最大值为0。客户端对翻译 POST 的本地限流为每分钟30次，Bing 与后备服务共用；网页初始化 GET 不计入翻译 POST 次数。
 
 每日额度耗尽映射为 `FREE_DAILY_LIMIT`（“今日免费次数已用尽，请明天再试”），姓名哈希无效映射为 `FREE_PLAYER_INVALID`（“玩家身份哈希无效”）。服务端余额耗尽映射为 `FREE_QUOTA_EXCEEDED`（“免费版的余额已用尽，请自行配置提供商”），服务端错误及 FREE 响应结构无效或 HTTP 5xx 映射为 `FREE_SERVER_ERROR`（“服务器错误，请联系作者”），免费校验码需要更新时映射为 `FREE_UPGRADE_REQUIRED`（“请升级hd2-chat-translate以继续使用免费版服务”）。其他适配器的 `QUOTA_EXCEEDED` 提示保持“翻译额度不足”。
 

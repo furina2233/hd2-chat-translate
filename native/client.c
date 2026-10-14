@@ -422,7 +422,8 @@ static int hd2ct_take_next_job_locked(HD2CT_WorkerJob *copy)
     return 1;
 }
 
-static void hd2ct_process_job(HINTERNET session, HD2CT_WorkerJob *job)
+static void hd2ct_process_job(HINTERNET session, HD2CT_BingState *bing_state,
+                              HD2CT_WorkerJob *job)
 {
     char result[HD2CT_MAX_RESULT + 1u];
     HD2CT_RuntimeSettings settings;
@@ -447,13 +448,6 @@ static void hd2ct_process_job(HINTERNET session, HD2CT_WorkerJob *job)
     if (job->menu_enabled == 0u ||
         (job->ignore_self != 0u && (job->flags & HD2CT_MESSAGE_SELF) != 0u)) {
         hd2ct_complete_job(job, "SKIP\n", 5u, 0, 0);
-        return;
-    }
-    if (job->adapter_id == HD2CT_ADAPTER_FREE && job->player_name[0] == '\0') {
-        hd2ct_build_error(result, sizeof(result), &result_bytes,
-                          "FREE_PLAYER_UNKNOWN");
-        hd2ct_complete_job(job, result, result_bytes, 0, 0);
-        SecureZeroMemory(result, sizeof(result));
         return;
     }
     config_status = (uint32_t)InterlockedCompareExchange(&g_status, 0, 0);
@@ -514,7 +508,7 @@ static void hd2ct_process_job(HINTERNET session, HD2CT_WorkerJob *job)
         return;
     }
     hd2ct_set_slot_request_deadline(job, request_deadline);
-    hd2ct_http_worker_request(session, job, result, &result_bytes,
+    hd2ct_http_worker_request(session, bing_state, job, result, &result_bytes,
                               &successful, &request_attempted, request_deadline);
     if (hd2ct_job_cancelled(job->slot_index, job->serial)) {
         hd2ct_complete_job(job, result, result_bytes, 0, 0);
@@ -549,7 +543,9 @@ static void hd2ct_process_job(HINTERNET session, HD2CT_WorkerJob *job)
 static unsigned __stdcall hd2ct_worker_main(void *parameter)
 {
     HINTERNET session = NULL;
+    HD2CT_BingState bing_state;
     (void)parameter;
+    (void)hd2ct_bing_state_init(&bing_state);
 #ifdef HD2CT_TESTING
     if (InterlockedCompareExchange(&g_test_fail_worker_session, 0, 0) != 0) {
         hd2ct_mark_worker_failure();
@@ -596,11 +592,12 @@ static unsigned __stdcall hd2ct_worker_main(void *parameter)
         }
         ReleaseSRWLockExclusive(&g_lock);
         if (have_job) {
-            hd2ct_process_job(session, &job);
+            hd2ct_process_job(session, &bing_state, &job);
             SecureZeroMemory(&job, sizeof(job));
         }
     }
     if (session != NULL) WinHttpCloseHandle(session);
+    hd2ct_bing_state_destroy(&bing_state);
     return 0;
 }
 

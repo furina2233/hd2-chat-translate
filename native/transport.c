@@ -108,10 +108,11 @@ static void hd2ct_free_url_parts(HD2CT_UrlParts *parts)
     }
 }
 
-void hd2ct_http_worker_request(HINTERNET session, const HD2CT_WorkerJob *job,
-                                      char *result, uint32_t *result_bytes,
-                                      int *successful, int *request_attempted,
-                                      uint64_t request_deadline)
+static void hd2ct_http_provider_request(HINTERNET session,
+                                       const HD2CT_WorkerJob *job,
+                                       char *result, uint32_t *result_bytes,
+                                       int *successful, int *request_attempted,
+                                       uint64_t request_deadline)
 {
     HD2CT_UrlParts url_parts;
     HD2CT_BuiltRequest built_request;
@@ -337,4 +338,84 @@ cleanup:
     if (!ok) {
         hd2ct_build_error(result, HD2CT_MAX_RESULT + 1u, result_bytes, failure_code);
     }
+}
+
+void hd2ct_http_worker_request(HINTERNET session, HD2CT_BingState *bing_state,
+                               const HD2CT_WorkerJob *job,
+                               char *result, uint32_t *result_bytes,
+                               int *successful, int *request_attempted,
+                               uint64_t request_deadline)
+{
+    int bing_attempted = 0;
+    int fallback_attempted = 0;
+    *successful = 0;
+    *request_attempted = 0;
+    if (job->adapter_id == HD2CT_ADAPTER_FREE) {
+#if !defined(HD2CT_TESTING) || defined(HD2CT_BING_TEST_BASE_URL)
+        HD2CT_BingContext context;
+        char translated[HD2CT_MAX_TRANSLATION + 1u];
+        uint32_t translated_bytes = 0;
+        uint64_t bing_deadline;
+        uint32_t remaining = hd2ct_remaining_ms(request_deadline);
+        uint32_t budget = remaining / 2u;
+        int bing_result = HD2CT_BING_FALLBACK;
+        const char *failure_code = "NETWORK";
+        if (budget > 6000u) budget = 6000u;
+        if (budget != 0u && bing_state != NULL) {
+            bing_deadline = GetTickCount64() + budget;
+            if (bing_deadline > request_deadline) bing_deadline = request_deadline;
+            context.state = bing_state;
+            context.job = job;
+            context.deadline = bing_deadline;
+            context.request_attempted = &bing_attempted;
+            context.failure_code = &failure_code;
+            bing_result = hd2ct_bing_translate(&context, translated,
+                                               &translated_bytes);
+            if (bing_result == HD2CT_BING_TRANSLATED) {
+                memcpy(result, "OK\n", 3u);
+                memcpy(result + 3u, translated, translated_bytes);
+                result_bytes[0] = translated_bytes + 3u;
+                result[result_bytes[0]] = '\0';
+                *successful = 1;
+                *request_attempted = bing_attempted;
+                SecureZeroMemory(translated, sizeof(translated));
+                return;
+            }
+            SecureZeroMemory(translated, sizeof(translated));
+            if (bing_result == HD2CT_BING_CANCELLED ||
+                hd2ct_job_cancelled(job->slot_index, job->serial)) {
+                hd2ct_build_error(result, HD2CT_MAX_RESULT + 1u,
+                                  result_bytes, "CANCELLED");
+                *request_attempted = bing_attempted;
+                return;
+            }
+            if (bing_result == HD2CT_BING_RATE_LIMITED) {
+                hd2ct_build_error(result, HD2CT_MAX_RESULT + 1u,
+                                  result_bytes, "RATE_LIMITED");
+                *request_attempted = bing_attempted;
+                return;
+            }
+            if (hd2ct_remaining_ms(request_deadline) == 0u) {
+                hd2ct_build_error(result, HD2CT_MAX_RESULT + 1u,
+                                  result_bytes, "TIMEOUT");
+                *request_attempted = bing_attempted;
+                return;
+            }
+        }
+#endif
+        if (job->player_name[0] == '\0') {
+            hd2ct_build_error(result, HD2CT_MAX_RESULT + 1u,
+                              result_bytes, "FREE_PLAYER_UNKNOWN");
+            *request_attempted = bing_attempted;
+            return;
+        }
+        hd2ct_http_provider_request(session, job, result, result_bytes,
+                                    successful, &fallback_attempted,
+                                    request_deadline);
+        *request_attempted = bing_attempted || fallback_attempted;
+        return;
+    }
+    hd2ct_http_provider_request(session, job, result, result_bytes,
+                                successful, request_attempted,
+                                request_deadline);
 }

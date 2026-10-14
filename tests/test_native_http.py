@@ -15,7 +15,7 @@ import threading
 import time
 import unittest
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from urllib.parse import parse_qs
+from urllib.parse import parse_qs, urlsplit
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -90,6 +90,8 @@ lib.fixture_CacheCount.argtypes = []
 lib.fixture_CacheCount.restype = ctypes.c_uint32
 lib.fixture_RateCount.argtypes = []
 lib.fixture_RateCount.restype = ctypes.c_uint32
+lib.fixture_FillRateLimit.argtypes = []
+lib.fixture_FillRateLimit.restype = None
 lib.fixture_Initialized.argtypes = []
 lib.fixture_Initialized.restype = ctypes.c_uint32
 lib.fixture_Status.argtypes = []
@@ -122,6 +124,25 @@ lib.HD2CT_Poll.argtypes = [
 lib.HD2CT_Poll.restype = ctypes.c_uint32
 lib.HD2CT_Cancel.argtypes = [ctypes.c_char_p]
 lib.HD2CT_Cancel.restype = ctypes.c_uint32
+lib.fixture_ParseBingPage.argtypes = [
+    ctypes.c_char_p, ctypes.c_size_t,
+    ctypes.c_void_p, ctypes.c_size_t, ctypes.c_void_p, ctypes.c_size_t,
+    ctypes.c_void_p, ctypes.c_size_t, ctypes.c_void_p, ctypes.c_size_t,
+]
+lib.fixture_ParseBingPage.restype = ctypes.c_int
+lib.fixture_ParseBingResponse.argtypes = [
+    ctypes.c_char_p, ctypes.c_size_t, ctypes.c_char_p, ctypes.c_void_p,
+    ctypes.POINTER(ctypes.c_uint32), ctypes.POINTER(ctypes.c_char_p),
+]
+lib.fixture_ParseBingResponse.restype = ctypes.c_int
+lib.fixture_BingReset.argtypes = [ctypes.c_uint32]
+lib.fixture_BingReset.restype = ctypes.c_int
+lib.fixture_BingTranslate.argtypes = [
+    ctypes.c_uint32, ctypes.c_uint32, ctypes.c_char_p, ctypes.c_uint32,
+    ctypes.c_void_p, ctypes.c_uint32, ctypes.POINTER(ctypes.c_uint32),
+    ctypes.POINTER(ctypes.c_int), ctypes.c_void_p, ctypes.c_uint32,
+]
+lib.fixture_BingTranslate.restype = ctypes.c_int
 
 lib.fixture_ClearRegistry()
 fixture = json.loads(registry_json)
@@ -306,6 +327,9 @@ for action in actions:
     elif op == "request_remaining":
         remaining = lib.fixture_RequestDeadlineRemaining(action["token"].encode("ascii"))
         action_results.append({"remaining_ms": int(remaining)})
+    elif op == "fill_rate_limit":
+        lib.fixture_FillRateLimit()
+        action_results.append({"filled": True})
     else:
         raise RuntimeError("unknown environment fixture action")
 
@@ -436,6 +460,105 @@ __declspec(dllexport) int __cdecl fixture_ParseFreeResponse(
     if (code == NULL || strlen(code) + 1u > failure_capacity) return 0;
     memcpy(failure_code, code, strlen(code) + 1u);
     return accepted;
+}
+
+__declspec(dllexport) int __cdecl fixture_ParseBingPage(
+    const char *html, size_t html_bytes,
+    char *ig, size_t ig_capacity, char *iid, size_t iid_capacity,
+    char *key, size_t key_capacity, char *token, size_t token_capacity)
+{
+    return hd2ct_bing_test_parse_page(
+        html, html_bytes, ig, ig_capacity, iid, iid_capacity,
+        key, key_capacity, token, token_capacity);
+}
+
+__declspec(dllexport) int __cdecl fixture_ParseBingResponse(
+    const char *body, size_t body_bytes, const char *target,
+    char *translation, uint32_t *translation_bytes,
+    const char **failure_code)
+{
+    return hd2ct_bing_test_parse_response(
+        body, body_bytes, target, translation, translation_bytes, failure_code);
+}
+
+static HD2CT_BingState fixture_bing_states[2];
+static volatile LONG fixture_bing_state_initialized[2];
+static volatile LONG64 fixture_bing_serial = 1000;
+
+__declspec(dllexport) int __cdecl fixture_BingReset(uint32_t state_index)
+{
+    if (state_index >= 2u) return 0;
+    if (InterlockedCompareExchange(&fixture_bing_state_initialized[state_index],
+                                   0, 0) != 0) {
+        hd2ct_bing_state_destroy(&fixture_bing_states[state_index]);
+    }
+    if (!hd2ct_bing_state_init(&fixture_bing_states[state_index])) return 0;
+    InterlockedExchange(&fixture_bing_state_initialized[state_index], 1);
+    AcquireSRWLockExclusive(&g_lock);
+    memset(&g_jobs[state_index], 0, sizeof(g_jobs[state_index]));
+    ReleaseSRWLockExclusive(&g_lock);
+    return 1;
+}
+
+__declspec(dllexport) int __cdecl fixture_BingExpire(uint32_t state_index)
+{
+    if (state_index >= 2u ||
+        InterlockedCompareExchange(&fixture_bing_state_initialized[state_index],
+                                   0, 0) == 0) return 0;
+    fixture_bing_states[state_index].initialized_ms = 0u;
+    return 1;
+}
+
+__declspec(dllexport) int __cdecl fixture_BingTranslate(
+    uint32_t state_index, uint32_t target_language, const char *source,
+    uint32_t timeout_ms, char *translation, uint32_t translation_capacity,
+    uint32_t *translation_bytes, int *request_attempted,
+    char *failure_code, uint32_t failure_capacity)
+{
+    HD2CT_WorkerJob job;
+    HD2CT_BingContext context;
+    const char *code = "NETWORK";
+    size_t source_bytes;
+    int attempted = 0;
+    int result;
+    if (state_index >= 2u || target_language == 0u || source == NULL ||
+        translation == NULL || translation_bytes == NULL ||
+        request_attempted == NULL || failure_code == NULL ||
+        failure_capacity == 0u ||
+        InterlockedCompareExchange(&fixture_bing_state_initialized[state_index],
+                                   0, 0) == 0) return -1;
+    source_bytes = strlen(source);
+    if (source_bytes == 0u || source_bytes > HD2CT_MAX_SOURCE) return -1;
+    memset(&job, 0, sizeof(job));
+    job.slot_index = state_index;
+    job.serial = (uint64_t)InterlockedIncrement64(&fixture_bing_serial);
+    job.target_language = target_language;
+    memcpy(job.source, source, source_bytes + 1u);
+    job.source_bytes = (uint32_t)source_bytes;
+    AcquireSRWLockExclusive(&g_lock);
+    memset(&g_jobs[state_index], 0, sizeof(g_jobs[state_index]));
+    g_jobs[state_index].state = HD2CT_SLOT_ACTIVE;
+    g_jobs[state_index].serial = job.serial;
+    ReleaseSRWLockExclusive(&g_lock);
+    context.state = &fixture_bing_states[state_index];
+    context.job = &job;
+    context.deadline = GetTickCount64() + timeout_ms;
+    context.request_attempted = &attempted;
+    context.failure_code = &code;
+    *translation_bytes = 0u;
+    result = hd2ct_bing_translate(&context, translation, translation_bytes);
+    *request_attempted = attempted;
+    if (code == NULL) code = "";
+    if (strlen(code) + 1u > failure_capacity) result = -1;
+    else memcpy(failure_code, code, strlen(code) + 1u);
+    if (*translation_bytes >= translation_capacity) result = -1;
+    AcquireSRWLockExclusive(&g_lock);
+    if (g_jobs[state_index].serial == job.serial) {
+        g_jobs[state_index].state = HD2CT_SLOT_FREE;
+    }
+    ReleaseSRWLockExclusive(&g_lock);
+    SecureZeroMemory(&job, sizeof(job));
+    return result;
 }
 
 __declspec(dllexport) uint32_t __cdecl fixture_SelectAdapter(
@@ -613,6 +736,18 @@ __declspec(dllexport) uint32_t __cdecl fixture_RateCount(void)
     return g_rate_count;
 }
 
+__declspec(dllexport) void __cdecl fixture_FillRateLimit(void)
+{
+    uint32_t index;
+    uint64_t now = GetTickCount64();
+    AcquireSRWLockExclusive(&g_lock);
+    for (index = 0u; index < HD2CT_REQUESTS_PER_PERIOD; ++index) {
+        g_rate_times[index] = now;
+    }
+    g_rate_count = HD2CT_REQUESTS_PER_PERIOD;
+    ReleaseSRWLockExclusive(&g_lock);
+}
+
 __declspec(dllexport) uint32_t __cdecl fixture_Initialized(void)
 {
     return (uint32_t)InterlockedCompareExchange(&g_initialized, 0, 0);
@@ -777,16 +912,46 @@ def free_failure_response(reason: str) -> bytes:
     ).encode("utf-8")
 
 
+def bing_page(ig: str = "0123456789ABCDEF", iid: str = "translator.5022",
+              token: str = "fixture-token") -> bytes:
+    return (
+        '<script>var _G={x:"x",IG:"' + ig + '"}; '
+        'var params_AbusePreventionHelper = [1790000000000,"' + token
+        + '",3600000]; var tokenCopy=params_AbusePreventionHelper[1];</script>'
+        '<div data-iid="' + iid + '"></div>'
+        '<div data-iid="translator.5026"></div>'
+        '<div data-iid="translator.5024"></div>'
+    ).encode("utf-8")
+
+
+def bing_response(translation: str, target: str = "zh-Hans") -> bytes:
+    return json.dumps(
+        [{"translations": [{"text": translation, "to": target}]}],
+        ensure_ascii=False,
+        separators=(",", ":"),
+    ).encode("utf-8")
+
+
 class FakeState:
     def __init__(self) -> None:
         self.lock = threading.Lock()
         self.paths: list[str] = []
+        self.get_paths: list[str] = []
+        self.get_headers: list[dict[str, str]] = []
         self.payloads: list[dict] = []
         self.content_types: list[str] = []
         self.status = 200
         self.response = provider_response(result_content())
+        self.get_status = 200
+        self.get_response = bing_page()
+        self.set_cookie = "hd2ct-bing=fixture-cookie; Path=/; HttpOnly"
         self.response_by_target: dict[str, bytes] = {}
+        self.response_by_path: dict[str, bytes] = {}
+        self.status_by_path: dict[str, int] = {}
         self.delay = 0.0
+        self.get_delay = 0.0
+        self.delay_by_path: dict[str, float] = {}
+        self.response_headers_by_path: dict[str, dict[str, str]] = {}
         self.headers: list[dict[str, str]] = []
         self.request_finished = threading.Event()
         self.request_started_marker: Path | None = None
@@ -794,12 +959,23 @@ class FakeState:
     def clear(self) -> None:
         with self.lock:
             self.paths.clear()
+            self.get_paths.clear()
+            self.get_headers.clear()
             self.payloads.clear()
             self.content_types.clear()
             self.headers.clear()
             self.status = 200
+            self.response = provider_response(result_content())
+            self.get_status = 200
+            self.get_response = bing_page()
+            self.set_cookie = "hd2ct-bing=fixture-cookie; Path=/; HttpOnly"
             self.delay = 0.0
+            self.get_delay = 0.0
             self.response_by_target.clear()
+            self.response_by_path.clear()
+            self.status_by_path.clear()
+            self.delay_by_path.clear()
+            self.response_headers_by_path.clear()
         self.request_finished.clear()
         self.request_started_marker = None
 
@@ -856,7 +1032,38 @@ class NativeHttpWorkerTests(unittest.TestCase):
         class Handler(BaseHTTPRequestHandler):
             protocol_version = "HTTP/1.0"
 
+            def do_GET(self) -> None:  # noqa: N802
+                path = urlsplit(self.path).path
+                with state.lock:
+                    state.get_paths.append(self.path)
+                    state.get_headers.append(dict(self.headers.items()))
+                    response_status = state.status_by_path.get(path, state.get_status)
+                    response = state.response_by_path.get(path, state.get_response)
+                    response_headers = dict(state.response_headers_by_path.get(path, {}))
+                    delay = state.delay_by_path.get(path, state.get_delay)
+                    request_started_marker = state.request_started_marker
+                    cookie = state.set_cookie
+                if request_started_marker is not None:
+                    request_started_marker.write_text("started", encoding="ascii")
+                if delay:
+                    time.sleep(delay)
+                try:
+                    self.send_response(response_status)
+                    self.send_header("Content-Type", "text/html; charset=utf-8")
+                    if path == "/translator" and cookie:
+                        self.send_header("Set-Cookie", cookie)
+                    for name, value in response_headers.items():
+                        self.send_header(name, value)
+                    self.send_header("Content-Length", str(len(response)))
+                    self.end_headers()
+                    self.wfile.write(response)
+                except (BrokenPipeError, ConnectionResetError):
+                    pass
+                finally:
+                    state.request_finished.set()
+
             def do_POST(self) -> None:  # noqa: N802
+                path = urlsplit(self.path).path
                 size = int(self.headers.get("Content-Length", "0"))
                 raw = self.rfile.read(size)
                 try:
@@ -875,10 +1082,12 @@ class NativeHttpWorkerTests(unittest.TestCase):
                     state.payloads.append(payload)
                     state.content_types.append(content_type)
                     state.headers.append(dict(self.headers.items()))
-                    response_status = state.status
-                    response = state.response
+                    response_status = state.status_by_path.get(path, state.status)
+                    response = state.response_by_path.get(path, state.response)
+                    has_response_for_path = path in state.response_by_path
                     response_by_target = dict(state.response_by_target)
-                    delay = state.delay
+                    response_headers = dict(state.response_headers_by_path.get(path, {}))
+                    delay = state.delay_by_path.get(path, state.delay)
                     request_started_marker = state.request_started_marker
                 response_key = payload.get("target") or payload.get("to")
                 if response_key is None and isinstance(payload.get("messages"), list):
@@ -896,7 +1105,7 @@ class NativeHttpWorkerTests(unittest.TestCase):
                             ),
                             None,
                         )
-                if response_key in response_by_target:
+                if not has_response_for_path and response_key in response_by_target:
                     response = response_by_target[response_key]
                 if request_started_marker is not None:
                     request_started_marker.write_text("started", encoding="ascii")
@@ -905,6 +1114,8 @@ class NativeHttpWorkerTests(unittest.TestCase):
                 try:
                     self.send_response(response_status)
                     self.send_header("Content-Type", "application/json; charset=utf-8")
+                    for name, value in response_headers.items():
+                        self.send_header(name, value)
                     self.send_header("Content-Length", str(len(response)))
                     self.end_headers()
                     self.wfile.write(response)
@@ -946,6 +1157,8 @@ class NativeHttpWorkerTests(unittest.TestCase):
         target_language_index: int = 1,
         model: str = "fake-model",
         ignore_self_value: str | None = None,
+        free_service_url: str | None = None,
+        bing_base_url: str | None = None,
     ) -> dict:
         selected_url = url if url is not None else self.url + "/"
         config = {
@@ -971,6 +1184,8 @@ class NativeHttpWorkerTests(unittest.TestCase):
             }
             return self.run_environment_child(
                 registry, actions=actions, timeout=timeout,
+                free_service_url=free_service_url,
+                bing_base_url=bing_base_url,
             )
 
     def run_menu_child(
@@ -998,9 +1213,12 @@ class NativeHttpWorkerTests(unittest.TestCase):
             )
 
     @classmethod
-    def environment_test_dll(cls, free_service_url: str | None = None) -> Path:
+    def environment_test_dll(
+        cls, free_service_url: str | None = None,
+        bing_base_url: str | None = None,
+    ) -> Path:
         url_suffix = hashlib.sha256(
-            (free_service_url or "").encode("utf-8")
+            ((free_service_url or "") + "\0" + (bing_base_url or "")).encode("utf-8")
         ).hexdigest()[:12]
         dll = cls.temp_path / f"hd2ct_http_environment_test_{url_suffix}.dll"
         if dll.is_file():
@@ -1053,6 +1271,8 @@ class NativeHttpWorkerTests(unittest.TestCase):
         ]
         if free_service_url is not None:
             command.append(f'-DHD2CT_FREE_SERVICE_URL="{free_service_url}"')
+        if bing_base_url is not None:
+            command.append(f'-DHD2CT_BING_TEST_BASE_URL="{bing_base_url}"')
         completed = subprocess.run(
             command,
             cwd=ROOT,
@@ -1074,12 +1294,13 @@ class NativeHttpWorkerTests(unittest.TestCase):
         actions: list[dict] | None = None,
         timeout: float = 15.0,
         free_service_url: str | None = None,
+        bing_base_url: str | None = None,
     ) -> dict:
         command = [
             sys.executable,
             "-c",
             ENVIRONMENT_CHILD,
-            str(self.environment_test_dll(free_service_url)),
+            str(self.environment_test_dll(free_service_url, bing_base_url)),
             json.dumps(registry),
         ]
         if expected_config is not None:
@@ -2244,6 +2465,75 @@ class NativeHttpWorkerTests(unittest.TestCase):
                 self.assertFalse(accepted)
                 self.assertEqual(failure_code, "FREE_SERVER_ERROR")
 
+        fixture.fixture_ParseBingPage.argtypes = [
+            ctypes.c_char_p, ctypes.c_size_t,
+            ctypes.c_void_p, ctypes.c_size_t, ctypes.c_void_p, ctypes.c_size_t,
+            ctypes.c_void_p, ctypes.c_size_t, ctypes.c_void_p, ctypes.c_size_t,
+        ]
+        fixture.fixture_ParseBingPage.restype = ctypes.c_int
+        page = bing_page()
+        ig = ctypes.create_string_buffer(129)
+        iid = ctypes.create_string_buffer(129)
+        key = ctypes.create_string_buffer(14)
+        token = ctypes.create_string_buffer(513)
+        parsed_page = fixture.fixture_ParseBingPage(
+            page, len(page), ig, len(ig), iid, len(iid), key, len(key),
+            token, len(token),
+        )
+        self.assertEqual(parsed_page, 1)
+        self.assertEqual(ig.value, b"0123456789ABCDEF")
+        self.assertEqual(iid.value, b"translator.5022")
+        self.assertEqual(key.value, b"1790000000000")
+        self.assertEqual(token.value, b"fixture-token")
+        for invalid_page in (
+            b"<html>no translator data</html>",
+            page.replace(b"var params_AbusePreventionHelper", b"params_AbusePreventionHelper"),
+            page.split(b"<div data-iid=")[0] + b"</script>",
+            page + b'<script>var _G={x:"x",IG:"FEDCBA9876543210"};</script>',
+            page + b'<script>var params_AbusePreventionHelper = '
+            b'[1790000000001,"second-token",3600000];</script>',
+        ):
+            with self.subTest(invalid_bing_page=invalid_page):
+                self.assertEqual(
+                    fixture.fixture_ParseBingPage(
+                        invalid_page, len(invalid_page), ig, len(ig), iid, len(iid),
+                        key, len(key), token, len(token),
+                    ),
+                    0,
+                )
+
+        fixture.fixture_ParseBingResponse.argtypes = [
+            ctypes.c_char_p, ctypes.c_size_t, ctypes.c_char_p, ctypes.c_void_p,
+            ctypes.POINTER(ctypes.c_uint32), ctypes.POINTER(ctypes.c_char_p),
+        ]
+        fixture.fixture_ParseBingResponse.restype = ctypes.c_int
+
+        def parse_bing_response(response: bytes, target: str) -> tuple[bool, str, str]:
+            translation = ctypes.create_string_buffer(16385)
+            written = ctypes.c_uint32(0)
+            failure_code = ctypes.c_char_p()
+            accepted = fixture.fixture_ParseBingResponse(
+                response, len(response), target.encode("ascii"), translation,
+                ctypes.byref(written), ctypes.byref(failure_code),
+            )
+            code = failure_code.value.decode("ascii") if failure_code.value else ""
+            return bool(accepted), translation.raw[:written.value].decode("utf-8"), code
+
+        accepted, parsed_translation, _ = parse_bing_response(
+            bing_response("fixture translation"), "zh-Hans",
+        )
+        self.assertTrue(accepted)
+        self.assertEqual(parsed_translation, "fixture translation")
+        for invalid_response, target in (
+            (b"not JSON", "zh-Hans"),
+            (bing_response("wrong target", "en"), "zh-Hans"),
+            (b'[{"translations":[]}]', "zh-Hans"),
+        ):
+            with self.subTest(invalid_bing_response=invalid_response):
+                accepted, _, code = parse_bing_response(invalid_response, target)
+                self.assertFalse(accepted)
+                self.assertEqual(code, "BAD_RESPONSE")
+
         fixture.fixture_BuildAiRequest.argtypes = [
             ctypes.c_char_p, ctypes.c_uint32, ctypes.c_void_p, ctypes.c_uint32,
             ctypes.c_wchar_p, ctypes.c_uint32,
@@ -2288,6 +2578,8 @@ class NativeHttpWorkerTests(unittest.TestCase):
                     self.assertEqual(payload, expected)
         fixture.fixture_BuildAiRequest = None
         fixture.fixture_ParseFreeResponse = None
+        fixture.fixture_ParseBingPage = None
+        fixture.fixture_ParseBingResponse = None
         fixture.fixture_SelectAdapter = None
         del build_fixture
         fixture_handle = fixture._handle
@@ -2615,6 +2907,134 @@ class NativeHttpWorkerTests(unittest.TestCase):
         )
         self.assertEqual(translated_gg["actions"][1]["result"], "OK\n打得不错")
         self.assertEqual(self.state.payloads[0]["messages"][1]["content"], raw_gg)
+
+        free_service_url = self.url + "/translate"
+        for target_index, target in ((1, "zh-Hans"), (2, "zh-Hant"), (3, "en")):
+            with self.subTest(bing_target=target):
+                self.state.clear()
+                self.state.response_by_target = {
+                    target: bing_response("bing-" + target, target),
+                }
+                source = "Bing source " + target
+                actions = [
+                    {"op": "submit", "token": "bing-" + target,
+                     "body_hex": source.encode("utf-8").hex(),
+                     **({"player_name": "private Bing player"} if target_index == 2 else {})},
+                    {"op": "wait", "token": "bing-" + target},
+                ]
+                result = self.run_child(
+                    url="", actions=actions, model="",
+                    target_language_index=target_index,
+                    free_service_url=free_service_url,
+                    bing_base_url=self.url,
+                )
+                self.assertEqual(result["actions"][1]["result"], "OK\nbing-" + target)
+                self.assertEqual(self.state.get_paths, ["/translator"])
+                self.assertEqual(len(self.state.paths), 1)
+                path = self.state.paths[0]
+                self.assertEqual(urlsplit(path).path, "/ttranslatev3")
+                query = parse_qs(urlsplit(path).query, keep_blank_values=True)
+                self.assertEqual(set(query), {"isVertical", "IG", "IID"})
+                self.assertEqual(query["isVertical"], ["1"])
+                self.assertEqual(query["IG"], ["0123456789ABCDEF"])
+                self.assertEqual(query["IID"], ["translator.5022.1"])
+                payload = self.state.payloads[0]
+                self.assertEqual(set(payload), {"fromLang", "text", "to", "key", "token"})
+                self.assertEqual(payload["fromLang"], "auto-detect")
+                self.assertEqual(payload["text"], source)
+                self.assertEqual(payload["to"], target)
+                self.assertEqual(payload["key"], "1790000000000")
+                self.assertEqual(payload["token"], "fixture-token")
+                self.assertNotIn("key1", payload)
+                self.assertNotIn("key2", payload)
+                self.assertNotIn("private Bing player", json.dumps(payload))
+                headers = {name.lower(): value for name, value in self.state.headers[0].items()}
+                self.assertIn("hd2ct-bing=fixture-cookie", headers.get("cookie", ""))
+                self.assertEqual(len(self.state.get_headers), 1)
+                if target_index == 2:
+                    self.assertNotIn(
+                        hashlib.sha256(b"private Bing player").hexdigest(),
+                        json.dumps(payload),
+                    )
+
+        self.state.clear()
+        same_bing_source = "Hold this position."
+        self.state.response_by_target = {
+            "zh-Hans": bing_response(same_bing_source, "zh-Hans"),
+        }
+        same_bing = self.run_child(
+            url="", model="", free_service_url=free_service_url,
+            bing_base_url=self.url,
+            actions=[
+                {"op": "submit", "token": "bing-same-one",
+                 "body_hex": same_bing_source.encode("utf-8").hex()},
+                {"op": "wait", "token": "bing-same-one"},
+                {"op": "submit", "token": "bing-same-two",
+                 "body_hex": same_bing_source.encode("utf-8").hex()},
+                {"op": "wait", "token": "bing-same-two"},
+            ],
+        )
+        self.assertEqual(same_bing["actions"][1]["result"], "SKIP\n")
+        self.assertEqual(same_bing["actions"][3]["result"], "SKIP\n")
+        self.assertEqual(len(self.state.get_paths), 1)
+        self.assertEqual(len(self.state.paths), 1)
+
+        self.state.clear()
+        self.state.response_by_path["/ttranslatev3"] = b"Bing error body"
+        unknown_player = self.run_child(
+            url="", model="", free_service_url=free_service_url,
+            bing_base_url=self.url,
+            actions=[
+                {"op": "submit", "token": "bing-no-name-failure", "body_hex": "6869"},
+                {"op": "wait", "token": "bing-no-name-failure"},
+            ],
+        )
+        self.assertEqual(unknown_player["actions"][1]["result"], "ERR\nFREE_PLAYER_UNKNOWN")
+        self.assertEqual(len(self.state.get_paths), 1)
+        self.assertEqual(len(self.state.paths), 1)
+        self.assertEqual(urlsplit(self.state.paths[0]).path, "/ttranslatev3")
+
+        self.state.clear()
+        disabled = self.run_child(
+            url="", model="", enabled_value="false",
+            free_service_url=free_service_url, bing_base_url=self.url,
+            actions=[
+                {"op": "submit", "token": "bing-disabled", "body_hex": "6869"},
+                {"op": "wait", "token": "bing-disabled"},
+            ],
+        )
+        self.assertEqual(disabled["actions"][1]["result"], "SKIP\n")
+        self.assertEqual(self.state.get_paths, [])
+        self.assertEqual(self.state.paths, [])
+
+        self.state.clear()
+        self_filtered = self.run_child(
+            url="", model="", free_service_url=free_service_url,
+            bing_base_url=self.url,
+            actions=[
+                {"op": "submit", "token": "bing-self-filtered", "flags": 1,
+                 "body_hex": "6869"},
+                {"op": "wait", "token": "bing-self-filtered"},
+            ],
+        )
+        self.assertEqual(self_filtered["actions"][1]["result"], "SKIP\n")
+        self.assertEqual(self.state.get_paths, [])
+        self.assertEqual(self.state.paths, [])
+
+        self.state.clear()
+        rate_limited = self.run_child(
+            url="", model="", free_service_url=free_service_url,
+            bing_base_url=self.url,
+            actions=[
+                {"op": "fill_rate_limit"},
+                {"op": "submit", "token": "bing-rate-limited", "body_hex": "6869"},
+                {"op": "wait", "token": "bing-rate-limited"},
+            ],
+        )
+        self.assertEqual(rate_limited["actions"][2]["result"], "ERR\nRATE_LIMITED")
+        self.assertEqual(rate_limited["rate_count"], 30)
+        self.assertFalse(any(urlsplit(path).path == "/translate" for path in self.state.paths))
+
     def test_http401_is_redacted_and_invalid_model_result_is_classified(self) -> None:
         self.assertEqual(self.meta_json["abi_version"], 4)
         self.assertEqual(
@@ -2795,6 +3215,159 @@ class NativeHttpWorkerTests(unittest.TestCase):
             missing_path = Path(temporary_directory) / "missing.json"
             with self.assertRaisesRegex(ValueError, "free-service.example.json"):
                 free_service_config.load_config(missing_path)
+
+        free_service_url = self.url + "/translate"
+        bing_failure_modes = (
+            "missing-page-parameters",
+            "http-200-error-body",
+            "wrong-target",
+            "malformed-json",
+            "http-error",
+            "unexpected-redirect",
+        )
+        for failure_mode in bing_failure_modes:
+            with self.subTest(bing_failure=failure_mode):
+                self.state.clear()
+                self.state.response = free_success_response("legacy fallback")
+                if failure_mode == "missing-page-parameters":
+                    self.state.get_response = b"<html>translator page unavailable</html>"
+                elif failure_mode == "http-200-error-body":
+                    self.state.response_by_path["/ttranslatev3"] = (
+                        b'{"error":"bing private error body"}'
+                    )
+                elif failure_mode == "wrong-target":
+                    self.state.response_by_path["/ttranslatev3"] = bing_response(
+                        "ignored wrong target", "en",
+                    )
+                elif failure_mode == "malformed-json":
+                    self.state.response_by_path["/ttranslatev3"] = b"not JSON"
+                elif failure_mode == "http-error":
+                    self.state.get_status = 503
+                    self.state.get_response = b"private Bing HTTP error body"
+                else:
+                    self.state.get_status = 302
+                    self.state.response_headers_by_path["/translator"] = {
+                        "Location": self.url + "/redirect-target",
+                    }
+                result = self.run_child(
+                    url="", model="", free_service_url=free_service_url,
+                    bing_base_url=self.url,
+                    actions=[
+                        {"op": "submit", "token": "bing-fallback-" + failure_mode,
+                         "body_hex": "4869", "player_name": "Fallback Player"},
+                        {"op": "wait", "token": "bing-fallback-" + failure_mode},
+                    ],
+                )
+                self.assertEqual(result["actions"][1]["result"], "OK\nlegacy fallback")
+                self.assertEqual(self.state.get_paths, ["/translator"])
+                self.assertNotIn("/redirect-target", " ".join(self.state.get_paths))
+                legacy_index = next(
+                    index for index, path in enumerate(self.state.paths)
+                    if urlsplit(path).path == "/translate"
+                )
+                legacy_payload = self.state.payloads[legacy_index]
+                self.assertEqual(
+                    set(legacy_payload), {"key1", "key2", "text", "target_language"},
+                )
+                self.assertEqual(legacy_payload["key2"], hashlib.sha256(
+                    b"Fallback Player"
+                ).hexdigest())
+                self.assertEqual(legacy_payload["text"], "Hi")
+                self.assertEqual(
+                    legacy_payload["target_language"],
+                    TARGET_LANGUAGE_CATALOGUE["languages"][0]["youdao"],
+                )
+                legacy_headers = {
+                    name.lower(): value
+                    for name, value in self.state.headers[legacy_index].items()
+                }
+                self.assertNotIn("cookie", legacy_headers)
+                self.assertNotIn("token", legacy_payload)
+                self.assertNotIn("fixture-token", json.dumps(legacy_payload))
+                self.assertNotIn("private Bing HTTP error body", json.dumps(result))
+                self.assertNotIn("bing private error body", json.dumps(result))
+
+        fixture = ctypes.CDLL(str(self.environment_test_dll(free_service_url, self.url)))
+        fixture.fixture_BingReset.argtypes = [ctypes.c_uint32]
+        fixture.fixture_BingReset.restype = ctypes.c_int
+        fixture.fixture_BingExpire.argtypes = [ctypes.c_uint32]
+        fixture.fixture_BingExpire.restype = ctypes.c_int
+        fixture.fixture_BingTranslate.argtypes = [
+            ctypes.c_uint32, ctypes.c_uint32, ctypes.c_char_p, ctypes.c_uint32,
+            ctypes.c_void_p, ctypes.c_uint32, ctypes.POINTER(ctypes.c_uint32),
+            ctypes.POINTER(ctypes.c_int), ctypes.c_void_p, ctypes.c_uint32,
+        ]
+        fixture.fixture_BingTranslate.restype = ctypes.c_int
+
+        def direct_bing_translation(state_index: int, source: str) -> tuple[int, str, int, str]:
+            translation = ctypes.create_string_buffer(16385)
+            written = ctypes.c_uint32()
+            attempted = ctypes.c_int()
+            failure = ctypes.create_string_buffer(64)
+            result = fixture.fixture_BingTranslate(
+                state_index, 1, source.encode("utf-8"), 10000,
+                translation, len(translation), ctypes.byref(written),
+                ctypes.byref(attempted), failure, len(failure),
+            )
+            return (
+                result,
+                translation.raw[:written.value].decode("utf-8"),
+                attempted.value,
+                failure.value.decode("ascii"),
+            )
+
+        self.state.clear()
+        self.state.response_by_target = {
+            "zh-Hans": bing_response("state translation", "zh-Hans"),
+        }
+        self.assertEqual(fixture.fixture_BingReset(0), 1)
+        self.assertEqual(fixture.fixture_BingReset(1), 1)
+        first_state = direct_bing_translation(0, "state source one")
+        second_request_same_state = direct_bing_translation(0, "state source two")
+        other_state = direct_bing_translation(1, "other state source")
+        self.assertEqual(first_state[:3], (1, "state translation", 1))
+        self.assertEqual(second_request_same_state[:3], (1, "state translation", 1))
+        self.assertEqual(other_state[:3], (1, "state translation", 1))
+        self.assertEqual(self.state.get_paths, ["/translator", "/translator"])
+        self.assertEqual(
+            [parse_qs(urlsplit(path).query)["IID"][0] for path in self.state.paths],
+            ["translator.5022.1", "translator.5022.2", "translator.5022.1"],
+        )
+
+        self.assertEqual(fixture.fixture_BingExpire(0), 1)
+        expired_state = direct_bing_translation(0, "expired page source")
+        self.assertEqual(expired_state[:3], (1, "state translation", 1))
+        self.assertEqual(len(self.state.get_paths), 3)
+        self.assertEqual(parse_qs(urlsplit(self.state.paths[-1]).query)["IID"],
+                         ["translator.5022.1"])
+
+        self.state.response_by_path["/ttranslatev3"] = b"malformed Bing response"
+        failed_state = direct_bing_translation(0, "cooldown source")
+        self.assertEqual(failed_state[0], 0)
+        self.assertEqual(failed_state[2:], (1, "BAD_RESPONSE"))
+        request_count_after_failure = len(self.state.paths)
+        cooled_state = direct_bing_translation(0, "cooldown retry")
+        self.assertEqual(cooled_state[0], 0)
+        self.assertEqual(cooled_state[2], 0)
+        self.assertEqual(len(self.state.paths), request_count_after_failure)
+        self.state.response_by_path.clear()
+        healthy_other_state = direct_bing_translation(1, "isolated state retry")
+        self.assertEqual(healthy_other_state[:3], (1, "state translation", 1))
+        self.assertEqual(len(self.state.get_paths), 3)
+        self.assertEqual(parse_qs(urlsplit(self.state.paths[-1]).query)["IID"],
+                         ["translator.5022.2"])
+        self.assertEqual(fixture.fixture_BingReset(0), 1)
+        self.assertEqual(fixture.fixture_BingReset(1), 1)
+        fixture.fixture_BingTranslate = None
+        fixture.fixture_BingReset = None
+        fixture.fixture_BingExpire = None
+        fixture_handle = fixture._handle
+        del fixture
+        gc.collect()
+        free_library = ctypes.windll.kernel32.FreeLibrary
+        free_library.argtypes = [ctypes.c_void_p]
+        free_library.restype = ctypes.c_int
+        self.assertEqual(free_library(fixture_handle), 1)
 
     def test_game_thread_submit_does_not_wait_for_slow_http(self) -> None:
         self.state.delay = 0.6
@@ -2998,6 +3571,56 @@ class NativeHttpWorkerTests(unittest.TestCase):
         )
         self.assertEqual(timed_out["timeout"], 10)
         self.assertEqual(timed_out["actions"][1]["result"], "ERR\nTIMEOUT")
+
+        free_service_url = self.url + "/translate"
+        self.state.clear()
+        self.state.response = free_success_response("legacy after slow Bing")
+        self.state.delay_by_path["/ttranslatev3"] = 6.5
+        slow_bing = self.run_child(
+            url="", model="", timeout_index=1,
+            free_service_url=free_service_url, bing_base_url=self.url,
+            actions=[
+                {"op": "submit", "token": "slow-bing-fallback", "body_hex": "6869",
+                 "player_name": "Slow Bing Player"},
+                {"op": "wait", "token": "slow-bing-fallback", "timeout": 12.0},
+            ],
+            timeout=15.0,
+        )
+        self.assertEqual(slow_bing["timeout"], 10)
+        self.assertEqual(slow_bing["actions"][1]["result"], "OK\nlegacy after slow Bing")
+        self.assertLess(slow_bing["actions"][1]["elapsed_ms"], 10000.0)
+        self.assertEqual(len(self.state.paths), 2)
+        self.assertEqual(urlsplit(self.state.paths[0]).path, "/ttranslatev3")
+        self.assertEqual(urlsplit(self.state.paths[1]).path, "/translate")
+        fallback_headers = {
+            name.lower(): value
+            for name, value in self.state.headers[1].items()
+        }
+        self.assertNotIn("cookie", fallback_headers)
+        self.assertNotIn("token", self.state.payloads[1])
+
+        self.state.clear()
+        marker_path = self.temp_path / "bing-cancel-request-started"
+        marker_path.unlink(missing_ok=True)
+        self.state.get_delay = 0.5
+        self.state.request_started_marker = marker_path
+        cancelled_bing = self.run_child(
+            url="", model="", free_service_url=free_service_url,
+            bing_base_url=self.url,
+            actions=[
+                {"op": "submit", "token": "cancel-bing", "body_hex": "6869"},
+                {"op": "wait_file", "path": str(marker_path)},
+                {"op": "cancel", "token": "cancel-bing"},
+                {"op": "sleep", "seconds": 0.7},
+                {"op": "poll", "token": "cancel-bing"},
+            ],
+            timeout=10.0,
+        )
+        self.assertTrue(cancelled_bing["actions"][1]["found"])
+        self.assertEqual(cancelled_bing["actions"][2]["cancelled"], 1)
+        self.assertIsNone(cancelled_bing["actions"][4]["result"])
+        self.assertEqual(self.state.get_paths, ["/translator"])
+        self.assertEqual(self.state.paths, [])
 
 if __name__ == "__main__":
     unittest.main()

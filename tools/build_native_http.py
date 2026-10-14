@@ -30,6 +30,7 @@ NATIVE_SOURCES = (
     NATIVE_DIR / "adapter" / "baidu.c",
     NATIVE_DIR / "adapter" / "youdao.c",
     NATIVE_DIR / "adapter" / "free.c",
+    NATIVE_DIR / "adapter" / "bing.c",
     NATIVE_DIR / "transport.c",
     NATIVE_DIR / "vendor" / "cjson" / "cJSON.c",
 )
