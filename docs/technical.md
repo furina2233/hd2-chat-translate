@@ -71,11 +71,11 @@ AI 适配器使用 OpenAI-compatible Chat Completions 请求，只发送 `model`
 
 ## 原生任务接口
 
-ABI 3 的 DLL 仍只导出三个函数，签名见 [client.h](../native/client.h)：
+ABI 4 的 DLL 仍只导出三个函数，签名见 [client.h](../native/client.h)：
 
 | 接口 | 语义 |
 | --- | --- |
-| `HD2CT_Submit(token, body, bytes, flags)` | 校验并接收任务，返回 1 表示入队；无效参数、重复 token、队列已满或锁忙返回 0。`flags` 的 `HD2CT_MESSAGE_SELF` 位标记已识别的自身消息；其他或无法确认的发送者使用0。首次提交触发后台初始化，调用方不等待配置读取或网络请求。 |
+| `HD2CT_Submit(token, body, bytes, flags, player_name)` | 校验并接收任务，返回 1 表示入队；无效参数、重复 token、队列已满或锁忙返回 0。`flags` 的 `HD2CT_MESSAGE_SELF` 位标记已识别的自身消息；其他或无法确认的发送者使用0。`player_name` 是已缓存的本地玩家 UTF-8 姓名，最多128字节；未知时传 NULL 或空串。首次提交触发后台初始化，调用方不等待配置读取或网络请求。 |
 | `HD2CT_Poll(token, out, capacity, written)` | 非阻塞轮询；返回 1 时写入结果，written 不含末尾 NUL。未完成、token 不存在、锁忙或缓冲区不足返回 0。读取结果后由调用方取消该 token 以释放槽位。 |
 | `HD2CT_Cancel(token)` | 取消任务或释放已完成槽位；token 不存在也返回 1，单项取消遇锁忙返回 0，可重试。传入 NULL 取消全部当前任务，锁忙时由 C 记录并延后处理，保留服务配置与工作线程。 |
 
@@ -92,11 +92,15 @@ ABI 3 的 DLL 仍只导出三个函数，签名见 [client.h](../native/client.h
 | [Google Basic v2](https://docs.cloud.google.com/translate/docs/reference/rest/v2/translate) | POST /language/translate/v2；JSON q、target、format=text；[x-goog-api-key 请求头](https://docs.cloud.google.com/docs/authentication/api-keys-use)，不把密钥写入 URL | data.translations 的 translatedText、detectedSourceLanguage |
 | [百度通用翻译](https://fanyi-api.baidu.com/doc_bd/21) | POST /api/trans/vip/translate；UTF-8 表单 q、from=auto、to、appid、salt、sign；sign=MD5(appid+原始 q+salt+密钥)，小写十六进制 | from、trans_result 中的 dst |
 | [有道文本翻译](https://ai.youdao.com/DOCSIRMA/html/trans/api/wbfy/index.html) | POST /api；UTF-8 表单 q、from=auto、to、appKey、salt、curtime、signType=v3、sign、strict=true；sign=SHA256(appKey+input+salt+curtime+密钥) | errorCode=0、l、translation |
-| FREE | POST 固定端点；JSON key1、key2、text、target_language；key2 为 30 秒步长、6 位数字的 TOTP，使用 BCrypt HMAC-SHA1 与编译进 `free_auth.h` 的共享密钥 | 成功和失败都要求 `data.text`、`data.reason` 字符串；成功时 reason 为空，失败时 reason 只映射为固定短码 |
+| FREE | POST 编译时配置的端点；JSON key1、key2、text、target_language；key2 是本地玩家姓名精确 UTF-8 字节的 SHA-256 小写十六进制，不裁剪空白、不转换大小写或进行 Unicode 归一化 | 成功和失败都要求 `data.text`、`data.reason` 字符串；成功时 reason 为空，失败时 reason 只映射为固定短码 |
 
 有道 input 按 Unicode 码点计数：最多 20 个码点时为完整 q，否则为前 10 个码点、十进制码点总数、后 10 个码点。签名使用尚未 URL 编码的 UTF-8 文本，表单各字段随后编码；curtime 为 UTC Unix 秒。签名及随机 salt 使用 Windows BCrypt。
 
-FREE 的固定端点为 `http://120.55.188.249:8080/translate`，key1 和 20 字节 TOTP 共享密钥硬编码在 `native/adapter/free_auth.h`。只对 FREE 适配器放行该精确端点的远端 HTTP；其他适配器仍只允许 loopback HTTP，WinHTTP 禁止重定向。FREE 不读取或使用 model、API key、app ID；服务端使用全局共享的每分钟 100 次请求限制，客户端现有本地限流仍为每分钟 30 次。服务端余额耗尽映射为 `FREE_QUOTA_EXCEEDED`（“免费版的余额已用尽，请自行配置提供商”），服务端错误及 FREE 响应结构无效或 HTTP 5xx 映射为 `FREE_SERVER_ERROR`（“服务器错误，请联系作者”），旧版本免费凭据需要更新时映射为 `FREE_UPGRADE_REQUIRED`（“请升级hd2-chat-translate以继续使用免费版服务”）。其他适配器的 `QUOTA_EXCEEDED` 提示保持“翻译额度不足”；FREE 仍兼容旧 reason 映射。
+FREE 的端点和 key1 由 Git 忽略的 `config/free-service.private.json` 提供，字段为 `endpoint_url` 与 `key1`。构建器校验配置并生成 `free_service.generated.h`，将配置编入 DLL；metadata 保存私有配置文件摘要，打包时核对摘要，避免组合不一致的配置与 DLL。只对 FREE 放行该编译时精确端点的远端 HTTP；其他适配器仍只允许 loopback HTTP，WinHTTP 禁止重定向。FREE 不读取或使用 model、API key、app ID。本地姓名在稳定身份快照中缓存，名字哈希在 C 后台 worker 构造 FREE 请求时计算，不增加逐帧读取。无法获得本地姓名时，FREE 返回 `FREE_PLAYER_UNKNOWN`，不发起网络请求；其他适配器不依赖姓名。
+
+服务端保持全局每分钟100次限制，并使用独立 Redis 命名空间对每个姓名哈希限制每日50次；额度按北京时间每日00:00重置。只有通过鉴权、输入校验、全局及每日限额的请求计入次数和原文 Unicode 字符总数，上游翻译失败仍计入，超额拒绝不计入。Redis 不可用时返回服务器错误，不调用翻译上游。每日00:00将前一日每个哈希的次数、字符总数，以及所有哈希的请求总数、最少次数、最多次数写入服务器日志；空日报的最小值和最大值为0。客户端本地限流仍为每分钟30次。
+
+每日额度耗尽映射为 `FREE_DAILY_LIMIT`（“今日免费次数已用尽，请明天再试”），姓名哈希无效映射为 `FREE_PLAYER_INVALID`（“玩家身份哈希无效”）。服务端余额耗尽映射为 `FREE_QUOTA_EXCEEDED`（“免费版的余额已用尽，请自行配置提供商”），服务端错误及 FREE 响应结构无效或 HTTP 5xx 映射为 `FREE_SERVER_ERROR`（“服务器错误，请联系作者”），免费校验码需要更新时映射为 `FREE_UPGRADE_REQUIRED`（“请升级hd2-chat-translate以继续使用免费版服务”）。其他适配器的 `QUOTA_EXCEEDED` 提示保持“翻译额度不足”。
 
 机器翻译不发送 AI 提示词；Google 省略 source 参数启用自动检测，百度、有道使用 from=auto。target/to 使用目标语言目录中的服务商语言码，默认分别为 zh-CN、zh、zh-CHS。有道 strict=true 保证按指定目标处理，避免默认自动中译英。成功结果按实际译文与原文比较，不按源语言字段替换为原文；完全相同返回 SKIP，不同返回 OK。缓存保存完整的 OK 或 SKIP 结果，键包含原文与目标语言，命中时保持同一显示决定。
 
@@ -146,7 +150,7 @@ C 在后台 worker 开始处理任务时读取 `%LOCALAPPDATA%\CowboyBingus\Hell
 
 ## 原生模块安全加载
 
-DLL 随 Lua addon 嵌入，构建器要求 metadata 的 ABI 为 3，并核验字节长度和 SHA-256。Lua 侧将其写入 %LOCALAPPDATA%\HD2ChatTranslate\native 目录，DLL 文件名使用其 SHA-256 值；再从已核验的绝对路径使用 LoadLibraryExW，并将依赖搜索限制在 System32，按三个任务接口解析函数。路径及文件句柄拒绝 reparse point；文件大小和哈希在加载前复核。C 在启动后台初始化前使用 GetModuleHandleExW pin 保持至游戏进程结束。
+DLL 随 Lua addon 嵌入，构建器要求 metadata 的 ABI 为 4，并核验字节长度和 SHA-256。Lua 侧将其写入 %LOCALAPPDATA%\HD2ChatTranslate\native 目录，DLL 文件名使用其 SHA-256 值；再从已核验的绝对路径使用 LoadLibraryExW，并将依赖搜索限制在 System32，按三个任务接口解析函数。路径及文件句柄拒绝 reparse point；文件大小和哈希在加载前复核。C 在启动后台初始化前使用 GetModuleHandleExW pin 保持至游戏进程结束。
 
 Lua FFI 的 BY_HANDLE_FILE_INFORMATION 定义为 52 字节，并核对 dwVolumeSerialNumber 偏移 28、nFileSizeHigh 偏移 32、nFileIndexLow 偏移 48。原生构建限定为 Win64 PE、三个任务接口导出和 Windows 系统依赖，不接受额外 MinGW 运行库。
 

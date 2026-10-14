@@ -61,8 +61,6 @@ int hd2ct_normalize_url(const char *input, uint32_t adapter_id,
     }
     if (adapter_id == HD2CT_ADAPTER_FREE) {
         if (strcmp(input, HD2CT_FREE_ENDPOINT) != 0) return 0;
-        memcpy(normalized, input, input_length + 1u);
-        return 1;
     }
     if (adapter_id == HD2CT_ADAPTER_UNKNOWN) {
         memcpy(normalized, input, input_length + 1u);
@@ -117,7 +115,7 @@ int hd2ct_normalize_url(const char *input, uint32_t adapter_id,
     }
     if (parts.nScheme == INTERNET_SCHEME_HTTP &&
         !hd2ct_local_http_host(host)) {
-        return 0;
+        if (adapter_id != HD2CT_ADAPTER_FREE) return 0;
     }
     if (path_length == 0 || (path_length == 1u && path_start[0] == '/')) {
         const HD2CT_Adapter *adapter = hd2ct_adapter_for_id(adapter_id);

@@ -25,6 +25,11 @@ from scripts import menu_locales  # noqa: E402
 from lua_support import LUA_DLL, LuaJIT  # noqa: E402
 
 
+FREE_SERVICE_CONFIG_BYTES = (
+    b'{"endpoint_url":"http://127.0.0.1:18765","key1":"00000000-0000-4000-8000-000000000000"}'
+)
+
+
 def fake_x64_dll() -> bytes:
     """生成仅用于builder边界检查的最小PE32+ DLL字节。"""
     pe_offset = 0x80
@@ -153,17 +158,18 @@ def read_archive_contract(data: bytes) -> dict[str, object]:
     }
 
 
-def fake_metadata(dll: bytes) -> bytes:
+def fake_metadata(dll: bytes, free_config: bytes = FREE_SERVICE_CONFIG_BYTES) -> bytes:
     return json.dumps(
         {
             "schema_version": 1,
-            "abi_version": 3,
+            "abi_version": 4,
             "filename": "hd2ct_http.dll",
             "size": len(dll),
             "sha256": hashlib.sha256(dll).hexdigest(),
             "architecture": "x86_64",
             "imports": ["KERNEL32.dll", "WINHTTP.dll"],
             "target_languages_sha256": builder.target_languages.catalogue_sha256(),
+            "free_service_config_sha256": hashlib.sha256(free_config).hexdigest(),
         }
     ).encode("utf-8")
 
@@ -282,6 +288,7 @@ local function run_loader()
     local move_flags_ok = true
     local information_calls = 0
     local submitted = 0
+    local submitted_names = {}
     local enabled = true
     local cancel_all_called = false
 
@@ -391,8 +398,13 @@ local function run_loader()
 
     local exports = {}
     exports.HD2CT_Submit = ffi.cast(
-        "HD2Probe_U32 (*)(const char *, const char *, HD2Probe_U32, HD2Probe_U32)",
-        function(_, _, _, _) submitted = submitted + 1; return 1 end)
+        "HD2Probe_U32 (*)(const char *, const char *, HD2Probe_U32, HD2Probe_U32, const char *)",
+        function(_, _, _, _, player_name)
+            submitted = submitted + 1
+            local address = tonumber(ffi.cast("size_t", player_name))
+            submitted_names[#submitted_names + 1] = address ~= 0 and ffi.string(player_name) or "<NULL>"
+            return 1
+        end)
     exports.HD2CT_Poll = ffi.cast(
         "HD2Probe_U32 (*)(const char *, char *, HD2Probe_U32, HD2Probe_U32 *)",
         function(_, output, capacity, written)
@@ -443,8 +455,15 @@ MODULE_SOURCE
         tostring(load_flag_ok), tostring(bad_export), tostring(deleted_unowned), tostring(move_flags_ok),
         tostring(api and api.abi_version or -1), tostring(#deleted_paths), tostring(submitted)}
     if api then
-        api.submit("hd2ct_1", "body")
+        assert(api.submit("hd2ct_1", "body", 0, "本地玩家"))
+        assert(api.submit("hd2ct_2", "body", 0, nil))
+        assert(api.submit("hd2ct_3", "body", 0, ""))
+        assert(not api.submit("hd2ct_4", "body", 0, string.rep("x", 129)))
+        assert(not api.submit("hd2ct_5", "body", 0, "bad" .. string.char(0) .. "name"))
+        assert(not api.submit("hd2ct_6", "body", 0, string.char(0xc0, 0xaf)))
         result[#result + 1] = api.response("hd2ct_1") or "pending"
+        result[#result + 1] = table.concat(submitted_names, ",")
+        result[#result + 1] = tostring(submitted)
         api.cancel(nil)
     end
     result[#result + 1] = tostring(cancel_all_called)
@@ -476,6 +495,9 @@ class StandaloneBuilderTests(unittest.TestCase):
     def test_default_standalone_package_contract_and_crc(self):
         with tempfile.TemporaryDirectory() as quick_directory_name:
             caller_directory = Path(quick_directory_name).resolve()
+            free_config_path = caller_directory / "inputs" / "free-service.private.json"
+            free_config_path.parent.mkdir(parents=True)
+            free_config_path.write_bytes(FREE_SERVICE_CONFIG_BYTES)
             compiler_path = caller_directory / "toolchain" / "gcc.exe"
             objdump_path = caller_directory / "toolchain" / "objdump.exe"
             compiler_path.parent.mkdir(parents=True)
@@ -496,6 +518,7 @@ class StandaloneBuilderTests(unittest.TestCase):
                     "--objdump", str(Path("toolchain") / "objdump.exe"),
                     "--loader-zip", str(Path("inputs") / "loader.zip"),
                     "--menu-zip", str(Path("inputs") / "menu.zip"),
+                    "--free-config", str(Path("inputs") / "free-service.private.json"),
                     "--output-dir", str(Path("outputs") / "packages"),
                 ])
             self.assertEqual(quick_result, 0)
@@ -512,6 +535,8 @@ class StandaloneBuilderTests(unittest.TestCase):
             self.assertEqual(native_command[native_command.index("--objdump") + 1], str(objdump_path))
             self.assertEqual(package_command[package_command.index("--loader-zip") + 1], str(caller_directory / "inputs" / "loader.zip"))
             self.assertEqual(package_command[package_command.index("--menu-zip") + 1], str(caller_directory / "inputs" / "menu.zip"))
+            self.assertEqual(native_command[native_command.index("--free-config") + 1], str(free_config_path))
+            self.assertEqual(package_command[package_command.index("--free-config") + 1], str(free_config_path))
             self.assertEqual(package_command[package_command.index("--output-dir") + 1], str(caller_directory / "outputs" / "packages"))
             for _, options in quick_calls:
                 self.assertEqual(options["cwd"], quick_builder.ROOT)
@@ -872,7 +897,9 @@ class StandaloneBuilderTests(unittest.TestCase):
 
             dll_path = Path(directory) / "hd2ct_http.dll"
             meta_path = Path(directory) / "hd2ct_http.meta.json"
+            free_config_path = Path(directory) / "free-service.private.json"
             dll_path.write_bytes(dll)
+            free_config_path.write_bytes(FREE_SERVICE_CONFIG_BYTES)
             metadata = json.loads(fake_metadata(dll))
             bad_metadata = dict(metadata)
             bad_metadata["sha256"] = "0" * 64
@@ -906,15 +933,24 @@ class StandaloneBuilderTests(unittest.TestCase):
                     dll,
                     json.dumps(wrong_catalogue_metadata).encode("utf-8"),
                 )
+            wrong_free_config_metadata = dict(metadata)
+            wrong_free_config_metadata["free_service_config_sha256"] = "0" * 64
+            with self.assertRaisesRegex(ValueError, "免费服务配置摘要"):
+                builder.standalone_module_source(
+                    (ROOT / "game" / "chat_http_native.lua").read_bytes(),
+                    dll,
+                    json.dumps(wrong_free_config_metadata).encode("utf-8"),
+                    free_service_config_sha256=hashlib.sha256(FREE_SERVICE_CONFIG_BYTES).hexdigest(),
+                )
 
-            meta_path.write_bytes(fake_metadata(dll))
+            meta_path.write_bytes(fake_metadata(dll, FREE_SERVICE_CONFIG_BYTES))
             with (
                 mock.patch.object(builder, "STANDALONE_DLL", dll_path),
                 mock.patch.object(builder, "STANDALONE_META", meta_path),
                 mock.patch.object(builder, "default_output_path", return_value=output),
                 mock.patch.object(builder, "load_shared_loader_assets", return_value=loader_assets),
             ):
-                built = builder.build_artifact()
+                built = builder.build_artifact(free_config=free_config_path)
             with zipfile.ZipFile(built) as package:
                 self.assertIsNone(package.testzip())
                 names = package.namelist()
@@ -933,6 +969,7 @@ class StandaloneBuilderTests(unittest.TestCase):
                     output_dir=pair_directory,
                     native_dll=dll_path,
                     native_meta=meta_path,
+                    free_config=free_config_path,
                     now=instant,
                 )
             self.assertEqual(
@@ -983,6 +1020,7 @@ class StandaloneBuilderTests(unittest.TestCase):
                     menu_zip=missing_menu,
                     native_dll=dll_path,
                     native_meta=meta_path,
+                    free_config=free_config_path,
                 )
             with zipfile.ZipFile(no_dependencies_single) as package:
                 self.assertIsNone(package.testzip())
@@ -1000,6 +1038,7 @@ class StandaloneBuilderTests(unittest.TestCase):
                     output_dir=collision_directory,
                     native_dll=dll_path,
                     native_meta=meta_path,
+                    free_config=free_config_path,
                     now=instant,
                 )
             self.assertEqual(collision_no_dependencies.read_bytes(), old_content)
@@ -1017,6 +1056,7 @@ class StandaloneBuilderTests(unittest.TestCase):
                     output_dir=reverse_collision_directory,
                     native_dll=dll_path,
                     native_meta=meta_path,
+                    free_config=free_config_path,
                     now=instant,
                 )
             self.assertEqual(reverse_include_dependencies.read_bytes(), reverse_old_content)
@@ -1039,6 +1079,7 @@ class StandaloneBuilderTests(unittest.TestCase):
                         output_dir=race_directory,
                         native_dll=dll_path,
                         native_meta=meta_path,
+                        free_config=free_config_path,
                         now=instant,
                     )
             self.assertFalse(race_no_dependencies.exists())
@@ -1052,11 +1093,15 @@ class StandaloneBuilderTests(unittest.TestCase):
             )
             with (
                 mock.patch.object(builder, "build_artifacts", return_value=cli_outputs) as cli_builder,
-                mock.patch.object(sys, "argv", ["build_package.py", "--output", str(Path(directory) / include_name)]),
+                mock.patch.object(sys, "argv", [
+                    "build_package.py", "--output", str(Path(directory) / include_name),
+                    "--free-config", str(free_config_path),
+                ]),
                 mock.patch("sys.stdout", new_callable=io.StringIO) as stdout,
             ):
                 builder.main()
             self.assertEqual(cli_builder.call_args.args, (Path(directory) / include_name,))
+            self.assertEqual(cli_builder.call_args.kwargs["free_config"], free_config_path)
             self.assertIn(no_dependencies_name, stdout.getvalue())
             self.assertIn(include_name, stdout.getvalue())
 
@@ -1068,6 +1113,7 @@ class StandaloneBuilderTests(unittest.TestCase):
                 builder.main()
             self.assertIsNone(cli_builder.call_args.args[0])
             self.assertEqual(cli_builder.call_args.kwargs["output_dir"], Path(pair_directory))
+            self.assertEqual(cli_builder.call_args.kwargs["free_config"], builder.DEFAULT_FREE_CONFIG)
             self.assertIn(no_dependencies_name, stdout.getvalue())
             self.assertIn(include_name, stdout.getvalue())
 
@@ -1084,8 +1130,8 @@ class StandaloneBuilderTests(unittest.TestCase):
     def test_loader_holds_verified_read_lock_through_absolute_hardened_load(self):
         result = self.run_loader("positive")
         self.assertEqual(result[0:4], ["loaded", "1", "true", "true"])
-        self.assertEqual(result[4:8], ["false", "false", "true", "3"])
-        self.assertEqual(result[10:12], ["OK\ntranslated", "true"])
+        self.assertEqual(result[4:8], ["false", "false", "true", "4"])
+        self.assertEqual(result[10:14], ["OK\ntranslated", "本地玩家,<NULL>,<NULL>", "3", "true"])
 
     def test_loader_rejects_bad_payload_file_size_sha_and_reparse_paths(self):
         for mode in (

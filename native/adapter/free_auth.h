@@ -1,9 +1,7 @@
 #ifndef HD2CT_FREE_AUTH_H
 #define HD2CT_FREE_AUTH_H
 
-#define HD2CT_FREE_ENDPOINT_DEFAULT "http://120.55.188.249:8080/translate"
-#define HD2CT_FREE_KEY1 "a8cc00ad-556c-4bf2-af9a-6d3e229aa166"
-#define HD2CT_FREE_TOTP_SECRET_HEX "d68799932cdf51e0d541dde9303592946623d4b1"
+#include "free_service.generated.h"
 
 #ifdef HD2CT_TESTING
 #ifndef HD2CT_FREE_SERVICE_URL

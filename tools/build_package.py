@@ -16,6 +16,7 @@ import struct
 import uuid
 import zipfile
 from scripts import menu_locales, target_languages
+from scripts import free_service_config
 
 ROOT = Path(__file__).resolve().parents[1]
 RESOURCE_NAME = "mods/hd2chat/HD2ChatTranslate"
@@ -48,6 +49,7 @@ NO_DEPENDENCIES_VARIANT = "NoDependencies"
 INCLUDE_DEPENDENCIES_VARIANT = "IncludeDependencies"
 STANDALONE_DLL = ROOT / "artifacts" / "native" / "hd2ct_http.dll"
 STANDALONE_META = ROOT / "artifacts" / "native" / "hd2ct_http.meta.json"
+DEFAULT_FREE_CONFIG = ROOT / "config" / "free-service.private.json"
 STANDALONE_LICENSE = ROOT / "native" / "vendor" / "cjson" / "LICENSE"
 MOD_OPTIONS_MENU_ZIP = ROOT / "artifacts" / "Mod-Options-Menu-v1.2.zip"
 MOD_OPTIONS_MENU_LICENSE = ROOT / "third_party" / "mod_options_menu" / "LICENSE"
@@ -81,6 +83,7 @@ def validate_native_dll(
     dll: bytes,
     metadata: bytes,
     catalogue: dict[str, object] | None = None,
+    free_service_config_sha256: str | None = None,
 ) -> tuple[int, str]:
     """核验固定原生 helper 的meta、SHA-256和PE入口布局。"""
     try:
@@ -95,7 +98,7 @@ def validate_native_dll(
         type(meta.get("schema_version")) is not int
         or meta.get("schema_version") != 1
         or type(meta.get("abi_version")) is not int
-        or meta.get("abi_version") != 3
+        or meta.get("abi_version") != 4
         or meta.get("filename") != "hd2ct_http.dll"
         or meta.get("architecture") != "x86_64"
         or isinstance(meta.get("size"), bool)
@@ -106,12 +109,18 @@ def validate_native_dll(
         or not isinstance(meta.get("target_languages_sha256"), str)
         or len(meta.get("target_languages_sha256", "")) != 64
         or any(char not in "0123456789abcdef" for char in meta.get("target_languages_sha256", ""))
+        or not isinstance(meta.get("free_service_config_sha256"), str)
+        or len(meta.get("free_service_config_sha256", "")) != 64
+        or any(char not in "0123456789abcdef" for char in meta.get("free_service_config_sha256", ""))
         or not isinstance(imports, list)
         or any(not isinstance(item, str) or not item or len(item) > 260 for item in imports)
     ):
         raise ValueError("原生 helper meta 的ABI、架构或字段不匹配")
     if meta["target_languages_sha256"] != expected_catalogue_sha256:
         raise ValueError("原生 helper meta 的目标语言目录摘要不匹配")
+    if (free_service_config_sha256 is not None and
+            meta["free_service_config_sha256"] != free_service_config_sha256):
+        raise ValueError("原生 helper meta 的免费服务配置摘要不匹配；DLL与meta可能来自旧配置")
     size = len(dll)
     digest = hashlib.sha256(dll).hexdigest()
     if size == 0 or meta["size"] != size or meta["sha256"].lower() != digest:
@@ -158,6 +167,7 @@ def standalone_module_source(
     dll: bytes,
     metadata: bytes,
     catalogue: dict[str, object] | None = None,
+    free_service_config_sha256: str | None = None,
 ) -> bytes:
     """将已核验的固定DLL作为hex载荷写入Lua加载器的唯一payload标记。"""
     if template.startswith((b"\xef\xbb\xbf", b"\x1b")) or b"\0" in template:
@@ -165,11 +175,13 @@ def standalone_module_source(
     template.decode("utf-8")
     if template.count(NATIVE_PAYLOAD_MARKER) != 1:
         raise ValueError("原生Lua适配器必须恰好包含一个payload标记")
-    size, digest = validate_native_dll(dll, metadata, catalogue)
+    size, digest = validate_native_dll(
+        dll, metadata, catalogue, free_service_config_sha256,
+    )
     if len(template) + size * 2 > MAX_SOURCE_BYTES:
         raise ValueError("DLL hex载荷将超过512 KiB Lua源码上限；请将结果交由主控评估")
     payload = (
-        "local HD2CT_ABI_VERSION = 3\n"
+        "local HD2CT_ABI_VERSION = 4\n"
         f"local HD2CT_DLL_SIZE = {size}\n"
         f'local HD2CT_DLL_SHA256 = "{digest}"\n'
         f'local HD2CT_DLL_HEX = "{dll.hex()}"\n'
@@ -934,6 +946,7 @@ def _select_output_path(
 def _build_input_paths(
     dll_path: Path,
     meta_path: Path,
+    free_config_path: Path,
     loader_zip_path: Path,
     menu_zip_path: Path,
 ) -> tuple[Path, ...]:
@@ -947,6 +960,7 @@ def _build_input_paths(
         ROOT / "game" / "settings.lua",
         dll_path,
         meta_path,
+        free_config_path,
         STANDALONE_LICENSE,
         PROJECT_LICENSE,
         MOD_OPTIONS_MENU_LICENSE,
@@ -970,7 +984,9 @@ def _preflight_outputs(output_paths: tuple[Path, ...], input_paths: tuple[Path, 
         raise ValueError(f"交付包已存在，拒绝覆盖：{names}")
 
 
-def _build_packaged_entry(dll_path: Path, meta_path: Path) -> bytes:
+def _build_packaged_entry(
+    dll_path: Path, meta_path: Path, free_service_config_sha256: str,
+) -> bytes:
     entry_path = ROOT / "game" / "chat_probe.lua"
     core_path = ROOT / "game" / "chat_probe_core.lua"
     observer_path = ROOT / "game" / "chat_observe_core.lua"
@@ -987,7 +1003,8 @@ def _build_packaged_entry(dll_path: Path, meta_path: Path) -> bytes:
     dll = dll_path.read_bytes()
     metadata = meta_path.read_bytes()
     native_module = standalone_module_source(
-        standalone_module_path.read_bytes(), dll, metadata, catalogue
+        standalone_module_path.read_bytes(), dll, metadata, catalogue,
+        free_service_config_sha256,
     )
     settings_module = target_language_settings_source(
         settings_path.read_bytes(), catalogue, localizations
@@ -1054,18 +1071,26 @@ def build_artifact(
     menu_zip: Path | str | None = None,
     native_dll: Path | str | None = None,
     native_meta: Path | str | None = None,
+    free_config: Path | str | None = None,
 ) -> Path:
     """构建单个变体；默认生成IncludeDependencies包。"""
     dll_path = Path(native_dll) if native_dll is not None else STANDALONE_DLL
     meta_path = Path(native_meta) if native_meta is not None else STANDALONE_META
+    free_config_path = Path(free_config) if free_config is not None else DEFAULT_FREE_CONFIG
     loader_zip_path = Path(loader_zip) if loader_zip is not None else SHARED_LOADER_ZIP
     menu_zip_path = Path(menu_zip) if menu_zip is not None else MOD_OPTIONS_MENU_ZIP
     output_path = _select_output_path(
         output, include_dependencies=include_dependencies
     )
-    input_paths = _build_input_paths(dll_path, meta_path, loader_zip_path, menu_zip_path)
+    input_paths = _build_input_paths(
+        dll_path, meta_path, free_config_path, loader_zip_path, menu_zip_path,
+    )
     _preflight_outputs((output_path,), input_paths)
-    packaged_entry = _build_packaged_entry(dll_path, meta_path)
+    try:
+        _, free_service_digest = free_service_config.load_config(free_config_path)
+    except ValueError as error:
+        raise ValueError(str(error)) from error
+    packaged_entry = _build_packaged_entry(dll_path, meta_path, free_service_digest)
     common_licenses = _read_common_license_files()
     dependency_assets = (
         _load_dependency_assets(loader_zip_path, menu_zip_path)
@@ -1089,6 +1114,7 @@ def build_artifacts(
     menu_zip: Path | str | None = None,
     native_dll: Path | str | None = None,
     native_meta: Path | str | None = None,
+    free_config: Path | str | None = None,
     now: datetime | None = None,
 ) -> tuple[Path, Path]:
     """一次读取和组装输入，构建同时间戳的无前置版与含前置版。"""
@@ -1097,12 +1123,19 @@ def build_artifacts(
     )
     dll_path = Path(native_dll) if native_dll is not None else STANDALONE_DLL
     meta_path = Path(native_meta) if native_meta is not None else STANDALONE_META
+    free_config_path = Path(free_config) if free_config is not None else DEFAULT_FREE_CONFIG
     loader_zip_path = Path(loader_zip) if loader_zip is not None else SHARED_LOADER_ZIP
     menu_zip_path = Path(menu_zip) if menu_zip is not None else MOD_OPTIONS_MENU_ZIP
-    input_paths = _build_input_paths(dll_path, meta_path, loader_zip_path, menu_zip_path)
+    input_paths = _build_input_paths(
+        dll_path, meta_path, free_config_path, loader_zip_path, menu_zip_path,
+    )
     _preflight_outputs(output_paths, input_paths)
 
-    packaged_entry = _build_packaged_entry(dll_path, meta_path)
+    try:
+        _, free_service_digest = free_service_config.load_config(free_config_path)
+    except ValueError as error:
+        raise ValueError(str(error)) from error
+    packaged_entry = _build_packaged_entry(dll_path, meta_path, free_service_digest)
     common_licenses = _read_common_license_files()
     dependency_assets = _load_dependency_assets(loader_zip_path, menu_zip_path)
     no_dependencies_files = _assemble_addon_files(
@@ -1140,6 +1173,8 @@ def main() -> None:
     parser.add_argument("--menu-zip", type=Path, help="ModOptionsMenu v1.2来源ZIP；默认使用项目artifacts路径。")
     parser.add_argument("--native-dll", type=Path, help="原生HTTP helper DLL；默认使用项目artifacts/native路径。")
     parser.add_argument("--native-meta", type=Path, help="原生HTTP helper meta JSON；默认使用项目artifacts/native路径。")
+    parser.add_argument("--free-config", type=Path, default=DEFAULT_FREE_CONFIG,
+                        help="免费服务私有配置JSON；默认config/free-service.private.json。")
     args = parser.parse_args()
     if args.output is not None and not is_delivery_filename(args.output.name):
         parser.error("--output必须使用两个新安装包变体之一及有效北京时间戳")
@@ -1151,6 +1186,7 @@ def main() -> None:
             menu_zip=args.menu_zip,
             native_dll=args.native_dll,
             native_meta=args.native_meta,
+            free_config=args.free_config,
         )
     except (OSError, ValueError) as error:
         parser.error(str(error))

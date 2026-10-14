@@ -215,6 +215,8 @@ assert(type(translate_adapter.test_scan_hint.initial_plan) == "table" and transl
     and #translate_adapter.test_scan_hint.initial_plan.slots == 64 and translate_adapter.test_scan_hint.initial_plan.slots[1] == 0,
     "initial history hint did not request a bounded full resync")
 assert(translate_identity.state.cache_ready and translate_identity.state.signature_ready
+    and translate_identity.state.player_name_ready
+    and translate_adapter.local_player_name() == identity_fixture.local_name
     and translate_identity.state.cache_name == identity_fixture.local_name
     and translate_identity.state.cache_palette == identity_fixture.colors[0]
     and identity_signature_reads == 6 and identity_signature_fixture.__constant_mock.reads >= 2
@@ -524,19 +526,26 @@ native_transport_api = {
 local standalone_heartbeat = translate_adapter.heartbeat()
 assert(standalone_heartbeat == "HD2CT1 4101\n" and not observer_faulted)
 local forwarded_submits = {}
-native_transport_api.submit = function(submit_token, submit_body, flags)
+native_transport_api.submit = function(submit_token, submit_body, flags, player_name)
     forwarded_submits[#forwarded_submits + 1] = {
-        token = submit_token, body = submit_body, flags = flags,
+        token = submit_token, body = submit_body, flags = flags, player_name = player_name,
     }
     return true
 end
-assert(translate_adapter.submit(token, "Self standalone body", 1))
-assert(translate_adapter.submit(token, "Other standalone body", 0))
+assert(translate_adapter.submit(token, "Self standalone body", 1, "LocalCacheName"))
+assert(translate_adapter.submit(token, "Other standalone body", 0, ""))
 assert(translate_adapter.submit(token, "Legacy standalone body"))
+assert(translate_adapter.submit(token, "Invalid name standalone body", 0, string.rep("x", 129)))
+assert(translate_adapter.submit(token, "NUL name standalone body", 0, "bad" .. string.char(0) .. "name"))
 assert(not translate_adapter.submit(token, "Invalid standalone body", 2))
-assert(#forwarded_submits == 3)
+assert(#forwarded_submits == 5)
 assert(forwarded_submits[1].flags == 1 and forwarded_submits[2].flags == 0
-    and forwarded_submits[3].flags == 0)
+    and forwarded_submits[3].flags == 0 and forwarded_submits[4].flags == 0
+    and forwarded_submits[5].flags == 0)
+assert(forwarded_submits[1].player_name == "LocalCacheName"
+    and forwarded_submits[2].player_name == nil and forwarded_submits[3].player_name == nil
+    and forwarded_submits[4].player_name == nil and forwarded_submits[5].player_name == nil,
+    "publisher did not normalize unknown or unsafe player names to a null value")
 native_transport_api.submit = function() error("PRIVATE_NATIVE_SUBMIT") end
 local submit_error_result, submit_error_code = translate_adapter.submit(token, "Standalone body")
 assert(submit_error_result == false and submit_error_code == "SUBMIT_EXCEPTION" and not observer_faulted)
@@ -871,6 +880,16 @@ do
     assert(read_counts[widget_event_record + 0x14] == 2 and read_counts[widget_event_record + 0x98] == nil,
         "unique-name identity was not limited to guarded name sampling")
 
+    -- 提交姓名只读本地缓存，不从当前消息发送者字段取值。
+    prepare_widget_case({body = widget_body_bytes("sender differs from local player")})
+    identity_fixture.set_event(event_slot, "ChatSender", identity_fixture.colors[0])
+    status, message = observer_widget_read_widget_slot(0, true)
+    assert(status == "ok" and translate_adapter.is_self_message(message) == false)
+    local roster_reads_before_name_getter = read_counts[identity_fixture.roster] or 0
+    assert(translate_adapter.local_player_name() == identity_fixture.local_name
+        and (read_counts[identity_fixture.roster] or 0) == roster_reads_before_name_getter,
+        "local-player getter did not return its cached name")
+
     -- 重名时用启动颜色区分本人，其他同名颜色是已知的其他玩家。
     identity_fixture.set_world({
         {name = identity_fixture.local_name},
@@ -945,6 +964,63 @@ do
     assert(status == "ok" and translate_adapter.is_self_message(message) == nil,
         "uncached identity was treated as self")
     identity_state.cache_ready = cache_ready
+
+    -- 启动资料尚未就绪时不锁死缓存；现有计划下一秒可重试并成功封存。
+    identity_state.phase = "pending"
+    identity_state.cache_ready = false
+    identity_state.cache_stopped = false
+    identity_state.cache_name = nil
+    identity_state.cache_palette = nil
+    identity_state.player_name_ready = false
+    identity_state.player_name = nil
+    identity_state.started_ms = observer_now
+    identity_state.next_attempt_ms = nil
+    identity_fixture.set_world({
+        {name = identity_fixture.local_name},
+        {key = identity_fixture.other_key, name = "OtherPeer", selector = 1},
+    }, 0)
+    prepare_widget_case()
+    translate_adapter.test_scan_hint.write_history(2, 4)
+    translate_adapter.scan_plan()
+    assert(identity_state.player_name_ready and identity_state.player_name == identity_fixture.local_name
+        and not identity_state.cache_ready and identity_state.cache_stopped
+        and identity_state.phase == "stopped",
+        "multiplayer roster did not cache local name independently of self filtering")
+    local roster_reads_after_name_cache = read_counts[identity_fixture.roster] or 0
+    assert(translate_adapter.local_player_name() == identity_fixture.local_name
+        and translate_adapter.local_player_name() == identity_fixture.local_name
+        and (read_counts[identity_fixture.roster] or 0) == roster_reads_after_name_cache,
+        "cached-name getter caused additional roster reads")
+
+    identity_state.phase = "pending"
+    identity_state.cache_stopped = false
+    identity_state.started_ms = observer_now
+    identity_state.next_attempt_ms = nil
+    identity_fixture.set_world({{name = "ChangedPlayer"}}, 0)
+    prepare_widget_case()
+    translate_adapter.test_scan_hint.write_history(2, 4)
+    translate_adapter.scan_plan()
+    assert(identity_state.player_name_ready and identity_state.player_name == identity_fixture.local_name
+        and identity_state.cache_name == "ChangedPlayer",
+        "local-player name cache changed after its first successful snapshot")
+
+    identity_state.phase = "pending"
+    identity_state.cache_ready = false
+    identity_state.cache_stopped = false
+    identity_state.cache_name = nil
+    identity_state.cache_palette = nil
+    identity_state.player_name_ready = false
+    identity_state.player_name = nil
+    identity_state.started_ms = observer_now
+    identity_state.next_attempt_ms = nil
+    identity_fixture.set_world({{name = identity_fixture.local_name}}, 4)
+    prepare_widget_case()
+    translate_adapter.test_scan_hint.write_history(2, 4)
+    translate_adapter.scan_plan()
+    assert(identity_state.player_name_ready and identity_state.player_name == identity_fixture.local_name
+        and not identity_state.cache_ready and identity_state.phase == "pending"
+        and identity_state.last_failure_code == 13,
+        "palette failure prevented independent local-name caching")
 
     -- 启动资料尚未就绪时不锁死缓存；现有计划下一秒可重试并成功封存。
     identity_state.phase = "pending"
@@ -1599,10 +1675,10 @@ end
         identity = result["identity"]
         self.assertEqual(
             set(identity),
-            {"signature_ready", "cache_ready", "cache_stopped", "cache_attempts",
+            {"signature_ready", "player_name_ready", "cache_ready", "cache_stopped", "cache_attempts",
              "last_failure_code", "submit_checks", "self_marked", "known_other", "fallback"},
         )
-        self.assertTrue(identity["signature_ready"] and identity["cache_ready"])
+        self.assertTrue(identity["signature_ready"] and identity["player_name_ready"] and identity["cache_ready"])
         self.assertGreaterEqual(identity["last_failure_code"], 0)
         self.assertLessEqual(identity["last_failure_code"], 15)
         self.assertGreaterEqual(identity["cache_attempts"], 2)
@@ -1612,12 +1688,14 @@ end
 
         http_source = (ROOT / "game" / "chat_http_native.lua").read_text(encoding="utf-8")
         self.assertIn(
-            'HD2CT_Submit", "HD2Probe_U32 (*)(const char *, const char *, HD2Probe_U32, HD2Probe_U32)"',
+            'HD2CT_Submit", "HD2Probe_U32 (*)(const char *, const char *, HD2Probe_U32, HD2Probe_U32, const char *)"',
             http_source,
         )
         self.assertIn("if flags == nil then flags = 0 end", http_source)
         self.assertIn("(flags ~= 0 and flags ~= 1)", http_source)
-        self.assertIn("pcall(c_submit, token, buffer, #body, flags)", http_source)
+        self.assertIn("pcall(c_submit, token, buffer, #body, flags, player_name_pointer)", http_source)
+        self.assertIn("#name > 128", http_source)
+        self.assertIn('name:find("\\0", 1, true)', http_source)
 
         self.assertEqual(source.count("startup_report_retention.run"), 1)
         retention_start = source.index("--[[HD2_STARTUP_REPORT_RETENTION_BEGIN]]")

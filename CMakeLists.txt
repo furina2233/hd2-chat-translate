@@ -36,10 +36,18 @@ set(HD2CT_TOOLS_DIR "${CMAKE_CURRENT_SOURCE_DIR}/tools")
 set(HD2CT_NATIVE_HELPER "${HD2CT_TOOLS_DIR}/cmake_native.py")
 set(HD2CT_NATIVE_BUILDER "${HD2CT_TOOLS_DIR}/build_native_http.py")
 set(HD2CT_LANGUAGE_GENERATOR "${HD2CT_TOOLS_DIR}/scripts/target_languages.py")
+set(HD2CT_FREE_SERVICE_CONFIG_GENERATOR "${HD2CT_TOOLS_DIR}/scripts/free_service_config.py")
 set(HD2CT_TOOL_SCRIPTS_INIT "${HD2CT_TOOLS_DIR}/scripts/__init__.py")
 set(HD2CT_LANGUAGE_CATALOGUE "${CMAKE_CURRENT_SOURCE_DIR}/resources/target_languages.json")
+set(HD2CT_FREE_CONFIG "${CMAKE_CURRENT_SOURCE_DIR}/config/free-service.private.json"
+    CACHE FILEPATH "免费服务私有配置JSON")
+if(NOT IS_ABSOLUTE "${HD2CT_FREE_CONFIG}")
+    get_filename_component(HD2CT_FREE_CONFIG "${HD2CT_FREE_CONFIG}"
+        ABSOLUTE BASE_DIR "${CMAKE_CURRENT_SOURCE_DIR}")
+endif()
 set(HD2CT_NATIVE_OUTPUT_DIR "${CMAKE_CURRENT_BINARY_DIR}/native")
 set(HD2CT_GENERATED_HEADER "${HD2CT_NATIVE_OUTPUT_DIR}/target_languages.generated.h")
+set(HD2CT_GENERATED_FREE_HEADER "${HD2CT_NATIVE_OUTPUT_DIR}/free_service.generated.h")
 set(HD2CT_NATIVE_META "${HD2CT_NATIVE_OUTPUT_DIR}/hd2ct_http.meta.json")
 
 file(MAKE_DIRECTORY "${HD2CT_NATIVE_OUTPUT_DIR}")
@@ -55,6 +63,18 @@ execute_process(
 )
 if(NOT HD2CT_HEADER_RESULT EQUAL 0)
     message(FATAL_ERROR "生成目标语言 C 头文件失败：${HD2CT_HEADER_OUTPUT}${HD2CT_HEADER_ERROR}")
+endif()
+
+execute_process(
+    COMMAND "${Python3_EXECUTABLE}" "${HD2CT_NATIVE_HELPER}"
+            generate-free-header --config "${HD2CT_FREE_CONFIG}"
+            --output-dir "${HD2CT_NATIVE_OUTPUT_DIR}"
+    RESULT_VARIABLE HD2CT_FREE_HEADER_RESULT
+    OUTPUT_VARIABLE HD2CT_FREE_HEADER_OUTPUT
+    ERROR_VARIABLE HD2CT_FREE_HEADER_ERROR
+)
+if(NOT HD2CT_FREE_HEADER_RESULT EQUAL 0)
+    message(FATAL_ERROR "生成免费服务 C 头文件失败：${HD2CT_FREE_HEADER_OUTPUT}${HD2CT_FREE_HEADER_ERROR}")
 endif()
 
 # 从既有 Python 构建器读取源码清单，避免 CMake 与命令行构建清单漂移。
@@ -75,8 +95,10 @@ set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
     "${HD2CT_NATIVE_HELPER}"
     "${HD2CT_NATIVE_BUILDER}"
     "${HD2CT_LANGUAGE_GENERATOR}"
+    "${HD2CT_FREE_SERVICE_CONFIG_GENERATOR}"
     "${HD2CT_TOOL_SCRIPTS_INIT}"
     "${HD2CT_LANGUAGE_CATALOGUE}"
+    "${HD2CT_FREE_CONFIG}"
 )
 
 add_custom_command(
@@ -94,10 +116,25 @@ add_custom_command(
     VERBATIM
 )
 
+add_custom_command(
+    OUTPUT "${HD2CT_GENERATED_FREE_HEADER}"
+    COMMAND "${Python3_EXECUTABLE}" "${HD2CT_NATIVE_HELPER}"
+            generate-free-header --config "${HD2CT_FREE_CONFIG}"
+            --output-dir "${HD2CT_NATIVE_OUTPUT_DIR}"
+    DEPENDS
+        "${HD2CT_NATIVE_HELPER}"
+        "${HD2CT_NATIVE_BUILDER}"
+        "${HD2CT_FREE_SERVICE_CONFIG_GENERATOR}"
+        "${HD2CT_FREE_CONFIG}"
+    COMMENT "生成原生客户端免费服务配置头文件"
+    VERBATIM
+)
+
 add_library(hd2ct_http_binary SHARED
     ${HD2CT_NATIVE_SOURCES}
     ${HD2CT_NATIVE_HEADERS}
     "${HD2CT_GENERATED_HEADER}"
+    "${HD2CT_GENERATED_FREE_HEADER}"
 )
 
 set_target_properties(hd2ct_http_binary PROPERTIES
@@ -170,6 +207,8 @@ add_custom_target(hd2ct_http_metadata
             --metadata "${HD2CT_NATIVE_META}"
             --compiler "${CMAKE_C_COMPILER}"
             --objdump "${HD2CT_OBJDUMP}"
+            --free-config "${HD2CT_FREE_CONFIG}"
+            --generated-free-header "${HD2CT_GENERATED_FREE_HEADER}"
     COMMENT "核验原生 DLL 并生成 metadata"
     VERBATIM
 )

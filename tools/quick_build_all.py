@@ -13,6 +13,7 @@ NATIVE_BUILD_SCRIPT = (ROOT / "tools" / "build_native_http.py").resolve()
 PACKAGE_BUILD_SCRIPT = (ROOT / "tools" / "build_package.py").resolve()
 DEFAULT_DLL = (ROOT / "artifacts" / "native" / "hd2ct_http.dll").resolve()
 DEFAULT_META = (ROOT / "artifacts" / "native" / "hd2ct_http.meta.json").resolve()
+DEFAULT_FREE_CONFIG = (ROOT / "config" / "free-service.private.json").resolve()
 
 
 def _resolved_input_path(value: str, invocation_directory: Path) -> str:
@@ -51,6 +52,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--loader-zip", help="Bingus Shared Loader v18来源ZIP")
     parser.add_argument("--menu-zip", help="Mod Options Menu v1.2来源ZIP")
     parser.add_argument("--output-dir", help="两种安装包的输出目录")
+    parser.add_argument("--free-config", help="免费服务私有配置JSON；默认config/free-service.private.json")
     args = parser.parse_args(argv)
 
     try:
@@ -62,6 +64,10 @@ def main(argv: list[str] | None = None) -> int:
             str(DEFAULT_DLL),
             "--meta",
             str(DEFAULT_META),
+            "--free-config",
+            _resolved_input_path(
+                args.free_config or str(DEFAULT_FREE_CONFIG), invocation_directory,
+            ),
             "--cc",
             _tool_argument(args.cc, invocation_directory),
         ]
@@ -81,6 +87,10 @@ def main(argv: list[str] | None = None) -> int:
             str(DEFAULT_DLL),
             "--native-meta",
             str(DEFAULT_META),
+            "--free-config",
+            _resolved_input_path(
+                args.free_config or str(DEFAULT_FREE_CONFIG), invocation_directory,
+            ),
         ]
         if args.loader_zip is not None:
             package_command.extend(

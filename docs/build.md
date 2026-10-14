@@ -42,6 +42,16 @@ if (-not (Test-Path -LiteralPath artifacts/Mod-Options-Menu-v1.2.zip)) {
 
 native/vendor/cjson/ 已包含固定的 [cJSON v1.7.19](https://github.com/DaveGamble/cJSON/tree/v1.7.19) 源码与 MIT 许可。无需另行下载、安装 HD2SDK 或提取游戏资源。
 
+免费服务的发布配置单独存放在 Git 忽略的 `config/free-service.private.json`。从 `config/free-service.example.json` 复制该文件，填写 `endpoint_url` 和 UUID 格式的 `key1`；构建器不会自动生成校验码。此文件用于编译 FREE 适配器，普通玩家安装 ZIP 时不需要它。缺少或无效的私有配置会阻止构建。
+
+~~~pwsh
+Copy-Item -LiteralPath config/free-service.example.json -Destination config/free-service.private.json
+# 在本机编辑私有配置，填写免费服务的入口与校验码。
+git check-ignore config/free-service.private.json
+~~~
+
+命令行构建、打包和一键构建支持 `--free-config '<私有配置路径>'`，默认使用上述路径。配置变化后需重新编译 DLL；metadata 保存配置摘要，打包器拒绝配置与 DLL metadata 不一致的组合。自定义配置路径也应排除在版本控制之外。
+
 ## 一键编译并打包
 
 准备好上述工具和两个依赖 ZIP 后，可以按顺序构建原生 DLL、metadata，再生成无前置和含前置两种安装包：
@@ -79,13 +89,13 @@ if ($LASTEXITCODE -ne 0) { throw '原生模块构建失败' }
 python tools/build_native_http.py --cc 'C:\tools\mingw64\bin\gcc.exe' --objdump 'C:\tools\mingw64\bin\objdump.exe'
 ~~~
 
-生成 artifacts/native/hd2ct_http.dll 和 artifacts/native/hd2ct_http.meta.json。脚本从 `resources/target_languages.json` 自动生成同目录的 `target_languages.generated.h`，无需自行准备或提交该生成文件。脚本校验 Win64 PE 格式、三个任务接口导出及 WinHTTP、注册表、BCrypt 和 Windows CRT 系统依赖，并记录 ABI 2、长度、SHA-256、目标语言目录摘要与编译器版本。机器翻译的签名和随机数使用 Windows 自带 BCrypt，构建脚本会链接对应系统库。不接受额外的 MinGW 动态运行库依赖。
+生成 artifacts/native/hd2ct_http.dll 和 artifacts/native/hd2ct_http.meta.json。脚本从 `resources/target_languages.json` 和私有免费服务配置自动生成同目录的 `target_languages.generated.h`、`free_service.generated.h`，无需自行准备或提交这些生成文件。脚本校验 Win64 PE 格式、三个任务接口导出及 WinHTTP、注册表、BCrypt 和 Windows CRT 系统依赖，并记录 ABI 4、长度、SHA-256、目标语言目录与私有配置摘要、编译器版本。机器翻译的签名、免费版名字哈希和随机数使用 Windows 自带 BCrypt，构建脚本会链接对应系统库。不接受额外的 MinGW 动态运行库依赖。
 
 可用 --output 和 --meta 指定中间产物路径；两者必须成对交给下一步，不可混用旧 DLL 与新 metadata。更换编译器时二进制摘要可能改变，包构建器会嵌入本次实际模块及其摘要。
 
 ## 使用 CLion / CMake 构建
 
-在 CLion 中打开项目根目录，并配置 Windows x64 MinGW 工具链：C 编译器选择 MinGW-w64 GCC，objdump 使用同一工具链的 Binutils。在 CMake 配置的 CMake options 中通过 `-DPython3_EXECUTABLE=解释器路径` 指定 Python 3.10+。CMake 配置只需要 Python 标准库，不会下载或安装依赖；不支持 MSVC、Clang、32 位或非 Windows 工具链。
+在 CLion 中打开项目根目录，并配置 Windows x64 MinGW 工具链：C 编译器选择 MinGW-w64 GCC，objdump 使用同一工具链的 Binutils。在 CMake 配置的 CMake options 中通过 `-DPython3_EXECUTABLE=解释器路径` 指定 Python 3.10+；可用 `-DHD2CT_FREE_CONFIG='<私有配置路径>'` 覆盖免费服务配置位置。CMake 配置只需要 Python 标准库，不会下载或安装依赖；不支持 MSVC、Clang、32 位或非 Windows 工具链。
 
 在项目根目录执行以下命令；将路径替换为本机实际路径。`cmake`、`ninja` 可使用 CLion 自带版本，GCC、objdump 和 Python 使用已配置的工具；若 Ninja 不在 PATH 中，再添加 `-DCMAKE_MAKE_PROGRAM='<CLion 中的 ninja.exe 路径>'`：
 

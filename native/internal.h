@@ -22,6 +22,7 @@
 #include <stdint.h>
 
 #define HD2CT_MAX_TOKEN 128u
+#define HD2CT_MAX_PLAYER_NAME 128u
 #define HD2CT_MAX_SOURCE 1023u
 #define HD2CT_MAX_TRANSLATION 16384u
 #define HD2CT_MAX_RESULT (HD2CT_MAX_TRANSLATION + 3u)
@@ -73,6 +74,7 @@ typedef struct HD2CT_WorkerJob {
     uint64_t submitted_ms;
     uint32_t flags;
     char token[HD2CT_MAX_TOKEN + 1u];
+    char player_name[HD2CT_MAX_PLAYER_NAME + 1u];
     char source[HD2CT_MAX_SOURCE + 1u];
     uint32_t source_bytes;
     char url[HD2CT_MAX_URL + 1u];
@@ -199,11 +201,6 @@ int hd2ct_build_free_request(const HD2CT_WorkerJob *job, HD2CT_BuiltRequest *req
 int hd2ct_parse_free_response(const HD2CT_WorkerJob *job, char *body,
                               size_t body_bytes, char *translation,
                               uint32_t *translation_bytes, const char **failure_code);
-#ifdef HD2CT_TESTING
-int hd2ct_test_totp(const unsigned char *secret, size_t secret_bytes,
-                    uint64_t unix_seconds, char output[7]);
-#endif
-
 /* 传输层只调用核心提供的取消与限流钩子。 */
 int hd2ct_job_cancelled(uint32_t slot_index, uint64_t serial);
 int hd2ct_take_rate_slot(void);
