@@ -190,7 +190,7 @@ def make_entry(dll: bytes) -> bytes:
     return builder.entry_source(
         (ROOT / "game" / "chat_probe.lua").read_bytes(),
         (ROOT / "game" / "chat_probe_core.lua").read_bytes(),
-        (ROOT / "game" / "chat_observe_core.lua").read_bytes(),
+        (ROOT / "game" / "research" / "chat_observe_core.lua").read_bytes(),
         translate_source=(ROOT / "game" / "chat_translate_core.lua").read_bytes(),
         standalone_source=native_source,
         settings_source=settings_source,

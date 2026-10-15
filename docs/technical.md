@@ -7,6 +7,7 @@
 - [game/chat_probe.lua](../game/chat_probe.lua) 连接 LuaJIT FFI、聊天适配器、翻译状态机、布局和状态报告。
 - [game/chat_probe_core.lua](../game/chat_probe_core.lua) 校验固定游戏构建及代码签名，并限制内存读取。
 - [game/chat_translate_core.lua](../game/chat_translate_core.lua) 管理新消息、请求队列、响应、过期和回写状态。
+- [game/research/chat_observe_core.lua](../game/research/chat_observe_core.lua) 提供观察诊断状态机；正式翻译模式不会实例化或推进该模块。
 - [game/chat_http_native.lua](../game/chat_http_native.lua) 校验并加载随包嵌入的原生 DLL。
 - [game/settings.lua](../game/settings.lua) 向 Mod Options Menu 注册目标语言、启用、自己消息过滤、请求超时和接口类型选项，不读取服务凭据。
 - [native/client.c](../native/client.c) 管理公开 ABI、后台线程、队列、缓存与限流；原生客户端各模块共同链接为一个 DLL。

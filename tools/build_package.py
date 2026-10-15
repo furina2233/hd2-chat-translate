@@ -1005,7 +1005,7 @@ def _build_input_paths(
     return (
         ROOT / "game" / "chat_probe.lua",
         ROOT / "game" / "chat_probe_core.lua",
-        ROOT / "game" / "chat_observe_core.lua",
+        ROOT / "game" / "research" / "chat_observe_core.lua",
         ROOT / "game" / "chat_translate_core.lua",
         ROOT / "game" / "chat_http_native.lua",
         ROOT / "game" / "settings.lua",
@@ -1040,7 +1040,7 @@ def _build_packaged_entry(
 ) -> bytes:
     entry_path = ROOT / "game" / "chat_probe.lua"
     core_path = ROOT / "game" / "chat_probe_core.lua"
-    observer_path = ROOT / "game" / "chat_observe_core.lua"
+    observer_path = ROOT / "game" / "research" / "chat_observe_core.lua"
     translate_path = ROOT / "game" / "chat_translate_core.lua"
     standalone_module_path = ROOT / "game" / "chat_http_native.lua"
     settings_path = ROOT / "game" / "settings.lua"
