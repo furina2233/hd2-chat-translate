@@ -3,6 +3,22 @@
 #include <string.h>
 #include <stdio.h>
 
+static const char HD2CT_BING_CN_ENDPOINT[] =
+    "https://api.translator.azure.cn/translate";
+static const char HD2CT_BING_GLOBAL_ENDPOINT[] =
+    "https://api.cognitive.microsofttranslator.com/translate";
+
+const char *hd2ct_bing_endpoint(uint32_t interface_type)
+{
+    if (interface_type == HD2CT_INTERFACE_BING_CN) {
+        return HD2CT_BING_CN_ENDPOINT;
+    }
+    if (interface_type == HD2CT_INTERFACE_BING_GLOBAL) {
+        return HD2CT_BING_GLOBAL_ENDPOINT;
+    }
+    return NULL;
+}
+
 static const char *hd2ct_bing_target_code(const HD2CT_WorkerJob *job)
 {
     const HD2CT_TargetLanguage *target = hd2ct_target_language(job->target_language);

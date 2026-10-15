@@ -1,7 +1,6 @@
 #include "internal.h"
 
 #include <string.h>
-#include <stdio.h>
 #include <stdlib.h>
 
 static const HD2CT_AdapterBase g_ai_translation_base = {
@@ -17,87 +16,124 @@ static const HD2CT_AdapterBase g_free_translation_base = {
     HD2CT_FAMILY_MACHINE, 0, 0, 0
 };
 
-static int hd2ct_ascii_contains_ci(const char *text, const char *needle)
+#ifdef HD2CT_TESTING
+static SRWLOCK g_test_endpoint_lock = SRWLOCK_INIT;
+static char g_test_machine_endpoints[HD2CT_INTERFACE_GOOGLE + 1u]
+                                    [HD2CT_MAX_URL + 1u];
+#endif
+
+static int hd2ct_machine_adapter_id(uint32_t interface_type,
+                                    uint32_t *adapter_id)
 {
-    size_t text_length = strlen(text);
-    size_t needle_length = strlen(needle);
-    size_t i;
-    if (needle_length == 0 || needle_length > text_length) {
+    switch (interface_type) {
+    case HD2CT_INTERFACE_BAIDU:
+        *adapter_id = HD2CT_ADAPTER_BAIDU;
+        return 1;
+    case HD2CT_INTERFACE_YOUDAO:
+        *adapter_id = HD2CT_ADAPTER_YOUDAO;
+        return 1;
+    case HD2CT_INTERFACE_BING_CN:
+    case HD2CT_INTERFACE_BING_GLOBAL:
+        *adapter_id = HD2CT_ADAPTER_BING;
+        return 1;
+    case HD2CT_INTERFACE_GOOGLE:
+        *adapter_id = HD2CT_ADAPTER_GOOGLE;
+        return 1;
+    default:
         return 0;
     }
-    for (i = 0; i + needle_length <= text_length; ++i) {
-        size_t j;
-        for (j = 0; j < needle_length; ++j) {
-            unsigned char left = (unsigned char)text[i + j];
-            unsigned char right = (unsigned char)needle[j];
-            if (left >= 'A' && left <= 'Z') left = (unsigned char)(left + ('a' - 'A'));
-            if (right >= 'A' && right <= 'Z') right = (unsigned char)(right + ('a' - 'A'));
-            if (left != right) break;
-        }
-        if (j == needle_length) return 1;
-    }
-    return 0;
 }
 
-static int hd2ct_ascii_ends_ci(const char *text, size_t text_length,
-                               const char *suffix)
+int hd2ct_machine_endpoint_for_interface(uint32_t interface_type,
+                                         char *output,
+                                         size_t output_capacity)
 {
-    size_t suffix_length = strlen(suffix);
-    size_t i;
-    if (suffix_length > text_length) return 0;
-    text += text_length - suffix_length;
-    for (i = 0; i < suffix_length; ++i) {
-        unsigned char left = (unsigned char)text[i];
-        unsigned char right = (unsigned char)suffix[i];
-        if (left >= 'A' && left <= 'Z') left = (unsigned char)(left + ('a' - 'A'));
-        if (right >= 'A' && right <= 'Z') right = (unsigned char)(right + ('a' - 'A'));
-        if (left != right) return 0;
+    const char *endpoint = NULL;
+    size_t endpoint_length;
+    uint32_t adapter_id;
+    if (output == NULL || output_capacity == 0u ||
+        !hd2ct_machine_adapter_id(interface_type, &adapter_id)) {
+        return 0;
     }
+#ifdef HD2CT_TESTING
+    AcquireSRWLockShared(&g_test_endpoint_lock);
+    endpoint_length = strlen(g_test_machine_endpoints[interface_type]);
+    if (endpoint_length != 0u) {
+        if (endpoint_length >= output_capacity) {
+            ReleaseSRWLockShared(&g_test_endpoint_lock);
+            return 0;
+        }
+        memcpy(output, g_test_machine_endpoints[interface_type],
+               endpoint_length + 1u);
+        ReleaseSRWLockShared(&g_test_endpoint_lock);
+        return 1;
+    }
+    ReleaseSRWLockShared(&g_test_endpoint_lock);
+#endif
+    switch (interface_type) {
+    case HD2CT_INTERFACE_BAIDU:
+        endpoint = hd2ct_baidu_endpoint();
+        break;
+    case HD2CT_INTERFACE_YOUDAO:
+        endpoint = hd2ct_youdao_endpoint();
+        break;
+    case HD2CT_INTERFACE_BING_CN:
+    case HD2CT_INTERFACE_BING_GLOBAL:
+        endpoint = hd2ct_bing_endpoint(interface_type);
+        break;
+    case HD2CT_INTERFACE_GOOGLE:
+        endpoint = hd2ct_google_endpoint();
+        break;
+    default:
+        return 0;
+    }
+    if (endpoint == NULL) return 0;
+    endpoint_length = strlen(endpoint);
+    if (endpoint_length >= output_capacity) return 0;
+    memcpy(output, endpoint, endpoint_length + 1u);
+    (void)adapter_id;
     return 1;
 }
 
-static int hd2ct_url_path_ends_messages(const char *url)
+#ifdef HD2CT_TESTING
+int hd2ct_test_set_machine_endpoint(uint32_t interface_type,
+                                    const char *url)
 {
-    const char *scheme_end = strstr(url, "://");
-    const char *path;
-    size_t path_length;
-    if (scheme_end == NULL) return 0;
-    path = strchr(scheme_end + 3, '/');
-    if (path == NULL) return 0;
-    path_length = strlen(path);
-    if (path_length != 0u && path[path_length - 1u] == '/') --path_length;
-    return hd2ct_ascii_ends_ci(path, path_length, "/messages");
-}
-
-uint32_t hd2ct_select_adapter(const char *url, const char *model)
-{
-    size_t model_length;
-    if (url == NULL || url[0] == '\0') return HD2CT_ADAPTER_FREE;
-    model_length = hd2ct_bounded_length(model, HD2CT_MAX_MODEL);
-    if (g_ai_translation_base.model_required && model_length != 0 &&
-        (model_length > HD2CT_MAX_MODEL ||
-         !hd2ct_is_only_space(model, model_length))) {
-        if (hd2ct_ascii_contains_ci(url, "anthropic") ||
-            hd2ct_url_path_ends_messages(url)) {
-            return HD2CT_ADAPTER_ANTHROPIC;
-        }
-        return HD2CT_ADAPTER_AI;
+    uint32_t adapter_id;
+    char normalized[HD2CT_MAX_URL + 1u];
+    size_t endpoint_length;
+    if (interface_type == 0u && url == NULL) {
+        AcquireSRWLockExclusive(&g_test_endpoint_lock);
+        SecureZeroMemory(g_test_machine_endpoints,
+                         sizeof(g_test_machine_endpoints));
+        ReleaseSRWLockExclusive(&g_test_endpoint_lock);
+        return 1;
     }
-    if (g_machine_translation_base.family == HD2CT_FAMILY_MACHINE) {
-        if (hd2ct_ascii_contains_ci(url, "google")) return HD2CT_ADAPTER_GOOGLE;
-        if (hd2ct_ascii_contains_ci(url, "baidu")) return HD2CT_ADAPTER_BAIDU;
-        if (hd2ct_ascii_contains_ci(url, "youdao")) return HD2CT_ADAPTER_YOUDAO;
-        if (hd2ct_ascii_contains_ci(url, "bing") ||
-            hd2ct_ascii_contains_ci(url, "microsofttranslator") ||
-            hd2ct_ascii_contains_ci(url, "cognitiveservices.azure.com") ||
-            hd2ct_ascii_contains_ci(url, "translator.azure.cn") ||
-            hd2ct_ascii_contains_ci(url, "cognitiveservices.azure.cn") ||
-            hd2ct_ascii_contains_ci(url, "microsoftglobal")) {
-            return HD2CT_ADAPTER_BING;
-        }
+    if (!hd2ct_machine_adapter_id(interface_type, &adapter_id)) return 0;
+    if (url == NULL) {
+        AcquireSRWLockExclusive(&g_test_endpoint_lock);
+        SecureZeroMemory(g_test_machine_endpoints[interface_type],
+                         sizeof(g_test_machine_endpoints[interface_type]));
+        ReleaseSRWLockExclusive(&g_test_endpoint_lock);
+        return 1;
     }
-    return HD2CT_ADAPTER_UNKNOWN;
+    if (!hd2ct_validate_test_machine_endpoint(url, adapter_id,
+                                               normalized,
+                                               sizeof(normalized))) {
+        SecureZeroMemory(normalized, sizeof(normalized));
+        return 0;
+    }
+    endpoint_length = strlen(normalized);
+    AcquireSRWLockExclusive(&g_test_endpoint_lock);
+    SecureZeroMemory(g_test_machine_endpoints[interface_type],
+                     sizeof(g_test_machine_endpoints[interface_type]));
+    memcpy(g_test_machine_endpoints[interface_type], normalized,
+           endpoint_length + 1u);
+    ReleaseSRWLockExclusive(&g_test_endpoint_lock);
+    SecureZeroMemory(normalized, sizeof(normalized));
+    return 1;
 }
+#endif
 
 static int hd2ct_form_append(HD2CT_FormBuffer *form, const char *value, size_t length)
 {
@@ -246,16 +282,15 @@ const char *hd2ct_provider_error_code(uint32_t adapter_id, const char *code)
 static const HD2CT_Adapter g_adapters[] = {
     {HD2CT_ADAPTER_AI, &g_ai_translation_base, 0, "/chat/completions",
      hd2ct_build_ai_request, hd2ct_parse_ai_response},
-    {HD2CT_ADAPTER_GOOGLE, &g_machine_translation_base, 0, "/language/translate/v2",
+    {HD2CT_ADAPTER_GOOGLE, &g_machine_translation_base, 0, NULL,
      hd2ct_build_google_request, hd2ct_parse_google_response},
-    {HD2CT_ADAPTER_BAIDU, &g_machine_translation_base, 1, "/api/trans/vip/translate",
+    {HD2CT_ADAPTER_BAIDU, &g_machine_translation_base, 1, NULL,
      hd2ct_build_baidu_request, hd2ct_parse_baidu_response},
-    {HD2CT_ADAPTER_YOUDAO, &g_machine_translation_base, 1, "/api",
+    {HD2CT_ADAPTER_YOUDAO, &g_machine_translation_base, 1, NULL,
      hd2ct_build_youdao_request, hd2ct_parse_youdao_response},
-    {HD2CT_ADAPTER_UNKNOWN, &g_machine_translation_base, 0, NULL, NULL, NULL},
     {HD2CT_ADAPTER_FREE, &g_free_translation_base, 0, "/translate",
      hd2ct_build_free_request, hd2ct_parse_free_response},
-    {HD2CT_ADAPTER_BING, &g_machine_translation_base, 0, "/translate",
+    {HD2CT_ADAPTER_BING, &g_machine_translation_base, 0, NULL,
      hd2ct_build_bing_request, hd2ct_parse_bing_response},
     {HD2CT_ADAPTER_ANTHROPIC, &g_anthropic_translation_base, 0, "/v1/messages",
      hd2ct_build_anthropic_request, hd2ct_parse_anthropic_response}

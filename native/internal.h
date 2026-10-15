@@ -45,8 +45,7 @@ enum {
     HD2CT_STATUS_MISSING_CONFIG = 1,
     HD2CT_STATUS_INVALID_CONFIG = 2,
     HD2CT_STATUS_DISABLED = 3,
-    HD2CT_STATUS_WORKER_FAILURE = 4,
-    HD2CT_STATUS_UNSUPPORTED_SERVICE = 5
+    HD2CT_STATUS_WORKER_FAILURE = 4
 };
 
 enum {
@@ -73,7 +72,6 @@ enum {
 };
 
 enum {
-    HD2CT_INTERFACE_AUTO = 0,
     HD2CT_INTERFACE_FREE = 1,
     HD2CT_INTERFACE_CHAT_COMPLETIONS = 2,
     HD2CT_INTERFACE_ANTHROPIC = 3,
@@ -220,6 +218,12 @@ int hd2ct_read_environment_value(const wchar_t *name, char *out,
                                  size_t out_capacity, int *present);
 uint32_t hd2ct_prepare_job_config(HD2CT_WorkerJob *job,
                                   uint32_t interface_type);
+#ifdef HD2CT_TESTING
+int hd2ct_validate_test_machine_endpoint(const char *input,
+                                         uint32_t adapter_id,
+                                         char *normalized,
+                                         size_t normalized_capacity);
+#endif
 
 /* 共享菜单目录与MOM已应用设置读取。 */
 const HD2CT_TargetLanguage *hd2ct_target_language(uint32_t index);
@@ -230,8 +234,18 @@ int hd2ct_test_set_values_file_path(const wchar_t *path);
 #endif
 
 /* 服务选择、适配器描述及共享签名与表单工具。 */
-uint32_t hd2ct_select_adapter(const char *url, const char *model);
 const HD2CT_Adapter *hd2ct_adapter_for_id(uint32_t adapter_id);
+int hd2ct_machine_endpoint_for_interface(uint32_t interface_type,
+                                         char *output,
+                                         size_t output_capacity);
+const char *hd2ct_google_endpoint(void);
+const char *hd2ct_baidu_endpoint(void);
+const char *hd2ct_youdao_endpoint(void);
+const char *hd2ct_bing_endpoint(uint32_t interface_type);
+#ifdef HD2CT_TESTING
+int hd2ct_test_set_machine_endpoint(uint32_t interface_type,
+                                    const char *url);
+#endif
 const char *hd2ct_provider_error_code(uint32_t adapter_id, const char *code);
 int hd2ct_form_add(HD2CT_FormBuffer *form, const char *name,
                    const char *value, size_t value_length);

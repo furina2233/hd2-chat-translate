@@ -28,26 +28,36 @@ AI 仅在简体中文目标下使用中文网络缩写和游戏术语规则；�
 
 ## 选择接口类型
 
-可选项依次为“免费版”“Chat Completions接口”“Anthropic接口”“百度翻译”“有道翻译”“必应翻译国内版”“必应翻译国际版”“谷歌翻译”。菜单选择优先于地址和模型名的自动判断，显式选择机器翻译时不使用模型名。
+可选项依次为“免费版”“Chat Completions接口”“Anthropic接口”“百度翻译”“有道翻译”“必应翻译国内版”“必应翻译国际版”“谷歌翻译”。提供商由菜单选择确定；机器翻译使用内置的官方接口地址，不读取 `HD2CT_API_URL` 和 `HD2CT_MODEL`。
 
 | 接口类型 | Windows 持久环境变量 |
 | --- | --- |
 | 免费版 | 无需提供商配置，优先使用 Bing 网页，失败时使用免费后备服务 |
 | Chat Completions接口 | `HD2CT_API_URL`、`HD2CT_MODEL`、`HD2CT_API_KEY` |
 | Anthropic接口 | `HD2CT_API_URL`、`HD2CT_MODEL`、`HD2CT_API_KEY` |
-| 百度翻译、有道翻译 | `HD2CT_API_URL`、`HD2CT_APP_ID`、`HD2CT_API_KEY` |
-| 必应翻译国内版、国际版 | `HD2CT_API_KEY`；可选 `HD2CT_API_URL`、`HD2CT_REGION` |
-| 谷歌翻译 | `HD2CT_API_URL`、`HD2CT_API_KEY` |
+| 百度翻译、有道翻译 | `HD2CT_APP_ID`、`HD2CT_API_KEY` |
+| 必应翻译国内版、国际版 | `HD2CT_API_KEY`；可选 `HD2CT_REGION` |
+| 谷歌翻译 | `HD2CT_API_KEY` |
 
-必应国内版对应 Azure 中国区官方 API，默认地址为 `https://api.translator.azure.cn`；国际版对应全球 Azure，默认地址为 `https://api.cognitive.microsofttranslator.com`。地址缺失或为空时使用默认值；非空时保留自定义地址。区域或多服务资源需要填写资源地区 `HD2CT_REGION`，密钥应与所用 Azure 云、资源及地区匹配。
+各机器翻译接口使用固定地址，不能通过环境变量覆盖：
 
-Anthropic 地址可填 `https://api.anthropic.com`、以 `/v1` 结尾的地址或完整 `/v1/messages` 地址。Chat Completions 的地址补全规则及其他协议详见[技术说明](technical.md#配置与-httpjson-协议)。显式接口的配置在后台开始处理每条消息时读取，修改持久环境变量后不必重启游戏；已经开始的请求保留原配置。
+| 提供商 | 接口地址 |
+| --- | --- |
+| 百度翻译 | `https://fanyi-api.baidu.com/api/trans/vip/translate` |
+| 有道翻译 | `https://openapi.youdao.com/api` |
+| 必应翻译国内版 | `https://api.translator.azure.cn/translate` |
+| 必应翻译国际版 | `https://api.cognitive.microsofttranslator.com/translate` |
+| 谷歌翻译 | `https://translation.googleapis.com/language/translate/v2` |
+
+必应国内版对应 Azure 中国区官方 API，国际版对应全球 Azure。区域或多服务资源需要填写资源地区 `HD2CT_REGION`，密钥应与所用 Azure 云、资源及地区匹配。
+
+AI 接口使用 `HD2CT_API_URL` 自定义地址。Anthropic 地址可填 `https://api.anthropic.com`、以 `/v1` 结尾的地址或完整 `/v1/messages` 地址。Chat Completions 的地址补全规则及其他协议详见[技术说明](technical.md#配置与-httpjson-协议)。服务配置在后台开始处理每条消息时读取，修改持久环境变量后不必重启游戏；已经开始的请求保留原配置。
 
 ## 保存位置与默认值
 
 Mod Options Menu 将已应用的选择保存到 `%LOCALAPPDATA%\CowboyBingus\Helldivers2\Logs\ModOptionsMenu.values`，并维护 `.bak` 备份。该文件由菜单框架管理，本插件只读取自己的五项设置，不改写其他模组的选项。读取发生在原生后台 worker 取到任务后；游戏线程上的提交和轮询不访问该文件。
 
-本插件的语言项缺失、越界或无效时使用简体中文；启用项和“不翻译自己说的话”项缺失或无效时默认开启；超时项缺失或无效时默认20秒。接口类型尚未保存、缺失或无效时兼容按环境变量自动选择服务；在菜单中选择并 APPLY 后优先使用所选接口。不要为重置一项设置删除整个共享文件，以免重置其他模组的选项；在菜单中分别选择默认值并应用即可。
+本插件的语言项缺失、越界或无效时使用简体中文；启用项和“不翻译自己说的话”项缺失或无效时默认开启；超时项缺失或无效时默认20秒；接口类型尚未保存、缺失或无效时使用免费版。不要为重置一项设置删除整个共享文件，以免重置其他模组的选项；在菜单中分别选择默认值并应用即可。
 
 菜单框架及本插件都受已支持游戏构建的门禁限制。游戏更新后，菜单未出现或翻译未生效时，先确认模组部署、加载优先级及游戏版本。
 

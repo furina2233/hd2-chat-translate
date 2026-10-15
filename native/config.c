@@ -9,23 +9,6 @@ static int hd2ct_ascii_equal_wide(const wchar_t *left, const wchar_t *right)
     return CompareStringOrdinal(left, -1, right, -1, TRUE) == CSTR_EQUAL;
 }
 
-static int hd2ct_azure_resource_host(const wchar_t *host)
-{
-    static const wchar_t suffix[] = L".cognitiveservices.azure.com";
-    static const wchar_t china_suffix[] = L".cognitiveservices.azure.cn";
-    size_t host_length = wcslen(host);
-    size_t suffix_length = sizeof(suffix) / sizeof(suffix[0]) - 1u;
-    size_t china_suffix_length = sizeof(china_suffix) / sizeof(china_suffix[0]) - 1u;
-    if (host_length > suffix_length &&
-        CompareStringOrdinal(host + host_length - suffix_length, -1,
-                             suffix, -1, TRUE) == CSTR_EQUAL) {
-        return 1;
-    }
-    return host_length > china_suffix_length &&
-           CompareStringOrdinal(host + host_length - china_suffix_length, -1,
-                                china_suffix, -1, TRUE) == CSTR_EQUAL;
-}
-
 static int hd2ct_local_ipv4(const wchar_t *host)
 {
     unsigned values[4] = {0, 0, 0, 0};
@@ -80,10 +63,6 @@ int hd2ct_normalize_url(const char *input, uint32_t adapter_id,
     if (adapter_id == HD2CT_ADAPTER_FREE) {
         if (strcmp(input, HD2CT_FREE_ENDPOINT) != 0) return 0;
     }
-    if (adapter_id == HD2CT_ADAPTER_UNKNOWN) {
-        memcpy(normalized, input, input_length + 1u);
-        return 1;
-    }
     if (input_length == 0 ||
         !hd2ct_valid_utf8((const unsigned char *)input, input_length, 1)) {
         return 0;
@@ -136,14 +115,11 @@ int hd2ct_normalize_url(const char *input, uint32_t adapter_id,
         if (adapter_id != HD2CT_ADAPTER_FREE) return 0;
     }
     adapter = hd2ct_adapter_for_id(adapter_id);
+    if (adapter == NULL || adapter->base == NULL) return 0;
     if (path_length == 0 || (path_length == 1u && path_start[0] == '/')) {
-        if (adapter == NULL || adapter->default_path == NULL) return 0;
-        path_start = adapter->default_path;
-        path_length = strlen(path_start);
-        if (adapter_id == HD2CT_ADAPTER_BING &&
-            hd2ct_azure_resource_host(host)) {
-            path_start = "/translator/text/v3.0/translate";
-            path_length = sizeof("/translator/text/v3.0/translate") - 1u;
+        if (adapter->default_path != NULL) {
+            path_start = adapter->default_path;
+            path_length = strlen(path_start);
         }
     } else if (adapter_id == HD2CT_ADAPTER_ANTHROPIC &&
                ((path_length == 3u && memcmp(path_start, "/v1", 3u) == 0) ||
@@ -164,6 +140,46 @@ int hd2ct_normalize_url(const char *input, uint32_t adapter_id,
     normalized[prefix_length + path_length] = '\0';
     return 1;
 }
+
+#ifdef HD2CT_TESTING
+int hd2ct_validate_test_machine_endpoint(const char *input,
+                                         uint32_t adapter_id,
+                                         char *normalized,
+                                         size_t normalized_capacity)
+{
+    wchar_t wide_url[HD2CT_MAX_URL + 1u];
+    wchar_t host[512];
+    wchar_t path[HD2CT_MAX_URL + 1u];
+    URL_COMPONENTS parts;
+    size_t input_length = hd2ct_bounded_length(input, HD2CT_MAX_URL);
+    int wide_length;
+    if (input_length == 0u || input_length > HD2CT_MAX_URL ||
+        !hd2ct_normalize_url(input, adapter_id,
+                             normalized, normalized_capacity) ||
+        strcmp(input, normalized) != 0) {
+        return 0;
+    }
+    wide_length = hd2ct_utf8_to_wide(input, input_length, wide_url,
+                                     (int)(sizeof(wide_url) / sizeof(wide_url[0])));
+    if (wide_length <= 0) return 0;
+    memset(&parts, 0, sizeof(parts));
+    parts.dwStructSize = sizeof(parts);
+    parts.lpszHostName = host;
+    parts.dwHostNameLength = (DWORD)(sizeof(host) / sizeof(host[0]));
+    parts.lpszUrlPath = path;
+    parts.dwUrlPathLength = (DWORD)(sizeof(path) / sizeof(path[0]));
+    if (!WinHttpCrackUrl(wide_url, (DWORD)wide_length, 0, &parts) ||
+        parts.dwUserNameLength != 0 || parts.dwPasswordLength != 0 ||
+        parts.dwExtraInfoLength != 0 || parts.dwHostNameLength == 0 ||
+        parts.dwUrlPathLength <= 1u ||
+        (parts.nScheme != INTERNET_SCHEME_HTTP &&
+         parts.nScheme != INTERNET_SCHEME_HTTPS) ||
+        !hd2ct_local_http_host(host)) {
+        return 0;
+    }
+    return 1;
+}
+#endif
 
 int hd2ct_valid_secret(const char *value, size_t maximum)
 {
@@ -282,16 +298,13 @@ int hd2ct_read_environment_value(const wchar_t *name, char *out,
 uint32_t hd2ct_prepare_job_config(HD2CT_WorkerJob *job,
                                   uint32_t interface_type)
 {
-    static const char bing_cn_endpoint[] = "https://api.translator.azure.cn";
-    static const char bing_global_endpoint[] =
-        "https://api.cognitive.microsofttranslator.com";
     char url[HD2CT_MAX_URL + 1u] = {0};
     char normalized[HD2CT_MAX_URL + 1u] = {0};
     char model[HD2CT_MAX_MODEL + 1u] = {0};
     char api_key[HD2CT_MAX_KEY + 1u] = {0};
     char app_id[HD2CT_MAX_KEY + 1u] = {0};
     char region[HD2CT_MAX_REGION + 1u] = {0};
-    const char *config_url = url;
+    const char *config_url = NULL;
     uint32_t adapter_id = HD2CT_ADAPTER_UNKNOWN;
     uint32_t status = HD2CT_STATUS_INVALID_CONFIG;
     const HD2CT_Adapter *adapter;
@@ -304,6 +317,8 @@ uint32_t hd2ct_prepare_job_config(HD2CT_WorkerJob *job,
     int needs_model = 0;
     int needs_app_id = 0;
     int needs_region = 0;
+    int needs_custom_url = 0;
+    int is_machine = 0;
 
     if (job == NULL || interface_type < HD2CT_INTERFACE_FREE ||
         interface_type > HD2CT_INTERFACE_GOOGLE) {
@@ -328,62 +343,63 @@ uint32_t hd2ct_prepare_job_config(HD2CT_WorkerJob *job,
     case HD2CT_INTERFACE_CHAT_COMPLETIONS:
         adapter_id = HD2CT_ADAPTER_AI;
         needs_model = 1;
+        needs_custom_url = 1;
         break;
     case HD2CT_INTERFACE_ANTHROPIC:
         adapter_id = HD2CT_ADAPTER_ANTHROPIC;
         needs_model = 1;
+        needs_custom_url = 1;
         break;
     case HD2CT_INTERFACE_BAIDU:
         adapter_id = HD2CT_ADAPTER_BAIDU;
         needs_app_id = 1;
+        is_machine = 1;
         break;
     case HD2CT_INTERFACE_YOUDAO:
         adapter_id = HD2CT_ADAPTER_YOUDAO;
         needs_app_id = 1;
+        is_machine = 1;
         break;
     case HD2CT_INTERFACE_BING_CN:
         adapter_id = HD2CT_ADAPTER_BING;
         needs_region = 1;
+        is_machine = 1;
         break;
     case HD2CT_INTERFACE_BING_GLOBAL:
         adapter_id = HD2CT_ADAPTER_BING;
         needs_region = 1;
+        is_machine = 1;
         break;
     case HD2CT_INTERFACE_GOOGLE:
         adapter_id = HD2CT_ADAPTER_GOOGLE;
+        is_machine = 1;
         break;
     default:
         goto cleanup;
     }
-    if (interface_type == HD2CT_INTERFACE_FREE) {
-        if (!hd2ct_normalize_url(config_url, adapter_id,
-                                 normalized, sizeof(normalized))) {
+    if (needs_custom_url) {
+        if (!hd2ct_read_environment_value(L"HD2CT_API_URL", url,
+                                          sizeof(url), &present)) {
             goto cleanup;
         }
-        memcpy(job->url, normalized, strlen(normalized) + 1u);
-        job->adapter_id = adapter_id;
-        status = HD2CT_STATUS_READY;
-        goto cleanup;
-    }
-
-    if (!hd2ct_read_environment_value(L"HD2CT_API_URL", url,
-                                      sizeof(url), &present)) {
-        goto cleanup;
-    }
-    if (interface_type == HD2CT_INTERFACE_BING_CN && url[0] == '\0') {
-        config_url = bing_cn_endpoint;
-    } else if (interface_type == HD2CT_INTERFACE_BING_GLOBAL &&
-               url[0] == '\0') {
-        config_url = bing_global_endpoint;
+        config_url = url;
+    } else if (is_machine) {
+        if (!hd2ct_machine_endpoint_for_interface(interface_type, url,
+                                                  sizeof(url))) {
+            goto cleanup;
+        }
+        config_url = url;
     }
     if (needs_model &&
         !hd2ct_read_environment_value(L"HD2CT_MODEL", model,
                                       sizeof(model), &present)) {
         goto cleanup;
     }
-    if (!hd2ct_read_environment_value(L"HD2CT_API_KEY", api_key,
-                                      sizeof(api_key), &present)) {
-        goto cleanup;
+    if (interface_type != HD2CT_INTERFACE_FREE) {
+        if (!hd2ct_read_environment_value(L"HD2CT_API_KEY", api_key,
+                                          sizeof(api_key), &present)) {
+            goto cleanup;
+        }
     }
     if (needs_app_id &&
         !hd2ct_read_environment_value(L"HD2CT_APP_ID", app_id,
@@ -401,7 +417,8 @@ uint32_t hd2ct_prepare_job_config(HD2CT_WorkerJob *job,
     key_length = hd2ct_bounded_length(api_key, HD2CT_MAX_KEY);
     app_id_length = hd2ct_bounded_length(app_id, HD2CT_MAX_KEY);
     region_length = hd2ct_bounded_length(region, HD2CT_MAX_REGION);
-    if (url_length == 0u || key_length == 0u ||
+    if (url_length == 0u ||
+        (interface_type != HD2CT_INTERFACE_FREE && key_length == 0u) ||
         (needs_model && model_length == 0u) ||
         (needs_app_id && app_id_length == 0u)) {
         status = HD2CT_STATUS_MISSING_CONFIG;
@@ -414,10 +431,14 @@ uint32_t hd2ct_prepare_job_config(HD2CT_WorkerJob *job,
         goto cleanup;
     }
     adapter = hd2ct_adapter_for_id(adapter_id);
-    if (adapter == NULL || adapter->base == NULL ||
-        !hd2ct_normalize_url(config_url, adapter_id,
-                             normalized, sizeof(normalized))) {
-        goto cleanup;
+    if (adapter == NULL || adapter->base == NULL) goto cleanup;
+    if (interface_type == HD2CT_INTERFACE_FREE || needs_custom_url) {
+        if (!hd2ct_normalize_url(config_url, adapter_id,
+                                 normalized, sizeof(normalized))) {
+            goto cleanup;
+        }
+    } else {
+        memcpy(normalized, config_url, url_length + 1u);
     }
     if (adapter->base->family == HD2CT_FAMILY_AI) {
         if (!hd2ct_valid_model_key(model, api_key)) goto cleanup;

@@ -2,6 +2,14 @@
 
 #include <string.h>
 #include <stdio.h>
+
+static const char HD2CT_GOOGLE_ENDPOINT[] =
+    "https://translation.googleapis.com/language/translate/v2";
+
+const char *hd2ct_google_endpoint(void)
+{
+    return HD2CT_GOOGLE_ENDPOINT;
+}
 int hd2ct_build_google_request(const HD2CT_WorkerJob *job,
                                       HD2CT_BuiltRequest *request)
 {

@@ -2,6 +2,13 @@
 
 #include <string.h>
 #include <stdio.h>
+
+static const char HD2CT_YOUDAO_ENDPOINT[] = "https://openapi.youdao.com/api";
+
+const char *hd2ct_youdao_endpoint(void)
+{
+    return HD2CT_YOUDAO_ENDPOINT;
+}
 #include <stdlib.h>
 static size_t hd2ct_utf8_character_bytes(unsigned char first)
 {

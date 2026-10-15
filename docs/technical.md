@@ -21,7 +21,7 @@
 | --- | --- |
 | [client.h](../native/client.h) | 提交、轮询、取消三个公开任务接口 |
 | [internal.h](../native/internal.h) | 模块间的私有类型、上限与函数声明 |
-| [client.c](../native/client.c) | 配置初始化、线程生命周期及集中管理的队列、缓存、限流状态 |
+| [client.c](../native/client.c) | 线程生命周期及集中管理的队列、缓存、限流状态 |
 | [common.c](../native/common.c) | UTF-8、文本、JSON 与结果格式的共用工具 |
 | [config.c](../native/config.c) | 持久环境变量读取、配置校验和 URL 补全 |
 | [languages.c](../native/languages.c) | 后台读取已应用的目标语言并提供服务商语言码 |
@@ -63,15 +63,15 @@
 
 ## 配置与 HTTP/JSON 协议
 
-首次有效提交由原生客户端启动一次后台初始化，读取服务配置的 Windows 持久环境变量：先读 HKCU\Environment，再读 HKLM\SYSTEM\CurrentControlSet\Control\Session Manager\Environment。若用户变量存在，即使值为空或无效，也不回退到系统变量；不读取进程继承值。初始化的自动选型配置每个进程只读取一次；已应用的显式接口类型则在后台开始处理每个任务时读取所需配置。服务选择、地址、凭据和配置有效性由 C 管理，接口类型、启用状态、自己消息过滤和请求超时来自已应用的 Mod Options Menu 设置。
+首次有效提交由原生客户端启动一次后台初始化并创建 worker，不在初始化阶段读取服务配置。每个 worker 开始处理任务时，先读取已应用的 Mod Options Menu 设置，再读取所选接口需要的 Windows 持久环境变量：先读 HKCU\Environment，再读 HKLM\SYSTEM\CurrentControlSet\Control\Session Manager\Environment。若用户变量存在，即使值为空或无效，也不回退到系统变量；不读取进程继承值。服务选择、地址、凭据和配置有效性由 C 管理，配置快照仅用于当前任务。
 
-已应用的“接口类型”优先于 URL 和模型名推断，菜单默认“免费版”。免费版忽略提供商环境变量，先使用 Bing 网页翻译，再回退编译时配置的后备服务。显式机器翻译不使用模型名；两种 AI 接口都需要 HD2CT_MODEL。普通服务需要 HD2CT_API_KEY；百度、有道还需要 HD2CT_APP_ID。除 Bing 官方接口可使用默认地址外，显式服务需要 HD2CT_API_URL。Bing 国内版在地址缺失或为空时使用 `https://api.translator.azure.cn`，国际版使用 `https://api.cognitive.microsofttranslator.com`；非空地址保留用户配置，允许代理及资源专属端点。两者使用同一官方协议，区域或多服务资源可通过 HD2CT_REGION 指定资源地区，例如 `chinanorth`、`eastasia`。地区最多64个 ASCII 字母、数字或连字符，不与应用 ID 共用。
+“接口类型”直接确定提供商，尚未保存、缺失或无效时使用免费版。免费版忽略提供商环境变量，先使用 Bing 网页翻译，再回退编译时配置的后备服务。机器翻译端点固定在各适配器中，不读取 HD2CT_API_URL 或 HD2CT_MODEL；两种 AI 接口读取 HD2CT_API_URL、HD2CT_MODEL 和 HD2CT_API_KEY。机器翻译读取 HD2CT_API_KEY，百度、有道还读取 HD2CT_APP_ID，Bing 官方读取可选的 HD2CT_REGION。地区最多64个 ASCII 字母、数字或连字符，不与应用 ID 共用。
 
-接口类型尚未保存、缺失或无效时，兼容自动选型：HD2CT_API_URL 缺失或为空选择 FREE；非空且 HD2CT_MODEL 有效非空时，URL 含 anthropic 或路径以 `/messages`（可带尾斜杠）结尾选择 Anthropic，其余选择 Chat Completions。无模型名时按 URL 中忽略大小写的 google、baidu、youdao、Bing/Azure Translator 标识选择机器翻译。模型名最多256字节，密钥与应用 ID 各最多4096字节，URL 最多2048字节。旧变量 HD2CT_ENABLED 与 HD2CT_TIMEOUT_SECONDS 不再读取。缺失或无效的启用项和自己消息过滤项默认开启，超时默认20秒，可选10、20、30秒。显式选择的配置错误只影响当前任务，不阻止后续通过 APPLY 切换服务。
+固定端点分别为 Google `https://translation.googleapis.com/language/translate/v2`、百度 `https://fanyi-api.baidu.com/api/trans/vip/translate`、有道 `https://openapi.youdao.com/api`、Bing 中国区 `https://api.translator.azure.cn/translate`、Bing 全球 `https://api.cognitive.microsofttranslator.com/translate`。不按 URL 关键词或模型名推断服务，不支持覆盖机器翻译端点。模型名最多256字节，密钥与应用 ID 各最多4096字节，AI URL 最多2048字节。旧变量 HD2CT_ENABLED 与 HD2CT_TIMEOUT_SECONDS 不读取。配置错误只影响当前任务，不阻止后续通过 APPLY 切换服务。
 
-后台 worker 每次开始处理任务时，从 `%LOCALAPPDATA%\CowboyBingus\Helldivers2\Logs\ModOptionsMenu.values` 的同一份 primary/backup 文件快照读取本插件的目标语言、启用状态、自己消息过滤状态、超时与接口类型。前四项缺失或无效时分别回退到简体中文、开启、开启和20秒，接口类型缺失或无效时走自动选型；启用及自己消息过滤值只接受小写 `true`/`false`，choice 值是1起始的索引。可读且有记录的 primary 中若缺少某项或该项值无效，不从旧 backup 覆盖；primary 不可读、损坏或没有有效记录时才尝试 backup。提交、轮询和游戏线程不做该文件 I/O。
+后台 worker 每次开始处理任务时，从 `%LOCALAPPDATA%\CowboyBingus\Helldivers2\Logs\ModOptionsMenu.values` 的同一份 primary/backup 文件快照读取本插件的目标语言、启用状态、自己消息过滤状态、超时与接口类型。缺失或无效时分别回退到简体中文、开启、开启、20秒和免费版；启用及自己消息过滤值只接受小写 `true`/`false`，choice 值是1起始的索引。可读且有记录的 primary 中若缺少某项或该项值无效，不从旧 backup 覆盖；primary 不可读、损坏或没有有效记录时才尝试 backup。提交、轮询和游戏线程不做该文件 I/O。
 
-普通适配器要求 HTTPS；只有 localhost、127.0.0.0/8 和 ::1 可使用 HTTP。FREE 后备服务只允许编译时固定端点使用远端 HTTP；Bing 网页请求使用固定的 HTTPS 域名。Chat Completions 将根路径补为 /chat/completions，将精确的 /v1、/v1/ 补为 /v1/chat/completions。Anthropic 将根路径、/v1、/v1/ 补为 /v1/messages。Bing 官方根路径补为 /translate，`*.cognitiveservices.azure.com` 与 `*.cognitiveservices.azure.cn` 资源根路径补为 /translator/text/v3.0/translate；其他完整路径保留。其余机翻仅补全根路径。拒绝普通配置 URL 中的凭据、查询、片段、反斜杠、空白和控制字符；Bing 官方的 api-version/to 查询由适配器生成。普通服务请求禁用重定向、cookies 和自动认证；Bing 网页使用独立 Cookie 会话，地区跳转规则见下文。
+普通适配器要求 HTTPS；AI 自定义地址仅对 localhost、127.0.0.0/8 和 ::1 允许 HTTP。FREE 后备服务只允许编译时固定端点使用远端 HTTP；Bing 网页请求使用固定的 HTTPS 域名。Chat Completions 将根路径补为 /chat/completions，将精确的 /v1、/v1/ 补为 /v1/chat/completions。Anthropic 将根路径、/v1、/v1/ 补为 /v1/messages；其他完整 AI 路径保留。拒绝配置 URL 中的凭据、查询、片段、反斜杠、空白和控制字符；Bing 官方的 api-version/to 查询由适配器生成。普通服务请求禁用重定向、cookies 和自动认证；Bing 网页使用独立 Cookie 会话，地区跳转规则见下文。
 
 AI 适配器使用 OpenAI-compatible Chat Completions 请求，只发送 `model`、`messages` 和 `response_format: {"type":"json_object"}`。请求不显式设置采样或思考参数，也不发送 `stream`；模型使用服务端默认策略及非流式默认行为。端点需同时实现兼容的 Chat Completions 与 JSON mode；供应商原生 API 不一定支持这两者。JSON mode 保证输出是合法 JSON 语法，不保证对象字段结构；提示词要求只返回 `is_target_language`（布尔值）和 `translation`（字符串），客户端再严格校验字段、类型、重复字段和额外字段。[DeepSeek Chat Completions 文档](https://api-docs.deepseek.com/api/create-chat-completion/)；[通义千问结构化输出文档](https://help.aliyun.com/zh/model-studio/qwen-structured-output)。完整简体中文请求示例见 [ai-request-example.json](ai-request-example.json)。
 
@@ -89,11 +89,11 @@ ABI 4 的 DLL 仍只导出三个函数，签名见 [client.h](../native/client.h
 | --- | --- |
 | `HD2CT_Submit(token, body, bytes, flags, player_name)` | 校验并接收任务，返回 1 表示入队；无效参数、重复 token、队列已满或锁忙返回 0。`flags` 的 `HD2CT_MESSAGE_SELF` 位标记已识别的自身消息；其他或无法确认的发送者使用0。`player_name` 是已缓存的本地玩家 UTF-8 姓名，最多128字节；未知时传 NULL 或空串。首次提交触发后台初始化，调用方不等待配置读取或网络请求。 |
 | `HD2CT_Poll(token, out, capacity, written)` | 非阻塞轮询；返回 1 时写入结果，written 不含末尾 NUL。未完成、token 不存在、锁忙或缓冲区不足返回 0。读取结果后由调用方取消该 token 以释放槽位。 |
-| `HD2CT_Cancel(token)` | 取消任务或释放已完成槽位；token 不存在也返回 1，单项取消遇锁忙返回 0，可重试。传入 NULL 取消全部当前任务，锁忙时由 C 记录并延后处理，保留服务配置与工作线程。 |
+| `HD2CT_Cancel(token)` | 取消任务或释放已完成槽位；token 不存在也返回 1，单项取消遇锁忙返回 0，可重试。传入 NULL 取消全部当前任务，锁忙时由 C 记录并延后处理，保留工作线程。 |
 
-结果统一为 `OK\n译文`、精确的 `SKIP\n` 或 `ERR\n固定错误码`。Lua 对 OK 组合“原文 + 换行 + 译文： + 译文”，对 SKIP 保留原文并结束任务，对 ERR 显示短提示，不依据翻译方式或文本相等作决定。C 对服务响应解析后的 UTF-8 译文和原文按字节长度及内容作精确比较，相同则返回 SKIP，不去除空白、转换大小写或做 Unicode 归一化。`ignore_self` 开启且 Submit 标记了自身消息时，worker 返回 SKIP，Lua 保留原文；该判断不发起 HTTP 请求。菜单关闭时，开始处理的任务也返回 SKIP，不查缓存、不占限流、不发 HTTP，也不缓存该结果；服务配置仍保留，重新启用后即可继续。普通缺失、无效或未知服务配置由 worker 对已接收任务返回固定错误；bootstrap、线程创建或 WinHTTP session 硬失败由 Poll 返回 `SERVICE_ERROR`，任务 token 保留供取消。
+结果统一为 `OK\n译文`、精确的 `SKIP\n` 或 `ERR\n固定错误码`。Lua 对 OK 组合“原文 + 换行 + 译文： + 译文”，对 SKIP 保留原文并结束任务，对 ERR 显示短提示，不依据翻译方式或文本相等作决定。C 对服务响应解析后的 UTF-8 译文和原文按字节长度及内容作精确比较，相同则返回 SKIP，不去除空白、转换大小写或做 Unicode 归一化。`ignore_self` 开启且 Submit 标记了自身消息时，worker 返回 SKIP，Lua 保留原文。菜单关闭时也返回 SKIP，不读取提供商凭据、不查缓存、不占限流、不发 HTTP，也不缓存该结果；重新启用后的任务照常读取配置。缺失或无效的服务配置由 worker 对已接收任务返回固定错误；bootstrap、线程创建或 WinHTTP session 硬失败由 Poll 返回 `SERVICE_ERROR`，任务 token 保留供取消。
 
-后台初始化在普通线程中执行，不在 DllMain 中读取注册表或执行网络工作。初始化后总是尝试启动两个 WinHTTP worker，包括服务配置缺失、无效或未知时；配置错误任务不会创建 HTTP 请求。worker 为每个任务快照启用状态和超时，已开始的任务不会被后续 APPLY 改写。请求超时从开始网络请求时起算，截止时间是该任务设置的请求超时与提交后60秒总时限两者中的较早值；Lua pending TTL 也为60秒。Lua 的心跳只表示传输模块已加载且本地时钟有效。异常、结束或复用 Lua 实例时，通过取消接口清理任务；C 服务生命周期独立于菜单启用项。
+后台初始化在普通线程中执行，只启动两个 WinHTTP worker，不在 DllMain 中读取注册表或执行网络工作。配置错误任务不会创建 HTTP 请求。worker 为每个任务快照设置及服务配置，完成后清零该任务的凭据缓冲区；已开始的任务不会被后续 APPLY 改写。请求超时从开始网络请求时起算，截止时间是该任务设置的请求超时与提交后60秒总时限两者中的较早值；Lua pending TTL 也为60秒。Lua 的心跳只表示传输模块已加载且本地时钟有效。异常、结束或复用 Lua 实例时，通过取消接口清理任务；C 服务生命周期独立于菜单启用项。
 
 ## 翻译适配器
 
@@ -126,7 +126,7 @@ Bing 国内版使用 [Azure 中国区端点](https://learn.microsoft.com/en-us/a
 
 三家文本接口的公开文档没有给出自动检测同语种时可用于确定源文本为中文的专用错误码。[Google 文档](https://docs.cloud.google.com/translate/docs/languages)的同语言限制位于 AutoML 自定义模型范围，不能用于断言 Basic v2 的自动检测行为；百度 58001、有道 102 都可能表示其他不支持的语言。因此按实际响应判断成功或失败，通用语言错误显示短提示，不据此吞掉消息。同语种服务端响应需用有效凭据另行实测，离线回环只验证适配器解析与显示规则。
 
-未知机器翻译服务收到消息后返回 UNSUPPORTED_SERVICE，不发 HTTP 请求，不占用限流或缓存错误。已支持服务缺少配置时返回 MISSING_CONFIG，配置无效时返回 INVALID_CONFIG，后台初始化失败时返回 SERVICE_ERROR；显式禁用返回 SKIP。错误码映射为固定短提示，响应原文、签名、密钥及堆栈不进入聊天或状态报告。
+服务缺少配置时返回 MISSING_CONFIG，配置无效时返回 INVALID_CONFIG，后台初始化失败时返回 SERVICE_ERROR；显式禁用返回 SKIP。错误码映射为固定短提示，响应原文、签名、密钥及堆栈不进入聊天或状态报告。
 
 ## 游戏内设置
 

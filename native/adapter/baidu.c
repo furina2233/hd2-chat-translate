@@ -2,6 +2,14 @@
 
 #include <string.h>
 #include <stdio.h>
+
+static const char HD2CT_BAIDU_ENDPOINT[] =
+    "https://fanyi-api.baidu.com/api/trans/vip/translate";
+
+const char *hd2ct_baidu_endpoint(void)
+{
+    return HD2CT_BAIDU_ENDPOINT;
+}
 #include <stdlib.h>
 int hd2ct_build_baidu_request(const HD2CT_WorkerJob *job,
                                      HD2CT_BuiltRequest *request)
