@@ -318,57 +318,6 @@ return function(ffi, kernel, bcrypt, hash_bytes, u16_ascii)
                 and not token:find("[^A-Za-z0-9_%-]")
         end
 
-        local function valid_player_name(name)
-            if type(name) ~= "string" or #name > 128 or name:find("\0", 1, true) then return false end
-            local index = 1
-            while index <= #name do
-                local first = name:byte(index)
-                if first <= 0x7f then
-                    index = index + 1
-                elseif first >= 0xc2 and first <= 0xdf then
-                    local second = name:byte(index + 1)
-                    if not second or second < 0x80 or second > 0xbf then return false end
-                    index = index + 2
-                elseif first == 0xe0 then
-                    local second, third = name:byte(index + 1, index + 2)
-                    if not second or second < 0xa0 or second > 0xbf
-                        or not third or third < 0x80 or third > 0xbf then return false end
-                    index = index + 3
-                elseif (first >= 0xe1 and first <= 0xec) or (first >= 0xee and first <= 0xef) then
-                    local second, third = name:byte(index + 1, index + 2)
-                    if not second or second < 0x80 or second > 0xbf
-                        or not third or third < 0x80 or third > 0xbf then return false end
-                    index = index + 3
-                elseif first == 0xed then
-                    local second, third = name:byte(index + 1, index + 2)
-                    if not second or second < 0x80 or second > 0x9f
-                        or not third or third < 0x80 or third > 0xbf then return false end
-                    index = index + 3
-                elseif first == 0xf0 then
-                    local second, third, fourth = name:byte(index + 1, index + 3)
-                    if not second or second < 0x90 or second > 0xbf
-                        or not third or third < 0x80 or third > 0xbf
-                        or not fourth or fourth < 0x80 or fourth > 0xbf then return false end
-                    index = index + 4
-                elseif first >= 0xf1 and first <= 0xf3 then
-                    local second, third, fourth = name:byte(index + 1, index + 3)
-                    if not second or second < 0x80 or second > 0xbf
-                        or not third or third < 0x80 or third > 0xbf
-                        or not fourth or fourth < 0x80 or fourth > 0xbf then return false end
-                    index = index + 4
-                elseif first == 0xf4 then
-                    local second, third, fourth = name:byte(index + 1, index + 3)
-                    if not second or second < 0x80 or second > 0x8f
-                        or not third or third < 0x80 or third > 0xbf
-                        or not fourth or fourth < 0x80 or fourth > 0xbf then return false end
-                    index = index + 4
-                else
-                    return false
-                end
-            end
-            return true
-        end
-
         local function forget_token(token)
             if accepted[token] then
                 accepted[token] = nil
@@ -405,7 +354,7 @@ return function(ffi, kernel, bcrypt, hash_bytes, u16_ascii)
             return completed
         end
 
-        function api.submit(token, body, flags, player_name)
+        function api.submit(token, body, flags)
             if flags == nil then flags = 0 end
             if type(flags) ~= "number" or (flags ~= 0 and flags ~= 1) then return false end
             retry_cancels(4)
@@ -413,16 +362,10 @@ return function(ffi, kernel, bcrypt, hash_bytes, u16_ascii)
                 or accepted[token] or accepted_count >= 64 then
                 return false
             end
-            if player_name ~= nil and not valid_player_name(player_name) then return false end
             local buffer = ffi.new("char[?]", #body)
             ffi.copy(buffer, body, #body)
-            local player_name_pointer = ffi.cast("const char *", nil)
-            if player_name ~= nil and player_name ~= "" then
-                local player_name_buffer = ffi.new("char[?]", #player_name + 1)
-                ffi.copy(player_name_buffer, player_name, #player_name)
-                player_name_pointer = ffi.cast("const char *", player_name_buffer)
-            end
-            local ok, result = pcall(c_submit, token, buffer, #body, flags, player_name_pointer)
+            local reserved_pointer = ffi.cast("const char *", nil)
+            local ok, result = pcall(c_submit, token, buffer, #body, flags, reserved_pointer)
             if not ok or tonumber(result) ~= 1 then return false end
             accepted[token] = true
             accepted_count = accepted_count + 1

@@ -22,7 +22,6 @@
 #include <stdint.h>
 
 #define HD2CT_MAX_TOKEN 128u
-#define HD2CT_MAX_PLAYER_NAME 128u
 #define HD2CT_MAX_SOURCE 1023u
 #define HD2CT_MAX_TRANSLATION 16384u
 #define HD2CT_MAX_RESULT (HD2CT_MAX_TRANSLATION + 3u)
@@ -88,7 +87,6 @@ typedef struct HD2CT_WorkerJob {
     uint64_t submitted_ms;
     uint32_t flags;
     char token[HD2CT_MAX_TOKEN + 1u];
-    char player_name[HD2CT_MAX_PLAYER_NAME + 1u];
     char source[HD2CT_MAX_SOURCE + 1u];
     uint32_t source_bytes;
     char url[HD2CT_MAX_URL + 1u];
@@ -133,7 +131,7 @@ typedef struct HD2CT_BingContext {
 } HD2CT_BingContext;
 
 enum {
-    HD2CT_BING_FALLBACK = 0,
+    HD2CT_BING_FAILED = 0,
     HD2CT_BING_TRANSLATED = 1,
     HD2CT_BING_CANCELLED = 2,
     HD2CT_BING_RATE_LIMITED = 3
@@ -288,10 +286,6 @@ int hd2ct_build_youdao_request(const HD2CT_WorkerJob *job, HD2CT_BuiltRequest *r
 int hd2ct_parse_youdao_response(const HD2CT_WorkerJob *job, char *body,
                                 size_t body_bytes, char *translation,
                                 uint32_t *translation_bytes, const char **failure_code);
-int hd2ct_build_free_request(const HD2CT_WorkerJob *job, HD2CT_BuiltRequest *request);
-int hd2ct_parse_free_response(const HD2CT_WorkerJob *job, char *body,
-                              size_t body_bytes, char *translation,
-                              uint32_t *translation_bytes, const char **failure_code);
 int hd2ct_bing_state_init(HD2CT_BingState *state);
 void hd2ct_bing_state_destroy(HD2CT_BingState *state);
 int hd2ct_bing_translate(HD2CT_BingContext *context, char *translation,

@@ -1,10 +1,10 @@
 # 从源代码手动构建
 
-所有命令在项目根目录的 PowerShell 7（pwsh）中运行。构建过程不启动游戏、不读取模型配置、不请求真实模型服务，也不部署游戏文件。
+所有命令在项目根目录的 PowerShell 7（pwsh）中运行。构建不启动游戏、不读取翻译凭据、不请求真实翻译服务，也不部署游戏文件。
 
-## 准备工具与依赖
+## 工具与输入
 
-需要 Windows x64、64 位 Python 3.10+、MinGW-w64 的 x86_64 GCC 和同套 Binutils objdump。Python 脚本只使用标准库，无需安装 pip 依赖。可从 [MinGW-w64 工具链目录](https://www.mingw-w64.org/downloads/) 选择 Windows x64 工具链，将 bin 加入当前终端 PATH；也可在构建时指定工具完整路径。
+需要 Windows x64、64位 Python 3.10+、MinGW-w64 的 x86_64 GCC 和同套 Binutils objdump。脚本只使用 Python 标准库，无需安装 pip 依赖。工具可加入 PATH，或在命令中指定完整路径。
 
 ~~~pwsh
 python --version
@@ -14,187 +14,97 @@ gcc -dumpmachine
 objdump --version
 ~~~
 
-Python 位数应为 64，GCC 目标应为 x86_64-w64-mingw32。Clang/MSVC 和 Linux ELF 编译器不属于本构建流程。
+Python 位数应为64，GCC 目标应为 x86_64-w64-mingw32。不支持 MSVC、Clang、32位或非 Windows 工具链。`native/vendor/cjson/` 包含固定 cJSON v1.7.19 源码与 MIT 许可，无需另行下载。
 
-从 [Bingus Shared Loader v18 发布页](https://github.com/CowboyBingus/BingusSharedLoader/releases/tag/v18) 下载 Bingus-Shared-Loader-v18.zip，放到 artifacts/。不要使用源码 ZIP，也不要解压后重新打包。干净克隆需要自行准备这个未提交的输入：
+根目录 [VERSION](../VERSION) 保存安装包版本号，例如 `2.4`。版本不得包含路径、空白或控制字符；文件缺失、为空或格式无效时打包失败。
 
-~~~pwsh
-New-Item -ItemType Directory -Path artifacts -Force | Out-Null
-# 尚未准备此文件时执行下载；已存在则保留本机文件。
-if (-not (Test-Path -LiteralPath artifacts/Bingus-Shared-Loader-v18.zip)) {
-    Invoke-WebRequest -Uri 'https://github.com/CowboyBingus/BingusSharedLoader/releases/download/v18/Bingus-Shared-Loader-v18.zip' -OutFile artifacts/Bingus-Shared-Loader-v18.zip
-}
-(Get-FileHash -LiteralPath artifacts/Bingus-Shared-Loader-v18.zip -Algorithm SHA256).Hash
-~~~
+构建不需要前置模组 ZIP 或免费服务私有配置。玩家使用插件时仍需单独安装 Bingus Shared Loader v18 和兼容 v1.2 接口的 Mod Options Menu。
 
-预期 SHA-256 为 53af5698aeacfb27b98dfa00054923d11dc854e1e67b4af14798877812a93ba6，与[官方发布资产摘要](https://github.com/CowboyBingus/BingusSharedLoader/releases/expanded_assets/v18)一致。构建器也会核验内部启动 patch 和 Lua 资源摘要，不匹配时拒绝构建。
-
-目标语言菜单使用 [Mod Options Menu v1.2](https://github.com/CowboyBingus/ModOptionsMenu/releases/tag/v1.2) 的官方发布包。同样需保持原 ZIP，将 `Mod-Options-Menu-v1.2.zip` 放到 `artifacts/`：
-
-~~~pwsh
-if (-not (Test-Path -LiteralPath artifacts/Mod-Options-Menu-v1.2.zip)) {
-    Invoke-WebRequest -Uri 'https://github.com/CowboyBingus/ModOptionsMenu/releases/download/v1.2/Mod-Options-Menu-v1.2.zip' -OutFile artifacts/Mod-Options-Menu-v1.2.zip
-}
-(Get-FileHash -LiteralPath artifacts/Mod-Options-Menu-v1.2.zip -Algorithm SHA256).Hash
-~~~
-
-预期 SHA-256 为 `a977d84e7f8fda62c587b5b5af2012aab3fa792e31945a9c8d5f458bfd453e13`。构建器校验 ZIP、patch 和 Lua 资源，只原样合入菜单资源，不运行上游脚本。
-
-native/vendor/cjson/ 已包含固定的 [cJSON v1.7.19](https://github.com/DaveGamble/cJSON/tree/v1.7.19) 源码与 MIT 许可。无需另行下载、安装 HD2SDK 或提取游戏资源。
-
-FREE 后备服务的发布配置单独存放在 Git 忽略的 `config/free-service.private.json`。从 `config/free-service.example.json` 复制该文件，填写 `endpoint_url` 和 UUID 格式的 `key1`；构建器不会自动生成校验码。此文件用于编译 Bing 失败时调用的 FREE 后备服务，普通玩家安装 ZIP 时不需要它。Bing 网页会话参数由客户端自动获取，不需要用户提供 API 密钥。缺少或无效的私有配置会阻止构建。
-
-~~~pwsh
-Copy-Item -LiteralPath config/free-service.example.json -Destination config/free-service.private.json
-# 在本机编辑私有配置，填写免费服务的入口与校验码。
-git check-ignore config/free-service.private.json
-~~~
-
-命令行构建、打包和一键构建支持 `--free-config '<私有配置路径>'`，默认使用上述路径。配置变化后需重新编译 DLL；metadata 保存配置摘要，打包器拒绝配置与 DLL metadata 不一致的组合。自定义配置路径也应排除在版本控制之外。
-
-## 一键编译并打包
-
-准备好上述工具和两个依赖 ZIP 后，可以按顺序构建原生 DLL、metadata，再生成无前置和含前置两种安装包：
+## 一键构建
 
 ~~~pwsh
 python tools/quick_build_all.py
 if ($LASTEXITCODE -ne 0) { throw '一键构建失败' }
 ~~~
 
-工具命令名不在 PATH 时可传 GCC、objdump 的路径；也可覆盖两个 ZIP 的位置和安装包输出目录：
+也可指定工具及输出目录：
 
 ~~~pwsh
 python tools/quick_build_all.py `
-    --cc 'C:\tools\mingw64\bin\gcc.exe' `
-    --objdump 'C:\tools\mingw64\bin\objdump.exe' `
-    --loader-zip 'C:\dependencies\Bingus-Shared-Loader-v18.zip' `
-    --menu-zip 'C:\dependencies\Mod-Options-Menu-v1.2.zip' `
-    --output-dir 'C:\release\20261009'
+    --cc 'E:\mingw64\bin\gcc.exe' `
+    --objdump 'E:\mingw64\bin\objdump.exe' `
+    --output-dir 'C:\release'
 ~~~
 
-路径参数按启动命令时所在目录解析。该脚本不会下载依赖或部署文件；原生构建失败时会停止打包。手动分步构建和 CMake 流程仍可分别使用下文命令。
+脚本依次构建原生 DLL、metadata 和一个不含前置模组的 Arsenal ZIP。默认输出到 `artifacts/`，名称为 `HD2ChatTranslate_版本号_YYYYMMDDHHMMSS.zip`。版本来自根目录 VERSION，时间自动使用北京时间，例如 `HD2ChatTranslate_2.4_20261015180000.zip`。同名文件不会覆盖。
 
-## 编译原生网络模块
-
-构建脚本按 `tools/build_native_http.py` 中的 `NATIVE_SOURCES` 清单编译 `native/` 的客户端基础模块与 `native/adapter/` 的翻译适配器，并与固定版本的 cJSON 一起链接为 `hd2ct_http.dll`。源码模块划分和命名规则见[技术说明](technical.md#原生客户端模块)；添加模块时需同步更新源码清单。
+## 分步构建
 
 ~~~pwsh
-python tools/build_native_http.py
+python tools/build_native_http.py --cc 'E:\mingw64\bin\gcc.exe' --objdump 'E:\mingw64\bin\objdump.exe'
 if ($LASTEXITCODE -ne 0) { throw '原生模块构建失败' }
-~~~
-
-默认从 PATH 查找 gcc，并优先使用它同目录、同前缀的 objdump。未加入 PATH 时传入实际路径：
-
-~~~pwsh
-python tools/build_native_http.py --cc 'C:\tools\mingw64\bin\gcc.exe' --objdump 'C:\tools\mingw64\bin\objdump.exe'
-~~~
-
-生成 artifacts/native/hd2ct_http.dll 和 artifacts/native/hd2ct_http.meta.json。脚本从 `resources/target_languages.json` 和私有免费服务配置自动生成同目录的 `target_languages.generated.h`、`free_service.generated.h`，无需自行准备或提交这些生成文件。脚本校验 Win64 PE 格式、三个任务接口导出及 WinHTTP、注册表、BCrypt 和 Windows CRT 系统依赖，并记录 ABI 4、长度、SHA-256、目标语言目录与私有配置摘要、编译器版本。机器翻译的签名、免费版名字哈希和随机数使用 Windows 自带 BCrypt，构建脚本会链接对应系统库。不接受额外的 MinGW 动态运行库依赖。
-
-可用 --output 和 --meta 指定中间产物路径；两者必须成对交给下一步，不可混用旧 DLL 与新 metadata。更换编译器时二进制摘要可能改变，包构建器会嵌入本次实际模块及其摘要。
-
-## 使用 CLion / CMake 构建
-
-在 CLion 中打开项目根目录，并配置 Windows x64 MinGW 工具链：C 编译器选择 MinGW-w64 GCC，objdump 使用同一工具链的 Binutils。在 CMake 配置的 CMake options 中通过 `-DPython3_EXECUTABLE=解释器路径` 指定 Python 3.10+；可用 `-DHD2CT_FREE_CONFIG='<私有配置路径>'` 覆盖免费服务配置位置。CMake 配置只需要 Python 标准库，不会下载或安装依赖；不支持 MSVC、Clang、32 位或非 Windows 工具链。
-
-在项目根目录执行以下命令；将路径替换为本机实际路径。`cmake`、`ninja` 可使用 CLion 自带版本，GCC、objdump 和 Python 使用已配置的工具；若 Ninja 不在 PATH 中，再添加 `-DCMAKE_MAKE_PROGRAM='<CLion 中的 ninja.exe 路径>'`：
-
-~~~pwsh
-cmake -S . -B build/cmake -G Ninja -DCMAKE_C_COMPILER='E:\mingw64\bin\gcc.exe' -DPython3_EXECUTABLE='C:\Program Files\Python310\python.exe'
-cmake --build build/cmake
-~~~
-
-CMake 配置时会在构建目录生成 `target_languages.generated.h` 供 CLion 索引；语言目录或生成器变化后，构建会更新该头文件。输出 DLL 和 metadata 位于 `build/cmake/native/hd2ct_http.dll` 与 `build/cmake/native/hd2ct_http.meta.json`。DLL 使用与命令行构建相同的 MinGW 编译选项、Windows 系统链接库和严格导入/导出核验。
-
-该目标面向安装包构建；Debug 配置也使用 `-Os`、`-g0`，并剥离调试信息，以控制嵌入 DLL 后的 Lua 入口大小。
-
-CLion 的构建目标选择 `hd2ct_http`，它会依次构建 DLL 并核验、生成 metadata。命令行可构建全部目标，或只构建同名聚合目标：
-
-~~~pwsh
-cmake --build build/cmake --target hd2ct_http
-~~~
-
-打包时将同一构建目录中的 DLL 与 metadata 成对传入，并在一次命令中生成两种安装包：
-
-~~~pwsh
-python tools/build_package.py --native-dll build/cmake/native/hd2ct_http.dll --native-meta build/cmake/native/hd2ct_http.meta.json
-~~~
-
-## 生成 Arsenal 安装包
-
-~~~pwsh
-python tools/build_package.py
+python tools/build_package.py --output-dir 'C:\release'
 if ($LASTEXITCODE -ne 0) { throw '安装包构建失败' }
 ~~~
 
-默认读取上一步的 DLL/meta、game/ 源码、共享目标语言目录、`resources/menu_locales.json` 与两个固定上游 ZIP，输出 `artifacts/HD2ChatTranslateNoDependenciesYYYYMMDDHHMMSS.zip` 和 `artifacts/HD2ChatTranslateIncludeDependenciesYYYYMMDDHHMMSS.zip`。两个文件名使用同一个北京时间时间戳。打包器校验全部15种菜单locale和每种语言的标题、说明、目标语言名称及超时格式，再把文本快照嵌入 Lua 设置模块；游戏运行时不读取该JSON文件。`--output-dir` 指定两包的输出目录；`--output` 接受任一新变体的有效文件名作为路径锚点，并在其目录生成两包。两参数互斥，旧版单包文件名不接受，已有目标文件不会覆盖，同秒重复构建需等下一秒。修改目标语言目录后必须重新构建 DLL；安装包构建器会拒绝目录摘要不匹配的旧模块。
+原生构建生成 `artifacts/native/hd2ct_http.dll`、`hd2ct_http.meta.json`，以及从目标语言目录生成的 `target_languages.generated.h`。源码清单在 `tools/build_native_http.py` 统一维护，新增模块时须同步清单。
+
+构建器校验 Win64 PE、ABI 4 的三个任务接口导出及 Windows 系统依赖，并记录 DLL 长度、SHA-256、目标语言目录摘要和编译器版本。签名及随机数使用 Windows BCrypt，不接受额外 MinGW 动态运行库。
+
+原生构建可用 `--output` 和 `--meta` 指定中间产物路径；DLL 与 metadata 必须来自同一次构建。打包其他构建目录的模块时成对传入：
 
 ~~~pwsh
-python tools/build_package.py --output-dir 'C:\release\20261009'
-python tools/build_package.py --output 'C:\release\HD2ChatTranslateIncludeDependencies20261009120000.zip'
+python tools/build_package.py --native-dll 'C:\build\hd2ct_http.dll' --native-meta 'C:\build\hd2ct_http.meta.json'
 ~~~
 
-使用其他依赖路径时可显式传入：
+打包器读取 game/ 源码、VERSION、目标语言目录、本地化目录和原生模块，校验全部15种菜单语言，生成只含聊天插件资源的 patch，并附项目 GPLv3 与 cJSON 许可。Guid、manifest Name、patch 和聊天资源名保持稳定，可更新已有安装。
+
+打包仅通过 `--output-dir` 指定目录，文件名中的版本和时间由程序生成。修改目标语言目录后须重建 DLL；目录或 DLL 摘要不匹配时拒绝打包。翻译地址、模型名和密钥不作为构建配置读取。
+
+## CLion / CMake
+
+在 CLion 中打开项目根目录，选择 Windows x64 MinGW 工具链。可通过 `-DPython3_EXECUTABLE=解释器路径` 指定 Python 3.10+。
 
 ~~~pwsh
-python tools/build_package.py --loader-zip 'C:\dependencies\Bingus-Shared-Loader-v18.zip' --menu-zip 'C:\dependencies\Mod-Options-Menu-v1.2.zip' --native-dll 'C:\build\hd2ct_http.dll' --native-meta 'C:\build\hd2ct_http.meta.json'
+cmake -S . -B build/cmake -G Ninja -DCMAKE_C_COMPILER='E:\mingw64\bin\gcc.exe' -DPython3_EXECUTABLE='C:\Program Files\Python310\python.exe'
+cmake --build build/cmake --target hd2ct_http
 ~~~
 
-`NoDependencies` 包的 patch 只含聊天翻译 Lua 资源；它仍内嵌原生 DLL 与菜单设置模块，并附项目 GPLv3 与 cJSON 许可，不含 Bingus Shared Loader 或 Mod Options Menu 资源及其许可文件。使用前需单独安装 Bingus Shared Loader v18 和 Mod Options Menu v1.2。`IncludeDependencies` 包保留 loader、聊天翻译和菜单三个 Lua 资源，并附上游许可及来源材料。两包保留相同的 Guid、manifest Name、patch 和聊天资源名；同一时刻只安装其中一个，切换时用另一包更新同一模组。模型地址、模型名和密钥不会进入包。
+`cmake`、`ninja` 可使用 CLion 自带版本；Ninja 不在 PATH 时可传 `-DCMAKE_MAKE_PROGRAM=完整路径`。配置时生成语言头文件供索引，源码清单与命令行构建器共用，不下载依赖或读取私有服务配置。
 
-## 离线验证
+输出位于 `build/cmake/native/`。目标 `hd2ct_http` 构建 DLL 并校验、生成 metadata；打包时将这两个文件成对传给 `tools/build_package.py`。Debug 也使用 `-Os`、`-g0` 和剥离调试信息，以控制嵌入资源大小。
 
-当前核心套件预算为 20 项，完整验收要求零失败、零跳过：
+## 验证
 
-| 覆盖范围 | 用例数 |
-| --- | ---: |
-| 翻译、中文保持、正文校验、错误提示与通知过滤 | 5 |
-| 控件回写与多行布局 | 3 |
-| 1 秒扫描计划、200ms 响应轮询与状态报告 | 3 |
-| 持久配置、AI/机器翻译适配器与后台 HTTP 请求 | 4 |
-| Arsenal 包、原生模块加载与文件信息结构 | 4 |
-| 启动签名扫描与内存读取门禁 | 1 |
-| 合计 | 20 |
-
-HTTP 测试会在临时目录编译 DLL，并使用本机回环服务器和假密钥。需保证 GCC/objdump 在 PATH。Lua 回归还需要兼容的 Win64 LuaJIT 2.x lua51.dll；可使用已安装游戏 bin/ 下的 DLL，或自行准备兼容 DLL 并显式指定路径：
+HTTP 测试使用回环服务器、假密钥和临时 DLL。Lua 测试使用私有 LuaJIT 状态和假内存，不调用游戏 setter；需要兼容的 Win64 LuaJIT 2.x DLL，可使用游戏 bin/ 下的 `lua51.dll`：
 
 ~~~pwsh
-$env:HD2_LUAJIT_DLL = 'C:\dependencies\LuaJIT\lua51.dll'
-~~~
-
-也可将 DLL 所在目录加入 PATH。测试使用私有 LuaJIT 状态、本项目源码和假内存/控件，不调用真实游戏 setter。缺少或不兼容的 LuaJIT 会使相关用例失败或跳过；完整验收要求零失败、零跳过。LuaJIT 仅用于开发验证，无需安装到游戏目录。不要离线加载或执行 game.dll。
-
-~~~pwsh
+$env:HD2_LUAJIT_DLL = 'E:\SteamLibrary\steamapps\common\Helldivers 2\bin\lua51.dll'
 python -m compileall -q tools tests
 python -X utf8 -m unittest discover -s tests -v
 if ($LASTEXITCODE -ne 0) { throw '回归测试失败' }
 git diff --check
 ~~~
 
-从构建输出中选择确切 ZIP 路径，检查 CRC 与 SHA-256：
+缺少或不兼容的 LuaJIT 会使测试失败或跳过，完整验收要求零失败、零跳过。不要离线加载或执行 game.dll。检查构建日志中的确切 ZIP：
 
 ~~~pwsh
-$taskPackage = 'artifacts/HD2ChatTranslateIncludeDependenciesYYYYMMDDHHMMSS.zip' # 替换为本次实际文件名
+$taskPackage = 'artifacts/HD2ChatTranslate_2.4_20261015180000.zip'
 python -m zipfile -t $taskPackage
 Get-FileHash -LiteralPath $taskPackage -Algorithm SHA256
 ~~~
 
-离线测试和 ZIP 核验不能代替实际游戏验收。关闭游戏后在 Arsenal 导入并部署，启动后发送新英文聊天，确认原文及“译文：”行显示。连续发送至少三条长短不同的英文消息，确认较早消息已为增加的行数留出空间且没有重叠；再检查收到新消息以及打开、关闭输入框后的布局。在 ESC → MODS 中改变目标语言并应用，发送新消息核对目标语言，再重启核对保存值。环境变量配置见[安装、配置与使用](../README.md#安装与更新)，菜单操作见[游戏内设置](settings.md)。
-
-性能回归以假单调时钟检查不同帧率下扫描、响应处理和报告次数，不等同于真实游戏 FPS。游戏内性能对比应在相同场景、画质设置和帧率上限下进行，并等待启动核验结束。
+离线验证不能代替实机验收。确认前置模组已安装，关闭游戏后导入部署；进入游戏发送英文聊天，核对原文、译文及多行布局，再切换目标语言并 APPLY。性能对比须使用相同场景、画质和帧率上限，并等待启动核验结束。
 
 ## 常见构建失败
 
 | 提示 | 处理 |
 | --- | --- |
-| 找不到构建工具 | 将 MinGW bin 加入 PATH，或传入 --cc / --objdump |
-| 不是 Win64 PE DLL | 检查 GCC 目标架构并使用 x86_64 MinGW-w64 |
-| DLL 有额外动态依赖 | 使用不引入额外运行库的工具链并核对导入，不要移除校验 |
-| DLL 与 metadata 不匹配 | 重新执行原生构建，使用同次生成的两个文件 |
-| loader 摘要或条目不匹配 | 重新获取固定 v18 发布资产并保留原 ZIP |
-| 菜单 ZIP 摘要或条目不匹配 | 重新获取固定 Mod Options Menu v1.2 原始发布资产 |
-| 目标语言目录与 metadata 不匹配 | 用当前目录重新构建 DLL 与 metadata，再打包 |
-| 文件名不符合要求或已存在 | 使用新的 HD2ChatTranslateNoDependencies 或 HD2ChatTranslateIncludeDependencies 加年月日时分秒名称 |
-| Lua 回归报错或被跳过 | 指定兼容 Win64 LuaJIT DLL 后重跑 |
+| 找不到工具或架构不符 | 配置 x64 MinGW-w64 与 Python，或传工具完整路径 |
+| DLL 有额外动态依赖 | 更换合适工具链，不要绕过导入校验 |
+| DLL、目录与 metadata 不匹配 | 重建并使用同次生成的文件 |
+| VERSION 缺失或无效 | 在根目录填写有效版本号 |
+| 输出已存在或与输入冲突 | 更换输出目录，或等待下一个构建时间 |
+| Lua 测试失败或跳过 | 指定兼容 Win64 LuaJIT DLL 后重跑 |
 
-artifacts/ 和 Python 缓存被 Git 忽略。提交源码时不要提交生成的 DLL、ZIP、上游安装包、游戏资源或本机配置。当前兼容范围、内存与加载边界见[技术说明](technical.md)。
+artifacts/、构建目录及 Python 缓存由 Git 忽略，不提交 DLL、ZIP 或本机配置。实现细节见[技术说明](technical.md)。

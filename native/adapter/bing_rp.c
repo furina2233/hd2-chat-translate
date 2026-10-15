@@ -881,11 +881,11 @@ int hd2ct_bing_translate(HD2CT_BingContext *context, char *translation,
     char *response = NULL;
     size_t response_bytes = 0;
     const char *failure = "NETWORK";
-    int result = HD2CT_BING_FALLBACK;
+    int result = HD2CT_BING_FAILED;
     uint32_t sequence;
     if (context == NULL || context->state == NULL || context->job == NULL ||
         context->request_attempted == NULL || context->failure_code == NULL ||
-        translation == NULL || translation_bytes == NULL) return HD2CT_BING_FALLBACK;
+        translation == NULL || translation_bytes == NULL) return HD2CT_BING_FAILED;
     state = context->state;
     *context->request_attempted = 0;
     *context->failure_code = "NETWORK";
@@ -896,9 +896,9 @@ int hd2ct_bing_translate(HD2CT_BingContext *context, char *translation,
     if (hd2ct_remaining_ms(context->deadline) == 0u) {
         *context->failure_code = "TIMEOUT";
         hd2ct_bing_note_failure(state);
-        return HD2CT_BING_FALLBACK;
+        return HD2CT_BING_FAILED;
     }
-    if (state->cooldown_until_ms > GetTickCount64()) return HD2CT_BING_FALLBACK;
+    if (state->cooldown_until_ms > GetTickCount64()) return HD2CT_BING_FAILED;
     if (state->ready != 0u &&
         (GetTickCount64() - state->initialized_ms >= HD2CT_BING_CACHE_MS ||
          state->translation_count >= HD2CT_BING_CACHE_REQUESTS)) {
@@ -907,7 +907,7 @@ int hd2ct_bing_translate(HD2CT_BingContext *context, char *translation,
     }
     if (!hd2ct_bing_ensure_session(state)) {
         *context->failure_code = "NETWORK";
-        return HD2CT_BING_FALLBACK;
+        return HD2CT_BING_FAILED;
     }
     if (state->ready == 0u && !hd2ct_bing_load_credentials(context)) {
         if (strcmp(*context->failure_code, "CANCELLED") == 0 ||
@@ -916,7 +916,7 @@ int hd2ct_bing_translate(HD2CT_BingContext *context, char *translation,
             return HD2CT_BING_CANCELLED;
         }
         hd2ct_bing_note_failure(state);
-        return HD2CT_BING_FALLBACK;
+        return HD2CT_BING_FAILED;
     }
     if (hd2ct_job_cancelled(context->job->slot_index, context->job->serial)) {
         *context->failure_code = "CANCELLED";
@@ -925,7 +925,7 @@ int hd2ct_bing_translate(HD2CT_BingContext *context, char *translation,
     if (hd2ct_remaining_ms(context->deadline) == 0u) {
         *context->failure_code = "TIMEOUT";
         hd2ct_bing_note_failure(state);
-        return HD2CT_BING_FALLBACK;
+        return HD2CT_BING_FAILED;
     }
     if (!hd2ct_bing_target(context->job, &target) ||
         !hd2ct_bing_build_form(state, context->job, target, &form, &form_bytes)) {

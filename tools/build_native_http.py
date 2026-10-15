@@ -12,12 +12,10 @@ import sys
 from pathlib import Path
 
 from scripts import target_languages
-from scripts import free_service_config
 
 
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_DLL = ROOT / "artifacts" / "native" / "hd2ct_http.dll"
-DEFAULT_FREE_CONFIG = ROOT / "config" / "free-service.private.json"
 NATIVE_DIR = ROOT / "native"
 NATIVE_SOURCES = (
     NATIVE_DIR / "client.c",
@@ -31,7 +29,6 @@ NATIVE_SOURCES = (
     NATIVE_DIR / "adapter" / "google.c",
     NATIVE_DIR / "adapter" / "baidu.c",
     NATIVE_DIR / "adapter" / "youdao.c",
-    NATIVE_DIR / "adapter" / "free.c",
     NATIVE_DIR / "adapter" / "bing.c",
     NATIVE_DIR / "adapter" / "bing_rp.c",
     NATIVE_DIR / "transport.c",
@@ -40,7 +37,6 @@ NATIVE_SOURCES = (
 NATIVE_HEADERS = (
     NATIVE_DIR / "client.h",
     NATIVE_DIR / "internal.h",
-    NATIVE_DIR / "adapter" / "free_auth.h",
     NATIVE_DIR / "vendor" / "cjson" / "cJSON.h",
 )
 ALLOWED_IMPORTS = {
@@ -130,32 +126,19 @@ def main() -> int:
     parser.add_argument("--objdump", help="objdump 命令名或完整路径，默认使用 GCC 同目录的工具")
     parser.add_argument("--output", type=Path, default=DEFAULT_DLL)
     parser.add_argument("--meta", type=Path, default=None)
-    parser.add_argument("--free-config", type=Path, default=DEFAULT_FREE_CONFIG,
-                        help="免费服务私有配置JSON，默认config/free-service.private.json")
     args = parser.parse_args()
     output = args.output.resolve()
     metadata = args.meta.resolve() if args.meta else output.with_name("hd2ct_http.meta.json")
-    free_config = args.free_config.resolve()
     compiler = resolve_tool(args.cc)
     objdump = resolve_objdump(compiler, args.objdump)
     try:
         catalogue = target_languages.load_catalogue()
     except ValueError as error:
         raise RuntimeError(str(error)) from error
-    try:
-        free_service_values, free_service_digest = free_service_config.load_config(free_config)
-    except ValueError as error:
-        raise RuntimeError(str(error)) from error
     output.parent.mkdir(parents=True, exist_ok=True)
     generated_header = target_languages.generate_c_header(output.parent, catalogue)
-    generated_free_header = free_service_config.write_generated_header(
-        free_service_values, free_service_digest, output.parent,
-    )
     missing_sources = [path for path in NATIVE_SOURCES if not path.is_file()]
-    missing_headers = [
-        path for path in (*NATIVE_HEADERS, generated_header, generated_free_header)
-        if not path.is_file()
-    ]
+    missing_headers = [path for path in (*NATIVE_HEADERS, generated_header) if not path.is_file()]
     if missing_sources or missing_headers:
         missing = [*missing_sources, *missing_headers]
         raise RuntimeError(
@@ -226,7 +209,6 @@ def main() -> int:
         "size": len(binary),
         "sha256": hashlib.sha256(binary).hexdigest(),
         "target_languages_sha256": target_languages.catalogue_sha256(catalogue),
-        "free_service_config_sha256": free_service_digest,
         "architecture": "x86_64",
         "imports": imports,
         "compiler": str(compiler),

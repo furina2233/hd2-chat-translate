@@ -1,5 +1,4 @@
 #include "internal.h"
-#include "adapter/free_auth.h"
 
 #include <string.h>
 #include <stdio.h>
@@ -60,9 +59,6 @@ int hd2ct_normalize_url(const char *input, uint32_t adapter_id,
         normalized_capacity <= input_length) {
         return 0;
     }
-    if (adapter_id == HD2CT_ADAPTER_FREE) {
-        if (strcmp(input, HD2CT_FREE_ENDPOINT) != 0) return 0;
-    }
     if (input_length == 0 ||
         !hd2ct_valid_utf8((const unsigned char *)input, input_length, 1)) {
         return 0;
@@ -112,7 +108,7 @@ int hd2ct_normalize_url(const char *input, uint32_t adapter_id,
     }
     if (parts.nScheme == INTERNET_SCHEME_HTTP &&
         !hd2ct_local_http_host(host)) {
-        if (adapter_id != HD2CT_ADAPTER_FREE) return 0;
+        return 0;
     }
     adapter = hd2ct_adapter_for_id(adapter_id);
     if (adapter == NULL || adapter->base == NULL) return 0;
@@ -338,7 +334,6 @@ uint32_t hd2ct_prepare_job_config(HD2CT_WorkerJob *job,
     switch (interface_type) {
     case HD2CT_INTERFACE_FREE:
         adapter_id = HD2CT_ADAPTER_FREE;
-        config_url = HD2CT_FREE_ENDPOINT;
         break;
     case HD2CT_INTERFACE_CHAT_COMPLETIONS:
         adapter_id = HD2CT_ADAPTER_AI;
@@ -412,12 +407,13 @@ uint32_t hd2ct_prepare_job_config(HD2CT_WorkerJob *job,
         goto cleanup;
     }
 
-    url_length = hd2ct_bounded_length(config_url, HD2CT_MAX_URL);
+    url_length = config_url != NULL ?
+        hd2ct_bounded_length(config_url, HD2CT_MAX_URL) : 0u;
     model_length = hd2ct_bounded_length(model, HD2CT_MAX_MODEL);
     key_length = hd2ct_bounded_length(api_key, HD2CT_MAX_KEY);
     app_id_length = hd2ct_bounded_length(app_id, HD2CT_MAX_KEY);
     region_length = hd2ct_bounded_length(region, HD2CT_MAX_REGION);
-    if (url_length == 0u ||
+    if ((interface_type != HD2CT_INTERFACE_FREE && url_length == 0u) ||
         (interface_type != HD2CT_INTERFACE_FREE && key_length == 0u) ||
         (needs_model && model_length == 0u) ||
         (needs_app_id && app_id_length == 0u)) {
@@ -432,12 +428,12 @@ uint32_t hd2ct_prepare_job_config(HD2CT_WorkerJob *job,
     }
     adapter = hd2ct_adapter_for_id(adapter_id);
     if (adapter == NULL || adapter->base == NULL) goto cleanup;
-    if (interface_type == HD2CT_INTERFACE_FREE || needs_custom_url) {
+    if (needs_custom_url) {
         if (!hd2ct_normalize_url(config_url, adapter_id,
                                  normalized, sizeof(normalized))) {
             goto cleanup;
         }
-    } else {
+    } else if (config_url != NULL) {
         memcpy(normalized, config_url, url_length + 1u);
     }
     if (adapter->base->family == HD2CT_FAMILY_AI) {

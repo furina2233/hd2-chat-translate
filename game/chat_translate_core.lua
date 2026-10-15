@@ -504,12 +504,7 @@ local function submit_message(state, message)
         local identity_ok, is_self = pcall(state.adapter.is_self_message, message)
         flags = identity_ok and is_self == true and 1 or 0
     end
-    local player_name
-    if type(state.adapter.local_player_name) == "function" then
-        local name_ok, value = pcall(state.adapter.local_player_name)
-        if name_ok and type(value) == "string" then player_name = value end
-    end
-    local ok, submitted, error_code = pcall(state.adapter.submit, token, message.body, flags, player_name)
+    local ok, submitted, error_code = pcall(state.adapter.submit, token, message.body, flags)
     if not ok then
         bump(state, "adapter_errors")
         bump(state, "submit_failures")
@@ -548,17 +543,9 @@ local ERROR_MESSAGES = {
     MISSING_CONFIG = "翻译配置不完整",
     INVALID_CONFIG = "翻译配置无效",
     INTERNAL = "翻译服务异常",
-    UNSUPPORTED_SERVICE = "暂不支持此翻译服务",
     AUTH_INVALID = "翻译凭据或签名无效",
     ACCESS_DENIED = "无权使用此翻译服务",
     QUOTA_EXCEEDED = "翻译额度不足",
-    FREE_QUOTA_EXCEEDED = "免费版的余额已用尽，请自行配置提供商",
-    FREE_SERVER_ERROR = "服务器错误，请联系作者",
-    FREE_UPGRADE_REQUIRED = "请升级hd2-chat-translate以继续使用免费版服务",
-    FREE_REQUEST_TEXT_TOO_LONG = "请求的文本过长",
-    FREE_PLAYER_UNKNOWN = "无法识别本地玩家",
-    FREE_PLAYER_INVALID = "玩家身份哈希无效",
-    FREE_DAILY_LIMIT = "今日免费次数已用尽，请明天再试",
     UNSUPPORTED_LANGUAGE = "不支持此语言",
     REQUEST_INVALID = "请求参数有误",
     SERVICE_ERROR = "翻译服务异常",

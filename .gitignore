@@ -9,7 +9,7 @@ dist/
 # 免费服务说明仅保存在服务器，避免重新纳入本地版本历史。
 free-service.md
 
-# 免费服务的发布地址和校验码由本机配置提供。
+# 本机私有配置不纳入版本控制。
 /config/free-service.private.json
 
 # Python 开发缓存。

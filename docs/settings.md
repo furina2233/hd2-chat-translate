@@ -1,6 +1,6 @@
 # 游戏内设置
 
-安装包合并 [Mod Options Menu v1.2](https://github.com/CowboyBingus/ModOptionsMenu/releases/tag/v1.2)，在游戏 ESC 菜单中提供原生 `MODS` 页。本插件注册目标语言、启用、不翻译自己说的话、请求超时和接口类型五项。
+本插件通过单独安装的 [Mod Options Menu v1.2](https://github.com/CowboyBingus/ModOptionsMenu/releases/tag/v1.2)，在游戏 ESC 菜单的原生 `MODS` 页注册目标语言、启用、不翻译自己说的话、请求超时和接口类型五项。
 
 菜单标题、说明、目标语言名称和超时单位会跟随游戏的 Text Language。支持英语、英式英语、法语、意大利语、德语、西班牙语、拉丁美洲西班牙语、日语、韩语、巴西葡萄牙语、葡萄牙语、波兰语、俄语、简体中文和繁体中文。切换游戏语言后关闭并重新打开 ESC 菜单即可刷新；不支持的地区变体会尝试对应的基础语言，仍未匹配时显示英语。
 
@@ -32,7 +32,7 @@ AI 仅在简体中文目标下使用中文网络缩写和游戏术语规则；�
 
 | 接口类型 | Windows 持久环境变量 |
 | --- | --- |
-| 免费版 | 无需提供商配置，优先使用 Bing 网页，失败时使用免费后备服务 |
+| 免费版 | 无需提供商配置，使用 Bing 网页翻译 |
 | Chat Completions接口 | `HD2CT_API_URL`、`HD2CT_MODEL`、`HD2CT_API_KEY` |
 | Anthropic接口 | `HD2CT_API_URL`、`HD2CT_MODEL`、`HD2CT_API_KEY` |
 | 百度翻译、有道翻译 | `HD2CT_APP_ID`、`HD2CT_API_KEY` |
@@ -61,4 +61,4 @@ Mod Options Menu 将已应用的选择保存到 `%LOCALAPPDATA%\CowboyBingus\Hel
 
 菜单框架及本插件都受已支持游戏构建的门禁限制。游戏更新后，菜单未出现或翻译未生效时，先确认模组部署、加载优先级及游戏版本。
 
-如果其他模组已经提供 Mod Options Menu，框架会复用先加载的实例。应保留兼容 v1.2 接口的版本，避免同时部署不同版本；本安装包已包含菜单，无需另行安装。
+本安装包不包含前置模组，使用前需单独安装 Bingus Shared Loader v18 和兼容 v1.2 接口的 Mod Options Menu。若其他模组已提供菜单，框架会复用先加载的实例；避免同时部署不同版本。

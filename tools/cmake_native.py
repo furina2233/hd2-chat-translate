@@ -7,11 +7,9 @@ import hashlib
 import json
 import os
 from pathlib import Path
-import re
 import sys
 
 import build_native_http as native
-from scripts import free_service_config
 from scripts import target_languages
 
 
@@ -48,14 +46,6 @@ def generate_header(catalogue_path: Path, output_dir: Path) -> None:
     target_languages.generate_c_header(output_dir, catalogue)
 
 
-def generate_free_header(config_path: Path, output_dir: Path) -> None:
-    """校验免费服务私有配置并生成认证头文件。"""
-    try:
-        free_service_config.generate_header(config_path, output_dir)
-    except ValueError as error:
-        raise RuntimeError(str(error)) from error
-
-
 def remove_metadata(metadata_path: Path) -> None:
     """删除上一次构建留下的 metadata。"""
     try:
@@ -65,9 +55,7 @@ def remove_metadata(metadata_path: Path) -> None:
 
 
 def write_metadata(dll_path: Path, metadata_path: Path, compiler_path: Path,
-                   objdump_value: str,
-                   free_config_path: Path = free_service_config.DEFAULT_CONFIG,
-                   generated_free_header: Path | None = None) -> dict[str, object]:
+                   objdump_value: str) -> dict[str, object]:
     """复用原生构建器的 PE 检查并原子写入打包器使用的 metadata。"""
     remove_metadata(metadata_path)
     if dll_path.name != "hd2ct_http.dll":
@@ -111,22 +99,6 @@ def write_metadata(dll_path: Path, metadata_path: Path, compiler_path: Path,
         catalogue = target_languages.load_catalogue()
     except ValueError as error:
         raise RuntimeError(str(error)) from error
-    try:
-        _, free_service_digest = free_service_config.load_config(free_config_path)
-    except ValueError as error:
-        raise RuntimeError(str(error)) from error
-    if generated_free_header is not None:
-        try:
-            header_text = generated_free_header.read_text(encoding="utf-8")
-        except OSError as error:
-            raise RuntimeError(f"原生免费服务配置头文件不存在：{generated_free_header}") from error
-        match = re.search(
-            r'^#define HD2CT_FREE_CONFIG_SHA256 "([0-9a-f]{64})"$',
-            header_text,
-            re.MULTILINE,
-        )
-        if match is None or match.group(1) != free_service_digest:
-            raise RuntimeError("原生 DLL 使用的免费服务配置与当前私有JSON不一致")
     binary = dll_path.read_bytes()
     if not binary:
         raise RuntimeError("构建产物是空 DLL")
@@ -137,7 +109,6 @@ def write_metadata(dll_path: Path, metadata_path: Path, compiler_path: Path,
         "size": len(binary),
         "sha256": hashlib.sha256(binary).hexdigest(),
         "target_languages_sha256": target_languages.catalogue_sha256(catalogue),
-        "free_service_config_sha256": free_service_digest,
         "architecture": "x86_64",
         "imports": imports,
         "compiler": str(compiler),
@@ -172,11 +143,6 @@ def main() -> int:
     header_parser.add_argument("--catalogue", type=Path, required=True)
     header_parser.add_argument("--output-dir", type=Path, required=True)
 
-    free_header_parser = commands.add_parser("generate-free-header")
-    free_header_parser.add_argument("--config", type=Path,
-                                    default=free_service_config.DEFAULT_CONFIG)
-    free_header_parser.add_argument("--output-dir", type=Path, required=True)
-
     remove_parser = commands.add_parser("remove-meta")
     remove_parser.add_argument("--metadata", type=Path, required=True)
 
@@ -185,23 +151,17 @@ def main() -> int:
     meta_parser.add_argument("--metadata", type=Path, required=True)
     meta_parser.add_argument("--compiler", type=Path, required=True)
     meta_parser.add_argument("--objdump", required=True)
-    meta_parser.add_argument("--free-config", type=Path,
-                             default=free_service_config.DEFAULT_CONFIG)
-    meta_parser.add_argument("--generated-free-header", type=Path)
 
     args = parser.parse_args()
     if args.command == "write-source-manifest":
         write_source_manifest(args.output)
     elif args.command == "generate-header":
         generate_header(args.catalogue, args.output_dir)
-    elif args.command == "generate-free-header":
-        generate_free_header(args.config, args.output_dir)
     elif args.command == "remove-meta":
         remove_metadata(args.metadata)
     else:
         print(json.dumps(
-            write_metadata(args.dll, args.metadata, args.compiler, args.objdump,
-                           args.free_config, args.generated_free_header),
+            write_metadata(args.dll, args.metadata, args.compiler, args.objdump),
             ensure_ascii=False,
             indent=2,
         ))

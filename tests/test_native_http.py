@@ -18,7 +18,6 @@ from urllib.parse import parse_qs, urlsplit
 
 
 ROOT = Path(__file__).resolve().parents[1]
-BUILD_SCRIPT = ROOT / "tools" / "build_native_http.py"
 WINDOWS = os.name == "nt"
 NATIVE_TEST_ROOT = ROOT / "artifacts" / "validation"
 sys.path.insert(0, str(ROOT / "tools"))
@@ -86,14 +85,6 @@ lib.fixture_GetMachineEndpoint.argtypes = [
 lib.fixture_GetMachineEndpoint.restype = ctypes.c_int
 lib.fixture_SetMachineEndpoint.argtypes = [ctypes.c_uint32, ctypes.c_char_p]
 lib.fixture_SetMachineEndpoint.restype = ctypes.c_int
-lib.fixture_NormalizeURL.argtypes = [
-    ctypes.c_uint32, ctypes.c_char_p, ctypes.c_void_p, ctypes.c_uint32,
-]
-lib.fixture_NormalizeURL.restype = ctypes.c_int
-lib.fixture_PrepareConfig.argtypes = [
-    ctypes.c_uint32, ctypes.c_void_p, ctypes.c_uint32,
-]
-lib.fixture_PrepareConfig.restype = ctypes.c_uint32
 lib.fixture_Initialized.argtypes = []
 lib.fixture_Initialized.restype = ctypes.c_uint32
 lib.fixture_BootstrapCount.argtypes = []
@@ -140,25 +131,13 @@ worker_failure_at = fixture.get("__force_worker_create_failure_at", 0)
 if worker_failure_at:
     lib.fixture_ForceWorkerCreateFailure(worker_failure_at)
 
-player_buffers = {}
-
 def submit(action):
     body = bytes.fromhex(action["body_hex"])
     backing = ctypes.create_string_buffer(body if body else b"\0", max(1, len(body)))
-    player_name = action.get("player_name")
-    player_pointer = None
-    if player_name is not None:
-        encoded_name = player_name.encode("utf-8")
-        player_buffers[action["token"]] = ctypes.create_string_buffer(
-            encoded_name, len(encoded_name) + 1,
-        )
-        player_pointer = ctypes.cast(
-            player_buffers[action["token"]], ctypes.c_char_p,
-        )
     started = time.perf_counter()
     accepted = lib.HD2CT_Submit(
         action["token"].encode("ascii"), ctypes.cast(backing, ctypes.c_void_p),
-        len(body), action.get("flags", 0), player_pointer,
+        len(body), action.get("flags", 0), None,
     )
     return {
         "accepted": accepted,
@@ -239,7 +218,10 @@ for action in actions:
         accepted = lib.fixture_SetMachineEndpoint(
             action["interface_type"], encoded_url,
         )
-        if not accepted and not action.get("allow_reject", False):
+        if action.get("allow_reject", False):
+            if accepted:
+                raise RuntimeError("an invalid machine endpoint override was accepted")
+        elif not accepted:
             raise RuntimeError("a loopback machine endpoint override was rejected")
         if accepted and url is not None:
             output = ctypes.create_string_buffer(2049)
@@ -250,26 +232,6 @@ for action in actions:
             if not resolved or output.value.decode("utf-8") != url:
                 raise RuntimeError("machine endpoint override did not resolve")
         results.append({"accepted": accepted})
-    elif op == "normalize_url":
-        output = ctypes.create_string_buffer(2049)
-        accepted = lib.fixture_NormalizeURL(
-            action["adapter_id"], action["url"].encode("utf-8"),
-            ctypes.cast(output, ctypes.c_void_p), len(output),
-        )
-        results.append({
-            "accepted": accepted,
-            "url": output.value.decode("utf-8"),
-        })
-    elif op == "prepare_config":
-        output = ctypes.create_string_buffer(2049)
-        status = lib.fixture_PrepareConfig(
-            action["interface_type"], ctypes.cast(output, ctypes.c_void_p),
-            len(output),
-        )
-        results.append({
-            "status": status,
-            "url": output.value.decode("utf-8"),
-        })
     elif op == "read_counts":
         results.append(registry_counts())
     elif op == "wait_initialized":
@@ -286,6 +248,9 @@ for action in actions:
         while not path.is_file() and time.monotonic() < deadline:
             time.sleep(0.005)
         results.append({"found": path.is_file()})
+    elif op == "sleep":
+        time.sleep(action["seconds"])
+        results.append({"slept": True})
     else:
         raise RuntimeError("unknown test action")
 
@@ -440,28 +405,6 @@ __declspec(dllexport) int __cdecl fixture_SetMachineEndpoint(
     return hd2ct_test_set_machine_endpoint(interface_type, url);
 }
 
-__declspec(dllexport) int __cdecl fixture_NormalizeURL(
-    uint32_t adapter_id, const char *url, char *output, uint32_t capacity)
-{
-    return hd2ct_normalize_url(url, adapter_id, output, (size_t)capacity);
-}
-
-__declspec(dllexport) uint32_t __cdecl fixture_PrepareConfig(
-    uint32_t interface_type, char *output, uint32_t capacity)
-{
-    HD2CT_WorkerJob job;
-    uint32_t status;
-    ZeroMemory(&job, sizeof(job));
-    job.target_language = hd2ct_default_target_language();
-    status = hd2ct_prepare_job_config(&job, interface_type);
-    if (status == HD2CT_STATUS_READY && output != NULL &&
-        strlen(job.url) + 1u <= capacity) {
-        memcpy(output, job.url, strlen(job.url) + 1u);
-    }
-    SecureZeroMemory(&job, sizeof(job));
-    return status;
-}
-
 __declspec(dllexport) uint32_t __cdecl fixture_Initialized(void)
 {
     return (uint32_t)InterlockedCompareExchange(&g_initialized, 0, 0);
@@ -575,19 +518,12 @@ def bing_response(translation: str = "必应翻译", target: str = "zh-Hans") ->
     ).encode("utf-8")
 
 
-def free_success_response(text: str) -> bytes:
-    return json.dumps(
-        {"success": True, "data": {"text": text, "reason": ""}},
-        ensure_ascii=False,
-        separators=(",", ":"),
-    ).encode("utf-8")
-
-
-def free_failure_response(reason: str) -> bytes:
-    return json.dumps(
-        {"success": False, "data": {"text": "", "reason": reason}},
-        ensure_ascii=False,
-        separators=(",", ":"),
+def bing_page() -> bytes:
+    return (
+        '<script>var _G={x:"x",IG:"0123456789ABCDEF"}; '
+        'var params_AbusePreventionHelper = '
+        '[1790000000000,"fixture-token",3600000];</script>'
+        '<div data-iid="translator.5022"></div>'
     ).encode("utf-8")
 
 
@@ -595,15 +531,19 @@ class FakeState:
     def __init__(self) -> None:
         self.lock = threading.Lock()
         self.paths: list[str] = []
+        self.get_paths: list[str] = []
         self.payloads: list[dict | list] = []
         self.content_types: list[str] = []
         self.headers: list[dict[str, str]] = []
         self.response = chat_response("default")
+        self.get_response = bing_page()
         self.responses_by_path: dict[str, bytes] = {}
         self.responses_by_kind: dict[str, bytes] = {}
         self.status = 200
+        self.get_status = 200
         self.status_by_path: dict[str, int] = {}
         self.delay = 0.0
+        self.get_delay = 0.0
         self.delay_by_path: dict[str, float] = {}
         self.request_finished = threading.Event()
         self.request_started_marker: Path | None = None
@@ -614,8 +554,6 @@ class FakeState:
             return "bing"
         if not isinstance(payload, dict):
             return None
-        if "key1" in payload:
-            return "free"
         if "response_format" in payload:
             return "chat"
         if "max_tokens" in payload:
@@ -631,15 +569,19 @@ class FakeState:
     def clear(self) -> None:
         with self.lock:
             self.paths.clear()
+            self.get_paths.clear()
             self.payloads.clear()
             self.content_types.clear()
             self.headers.clear()
             self.response = chat_response("default")
+            self.get_response = bing_page()
             self.responses_by_path.clear()
             self.responses_by_kind.clear()
             self.status = 200
+            self.get_status = 200
             self.status_by_path.clear()
             self.delay = 0.0
+            self.get_delay = 0.0
             self.delay_by_path.clear()
         self.request_finished.clear()
         self.request_started_marker = None
@@ -708,8 +650,25 @@ class NativeHttpWorkerTests(unittest.TestCase):
 
             def do_GET(self) -> None:  # noqa: N802
                 with state.lock:
-                    state.paths.append(self.path)
-                self.send_error(404)
+                    state.get_paths.append(self.path)
+                    response = state.get_response
+                    response_status = state.get_status
+                    delay = state.get_delay
+                    started_marker = state.request_started_marker
+                if started_marker is not None:
+                    started_marker.write_text("started", encoding="ascii")
+                if delay:
+                    time.sleep(delay)
+                try:
+                    self.send_response(response_status)
+                    self.send_header("Content-Type", "text/html; charset=utf-8")
+                    self.send_header("Content-Length", str(len(response)))
+                    self.end_headers()
+                    self.wfile.write(response)
+                except (BrokenPipeError, ConnectionResetError):
+                    pass
+                finally:
+                    state.request_finished.set()
 
             def log_message(self, _format: str, *_args: object) -> None:
                 return
@@ -721,31 +680,8 @@ class NativeHttpWorkerTests(unittest.TestCase):
         )
         cls.server_thread.start()
         cls.url = f"http://127.0.0.1:{cls.server.server_port}"
-        cls.free_url = cls.url + "/free/translate"
-
-        cls.free_config = cls.temp_path / "free-service-test.json"
-        cls.free_config.write_text(
-            json.dumps({
-                "endpoint_url": cls.free_url,
-                "key1": "00000000-0000-4000-8000-000000000001",
-            }, separators=(",", ":")) + "\n",
-            encoding="utf-8",
-        )
-        cls.production_dll = cls.temp_path / "hd2ct_http.dll"
-        cls.meta = cls.temp_path / "hd2ct_http.meta.json"
-        compiler = shutil.which("gcc") or "gcc"
-        completed = subprocess.run(
-            [
-                sys.executable, str(BUILD_SCRIPT), "--cc", compiler,
-                "--output", str(cls.production_dll), "--meta", str(cls.meta),
-                "--free-config", str(cls.free_config),
-            ],
-            cwd=ROOT, check=False, capture_output=True, text=True,
-            encoding="utf-8", errors="replace", timeout=45,
-        )
-        if completed.returncode:
-            raise RuntimeError(completed.stdout + completed.stderr)
-        cls.meta_json = json.loads(cls.meta.read_text(encoding="utf-8"))
+        cls.compiler = shutil.which("gcc") or "gcc"
+        target_languages.generate_c_header(cls.temp_path, TARGET_LANGUAGE_CATALOGUE)
 
     @classmethod
     def tearDownClass(cls) -> None:
@@ -794,9 +730,8 @@ class NativeHttpWorkerTests(unittest.TestCase):
             "#define RegGetValueW fixture_RegGetValueW\n",
             encoding="utf-8", newline="\n",
         )
-        compiler = self.meta_json["compiler"]
         command = [
-            compiler, "-std=c11", "-O2", "-shared", "-s", "-static-libgcc",
+            self.compiler, "-std=c11", "-O2", "-shared", "-s", "-static-libgcc",
             "-finput-charset=UTF-8", "-fexec-charset=UTF-8",
             "-D_WIN32_WINNT=0x0601", "-DWINVER=0x0601", "-DHD2CT_TESTING",
             "-DCJSON_NESTING_LIMIT=32", "-DCJSON_HIDE_SYMBOLS",
@@ -804,34 +739,7 @@ class NativeHttpWorkerTests(unittest.TestCase):
             "-I", str(self.temp_path), "-include", str(registry_shim),
             str(wrapper), *(str(source) for source in NATIVE_SOURCES[1:]),
             "-o", str(dll), "-lwinhttp", "-ladvapi32", "-lbcrypt",
-            f'-DHD2CT_FREE_SERVICE_URL="{self.free_url}"',
-        ]
-        completed = subprocess.run(
-            command, cwd=ROOT, check=False, capture_output=True, text=True,
-            encoding="utf-8", errors="replace", timeout=45,
-        )
-        if completed.returncode:
-            raise RuntimeError(completed.stdout + completed.stderr)
-        return dll
-
-    def private_free_endpoint_test_dll(self) -> Path:
-        self.environment_test_dll()
-        dll = self.temp_path / "hd2ct_http_private_free_endpoint_test.dll"
-        if dll.is_file():
-            return dll
-        wrapper = self.temp_path / "hd2ct_http_environment_test.c"
-        registry_shim = self.temp_path / "hd2ct_http_registry_test_shim.h"
-        compiler = self.meta_json["compiler"]
-        command = [
-            compiler, "-std=c11", "-O2", "-shared", "-s", "-static-libgcc",
-            "-finput-charset=UTF-8", "-fexec-charset=UTF-8",
-            "-D_WIN32_WINNT=0x0601", "-DWINVER=0x0601", "-DHD2CT_TESTING",
-            "-DCJSON_NESTING_LIMIT=32", "-DCJSON_HIDE_SYMBOLS",
-            "-Wl,--exclude-all-symbols", "-I", str(ROOT / "native"),
-            "-I", str(self.temp_path), "-include", str(registry_shim),
-            str(wrapper), *(str(source) for source in NATIVE_SOURCES[1:]),
-            "-o", str(dll), "-lwinhttp", "-ladvapi32", "-lbcrypt",
-            '-DHD2CT_FREE_SERVICE_URL="http://198.51.100.1/translate"',
+            f'-DHD2CT_BING_TEST_BASE_URL="{self.url}"',
         ]
         completed = subprocess.run(
             command, cwd=ROOT, check=False, capture_output=True, text=True,
@@ -853,7 +761,6 @@ class NativeHttpWorkerTests(unittest.TestCase):
         force_bootstrap_failure: bool = False,
         force_worker_failure_at: int = 0,
         timeout: float = 15.0,
-        dll_path: Path | None = None,
     ) -> dict:
         with tempfile.TemporaryDirectory(
             prefix="hd2ct-menu-values-", dir=str(NATIVE_TEST_ROOT),
@@ -871,7 +778,7 @@ class NativeHttpWorkerTests(unittest.TestCase):
             }
             command = [
                 sys.executable, "-c", ENVIRONMENT_CHILD,
-                str(dll_path or self.environment_test_dll()),
+                str(self.environment_test_dll()),
                 json.dumps(fixture, ensure_ascii=False),
                 json.dumps(actions, ensure_ascii=False),
             ]
@@ -906,19 +813,12 @@ class NativeHttpWorkerTests(unittest.TestCase):
             for interface_type in range(4, 9)
         ]
 
-    def submit_wait_actions(
-        self,
-        token: str,
-        body: str,
-        player_name: str | None = None,
-    ) -> list[dict]:
-        submit_action = {
-            "op": "submit", "token": token,
-            "body_hex": body.encode("utf-8").hex(),
-        }
-        if player_name is not None:
-            submit_action["player_name"] = player_name
-        return [submit_action, {"op": "wait", "token": token}]
+    def submit_wait_actions(self, token: str, body: str) -> list[dict]:
+        return [
+            {"op": "submit", "token": token,
+             "body_hex": body.encode("utf-8").hex()},
+            {"op": "wait", "token": token},
+        ]
 
     def test_hardcoded_machine_endpoints_and_job_scoped_registry(self) -> None:
         source = "Hold position & resupply."
@@ -1087,7 +987,6 @@ class NativeHttpWorkerTests(unittest.TestCase):
             actions.extend(self.submit_wait_actions(
                 f"switch-{interface_type}-{len(actions)}",
                 source,
-                "Fixture Player" if interface_type == 1 else None,
             ))
         actions.extend([
             {"op": "registry_set", "name": "HD2CT_API_KEY",
@@ -1096,12 +995,12 @@ class NativeHttpWorkerTests(unittest.TestCase):
             *self.submit_wait_actions("switch-chat-changed-key", source),
         ])
         actions.append({"op": "read_counts"})
+        self.state.get_response = bing_page()
         self.state.responses_by_kind = {
             "chat": chat_response("Chat result"),
             "anthropic": anthropic_response([
                 result_content("Anthropic result"),
             ]),
-            "free": free_success_response("FREE result"),
         }
         self.state.responses_by_path.update({
             "/fixture/machine-4/api/trans/vip/translate": baidu_response("Baidu result"),
@@ -1109,6 +1008,7 @@ class NativeHttpWorkerTests(unittest.TestCase):
             "/fixture/machine-6/translate": bing_response("Bing CN result"),
             "/fixture/machine-7/translate": bing_response("Bing global result"),
             "/fixture/machine-8/language/translate/v2": google_response("Google result"),
+            "/ttranslatev3": bing_response("FREE result"),
         })
         user = {
             "HD2CT_API_URL": self.url + "/same-custom-endpoint",
@@ -1134,11 +1034,24 @@ class NativeHttpWorkerTests(unittest.TestCase):
         self.assertEqual(result["cache_count"], 9)
         self.assertEqual(self.state.paths.count("/same-custom-endpoint"), 3)
         self.assertEqual(len(self.state.paths), 9)
+        self.assertEqual(self.state.get_paths, ["/translator"])
         self.assertEqual(self.state.payloads[0]["response_format"], CHAT_RESPONSE_FORMAT)
         self.assertEqual(self.state.payloads[1]["max_tokens"], 4096)
         self.assertEqual(self.state.payloads[6], {
             "q": source, "target": "zh-CN", "format": "text",
         })
+        self.assertEqual(self.state.payloads[7], {
+            "fromLang": "auto-detect", "text": source, "to": "zh-Hans",
+            "key": "1790000000000", "token": "fixture-token",
+        })
+        self.assertEqual(
+            urlsplit(self.state.paths[7]).path,
+            "/ttranslatev3",
+        )
+        self.assertEqual(
+            urlsplit(self.state.paths[7]).query,
+            "isVertical=1&&IG=0123456789ABCDEF&IID=translator.5022.1",
+        )
         self.assertEqual(self.state.payloads[-1]["response_format"], CHAT_RESPONSE_FORMAT)
         self.assertEqual(result["read_counts"]["HD2CT_API_URL"], 4)
         self.assertEqual(result["read_counts"]["HD2CT_MODEL"], 4)
@@ -1236,36 +1149,6 @@ class NativeHttpWorkerTests(unittest.TestCase):
 
     def test_free_defaults_skips_and_async_worker_lifecycle(self) -> None:
         free_source = "Extraction point is clear."
-        private_http_free = "http://198.51.100.1/translate"
-        private_endpoint = self.run_worker(
-            [
-                {"op": "normalize_url", "adapter_id": 6,
-                 "url": private_http_free},
-                {"op": "normalize_url", "adapter_id": 6,
-                 "url": "http://198.51.100.2/translate"},
-                {"op": "prepare_config", "interface_type": 1},
-                {"op": "prepare_config", "interface_type": 2},
-            ],
-            user={
-                "HD2CT_API_URL": "http://198.51.100.1/v1/chat/completions",
-                "HD2CT_MODEL": "fixture-model",
-                "HD2CT_API_KEY": "fixture-key",
-            },
-            interface_type=1,
-            dll_path=self.private_free_endpoint_test_dll(),
-        )
-        self.assertEqual(private_endpoint["actions"][0], {
-            "accepted": 1, "url": private_http_free,
-        })
-        self.assertEqual(private_endpoint["actions"][1]["accepted"], 0)
-        self.assertEqual(private_endpoint["actions"][2], {
-            "status": 0, "url": private_http_free,
-        })
-        self.assertEqual(private_endpoint["actions"][3], {
-            "status": 2, "url": "",
-        })
-        self.assertEqual(self.state.paths, [])
-
         invalid_user = {
             "HD2CT_API_URL": "ftp://wrong.invalid/" + "x" * 1200,
             "HD2CT_MODEL": "m" * 300,
@@ -1273,32 +1156,47 @@ class NativeHttpWorkerTests(unittest.TestCase):
             "HD2CT_APP_ID": "bad app id",
             "HD2CT_REGION": "bad_region",
         }
-        self.state.responses_by_path["/free/translate"] = free_success_response(
-            free_source,
-        )
         no_interface_text = self.menu_text(None)
+        self.state.responses_by_path["/ttranslatev3"] = bing_response("必应翻译")
         default = self.run_worker(
-            self.submit_wait_actions("free-default", free_source, "Fixture Player")
-            + [
-                {"op": "submit", "token": "free-default-cache",
-                 "body_hex": free_source.encode("utf-8").hex(),
-                 "player_name": "Fixture Player"},
-                {"op": "wait", "token": "free-default-cache"},
-                {"op": "read_counts"},
-            ],
+            self.submit_wait_actions("free-default", free_source),
             user=invalid_user, interface_type=None,
         )
-        self.assertEqual(default["actions"][1]["result"], "SKIP\n")
-        self.assertEqual(default["actions"][3]["result"], "SKIP\n")
-        self.assertEqual(self.state.paths, ["/free/translate"])
-        self.assertEqual(default["cache_count"], 1)
+        self.assertEqual(default["actions"][1]["result"], "OK\n必应翻译")
+        self.assertEqual(self.state.get_paths, ["/translator"])
+        self.assertEqual(
+            urlsplit(self.state.paths[0]).path,
+            "/ttranslatev3",
+        )
+        self.assertEqual(
+            urlsplit(self.state.paths[0]).query,
+            "isVertical=1&&IG=0123456789ABCDEF&IID=translator.5022.1",
+        )
+        self.assertEqual(self.state.payloads[0], {
+            "fromLang": "auto-detect", "text": free_source, "to": "zh-Hans",
+            "key": "1790000000000", "token": "fixture-token",
+        })
+        self.assertTrue(self.state.content_types[0].lower().startswith(
+            "application/x-www-form-urlencoded",
+        ))
         self.assertEqual(default["read_counts"], {
             name: 0 for name in REGISTRY_READ_IDS.values()
         })
         self.assertNotIn(INTERFACE_OPTION_ID, no_interface_text)
 
         self.state.clear()
-        self.state.responses_by_path["/free/translate"] = free_success_response(
+        same_source = "Already in the target language."
+        self.state.responses_by_path["/ttranslatev3"] = bing_response(same_source)
+        same_text = self.run_worker(
+            self.submit_wait_actions("free-same-text", same_source),
+            user=invalid_user, interface_type=1,
+        )
+        self.assertEqual(same_text["actions"][1]["result"], "SKIP\n")
+        self.assertEqual(self.state.get_paths, ["/translator"])
+        self.assertEqual(urlsplit(self.state.paths[0]).path, "/ttranslatev3")
+
+        self.state.clear()
+        self.state.responses_by_path["/ttranslatev3"] = bing_response(
             "invalid menu falls back to FREE",
         )
         bad_menu = self.run_worker(
@@ -1306,14 +1204,15 @@ class NativeHttpWorkerTests(unittest.TestCase):
               "contents": self.menu_text(None)
               + f"{INTERFACE_OPTION_ID}\t9\n"},
              *self.submit_wait_actions(
-                 "free-invalid-choice", "Fallback", "Fixture Player",
+                 "free-invalid-choice", "Fallback",
              ),
              {"op": "read_counts"}],
             user=invalid_user, interface_type=None,
         )
         self.assertEqual(bad_menu["actions"][2]["result"],
                          "OK\ninvalid menu falls back to FREE")
-        self.assertEqual(self.state.paths, ["/free/translate"])
+        self.assertEqual(self.state.get_paths, ["/translator"])
+        self.assertEqual(urlsplit(self.state.paths[0]).path, "/ttranslatev3")
         self.assertEqual(bad_menu["read_counts"], {
             name: 0 for name in REGISTRY_READ_IDS.values()
         })
@@ -1321,16 +1220,16 @@ class NativeHttpWorkerTests(unittest.TestCase):
         self.state.clear()
         skipped = self.run_worker(
             [
-                {"op": "submit", "token": "disabled-google", "body_hex": "6869"},
-                {"op": "wait", "token": "disabled-google"},
+                {"op": "submit", "token": "disabled-free", "body_hex": "6869"},
+                {"op": "wait", "token": "disabled-free"},
                 {"op": "target_file",
-                 "contents": self.menu_text(8, enabled=True, ignore_self=True)},
-                {"op": "submit", "token": "self-google", "body_hex": "6869",
+                 "contents": self.menu_text(1, enabled=True, ignore_self=True)},
+                {"op": "submit", "token": "self-free", "body_hex": "6869",
                  "flags": 1},
-                {"op": "wait", "token": "self-google"},
+                {"op": "wait", "token": "self-free"},
                 {"op": "read_counts"},
             ],
-            user={}, interface_type=8, enabled=False,
+            user=invalid_user, interface_type=1, enabled=False,
         )
         self.assertEqual(skipped["actions"][1]["result"], "SKIP\n")
         self.assertEqual(skipped["actions"][4]["result"], "SKIP\n")
@@ -1338,83 +1237,86 @@ class NativeHttpWorkerTests(unittest.TestCase):
             name: 0 for name in REGISTRY_READ_IDS.values()
         })
         self.assertEqual(self.state.paths, [])
+        self.assertEqual(self.state.get_paths, [])
 
         self.state.clear()
-        self.state.responses_by_path["/fixture/machine-8/language/translate/v2"] = (
-            google_response("async translation")
-        )
-        self.state.delay_by_path["/fixture/machine-8/language/translate/v2"] = 0.5
+        self.state.responses_by_path["/ttranslatev3"] = bing_response("async translation")
+        self.state.get_delay = 0.5
         async_result = self.run_worker(
-            self.endpoint_setup_actions() + [
-                {"op": "submit", "token": "async-google", "body_hex": "6869"},
-                {"op": "poll", "token": "async-google"},
-                {"op": "wait", "token": "async-google"},
+            [
+                {"op": "submit", "token": "async-free", "body_hex": "6869"},
+                {"op": "poll", "token": "async-free"},
+                {"op": "wait", "token": "async-free"},
             ],
-            user={"HD2CT_API_KEY": "fake-key"},
-            interface_type=8,
+            user=invalid_user, interface_type=1,
         )
         self.assertEqual(async_result["actions"][-1]["result"],
                          "OK\nasync translation")
         self.assertLess(async_result["actions"][-3]["elapsed_ms"], 200.0)
         self.assertIsNone(async_result["actions"][-2]["result"])
+        self.assertEqual(self.state.get_paths, ["/translator"])
+        self.assertEqual(urlsplit(self.state.paths[0]).path, "/ttranslatev3")
 
         self.state.clear()
         cancel_marker = self.temp_path / "cancel-request-started"
         cancel_marker.unlink(missing_ok=True)
         self.state.request_started_marker = cancel_marker
-        self.state.responses_by_path[
-            "/fixture/machine-8/language/translate/v2"
-        ] = google_response("cancelled translation")
-        self.state.delay_by_path[
-            "/fixture/machine-8/language/translate/v2"
-        ] = 0.5
+        self.state.responses_by_path["/ttranslatev3"] = bing_response("cancelled")
+        self.state.get_delay = 0.5
         cancelled = self.run_worker(
-            self.endpoint_setup_actions() + [
-                {"op": "submit", "token": "cancel-google", "body_hex": "6869"},
+            [
+                {"op": "submit", "token": "cancel-free", "body_hex": "6869"},
                 {"op": "wait_file", "path": str(cancel_marker)},
-                {"op": "cancel", "token": "cancel-google"},
-                {"op": "poll", "token": "cancel-google"},
+                {"op": "cancel", "token": "cancel-free"},
+                {"op": "sleep", "seconds": 0.7},
+                {"op": "poll", "token": "cancel-free"},
             ],
-            user={"HD2CT_API_KEY": "fake-key"},
-            interface_type=8,
+            user=invalid_user, interface_type=1,
         )
-        self.assertTrue(cancelled["actions"][6]["found"])
-        self.assertEqual(cancelled["actions"][7]["cancelled"], 1)
-        self.assertIsNone(cancelled["actions"][8]["result"])
-        self.assertEqual(
-            self.state.paths,
-            ["/fixture/machine-8/language/translate/v2"],
-        )
+        self.assertTrue(cancelled["actions"][1]["found"])
+        self.assertEqual(cancelled["actions"][2]["cancelled"], 1)
+        self.assertIsNone(cancelled["actions"][4]["result"])
+        self.assertEqual(self.state.get_paths, ["/translator"])
+        self.assertEqual(self.state.paths, [])
         self.assertTrue(self.state.request_finished.wait(2.0))
 
         self.state.clear()
-        self.state.request_started_marker = self.temp_path / "timeout-request-started"
-        self.state.request_started_marker.unlink(missing_ok=True)
-        self.state.responses_by_path["/fixture/machine-8/language/translate/v2"] = (
-            google_response("late translation")
-        )
-        self.state.delay_by_path["/fixture/machine-8/language/translate/v2"] = 0.5
+        timeout_marker = self.temp_path / "timeout-request-started"
+        timeout_marker.unlink(missing_ok=True)
+        self.state.request_started_marker = timeout_marker
+        self.state.responses_by_path["/ttranslatev3"] = bing_response("late translation")
+        self.state.get_delay = 0.5
         timeout_result = self.run_worker(
-            self.endpoint_setup_actions() + [
-                {"op": "submit", "token": "timeout-google", "body_hex": "6869"},
-                {"op": "wait_file", "path": str(self.state.request_started_marker)},
-                {"op": "expire_active", "token": "timeout-google"},
-                {"op": "poll", "token": "timeout-google"},
+            [
+                {"op": "submit", "token": "timeout-free", "body_hex": "6869"},
+                {"op": "wait_file", "path": str(timeout_marker)},
+                {"op": "expire_active", "token": "timeout-free"},
+                {"op": "poll", "token": "timeout-free"},
             ],
-            user={"HD2CT_API_KEY": "fake-key"},
-            interface_type=8,
+            user=invalid_user, interface_type=1,
         )
         self.assertTrue(timeout_result["actions"][-2]["expired"])
         self.assertEqual(timeout_result["actions"][-1]["result"], "ERR\nTIMEOUT")
-        self.state.request_finished.wait(2.0)
+        self.assertEqual(self.state.get_paths, ["/translator"])
+        self.assertEqual(self.state.paths, [])
+        self.assertTrue(self.state.request_finished.wait(2.0))
+
+        self.state.clear()
+        self.state.get_response = b"<html>missing Bing translation markers</html>"
+        malformed = self.run_worker(
+            self.submit_wait_actions("free-bad-page", free_source),
+            user=invalid_user, interface_type=1,
+        )
+        self.assertEqual(malformed["actions"][1]["result"], "ERR\nBAD_RESPONSE")
+        self.assertEqual(self.state.get_paths, ["/translator"])
+        self.assertEqual(self.state.paths, [])
 
         self.state.clear()
         bootstrap_failure = self.run_worker(
             [{"op": "submit", "token": "bootstrap-failure", "body_hex": "6869"},
              {"op": "wait", "token": "bootstrap-failure"},
              {"op": "read_counts"}],
-            user={"HD2CT_API_KEY": "fake-key"},
-            interface_type=8,
+            user=invalid_user, interface_type=1,
             force_bootstrap_failure=True,
         )
         self.assertEqual(bootstrap_failure["actions"][1]["result"],
@@ -1422,3 +1324,5 @@ class NativeHttpWorkerTests(unittest.TestCase):
         self.assertEqual(bootstrap_failure["read_counts"], {
             name: 0 for name in REGISTRY_READ_IDS.values()
         })
+        self.assertEqual(self.state.get_paths, [])
+        self.assertEqual(self.state.paths, [])

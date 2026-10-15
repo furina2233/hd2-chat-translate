@@ -7,7 +7,6 @@ from __future__ import annotations
 import argparse
 from datetime import datetime, timedelta, timezone
 import hashlib
-from io import BytesIO
 import json
 import os
 from pathlib import Path
@@ -16,7 +15,6 @@ import struct
 import uuid
 import zipfile
 from scripts import menu_locales, target_languages
-from scripts import free_service_config
 
 ROOT = Path(__file__).resolve().parents[1]
 RESOURCE_NAME = "mods/hd2chat/HD2ChatTranslate"
@@ -42,48 +40,20 @@ MAX_ARCHIVE_SIZE = 8 * 1024 * 1024
 DELIVERY_PREFIX = "HD2ChatTranslate"
 BEIJING_TIMEZONE = timezone(timedelta(hours=8))
 DELIVERY_NAME_PATTERN = re.compile(
-    r"^HD2ChatTranslate(NoDependencies|IncludeDependencies)([0-9]{14})\.zip$",
+    r"^HD2ChatTranslate_([0-9][A-Za-z0-9._+\-]{0,63})_([0-9]{14})\.zip$",
     re.ASCII,
 )
-NO_DEPENDENCIES_VARIANT = "NoDependencies"
-INCLUDE_DEPENDENCIES_VARIANT = "IncludeDependencies"
+VERSION_FILE = ROOT / "VERSION"
 STANDALONE_DLL = ROOT / "artifacts" / "native" / "hd2ct_http.dll"
 STANDALONE_META = ROOT / "artifacts" / "native" / "hd2ct_http.meta.json"
-DEFAULT_FREE_CONFIG = ROOT / "config" / "free-service.private.json"
 STANDALONE_LICENSE = ROOT / "native" / "vendor" / "cjson" / "LICENSE"
-MOD_OPTIONS_MENU_ZIP = ROOT / "artifacts" / "Mod-Options-Menu-v1.2.zip"
-MOD_OPTIONS_MENU_LICENSE = ROOT / "third_party" / "mod_options_menu" / "LICENSE"
-MOD_OPTIONS_MENU_SOURCE = ROOT / "third_party" / "mod_options_menu" / "SOURCE.txt"
 PROJECT_LICENSE = ROOT / "LICENSE"
-SHARED_LOADER_ZIP = ROOT / "artifacts" / "Bingus-Shared-Loader-v18.zip"
-SHARED_LOADER_ZIP_SHA256 = "53af5698aeacfb27b98dfa00054923d11dc854e1e67b4af14798877812a93ba6"
-SHARED_LOADER_PATCH_SHA256 = "950a1b29c70a5bf3f94f5b6a154a3935d5c354be20cb7191d803c4c7ed9191e2"
-SHARED_LOADER_RESOURCE_SHA256 = "88ccb04f980bf77daa5ad080c9052be1304bdce21d838a2b26a6e73ac2aa2db0"
-SHARED_LOADER_RESOURCE_HASH = 0x7251FDD9BB62480A
-SHARED_LOADER_PATCH_MEMBER = "data/9ba626afa44a3aa3.patch_0"
-SHARED_LOADER_STREAM_MEMBER = SHARED_LOADER_PATCH_MEMBER + ".stream"
-SHARED_LOADER_GPU_MEMBER = SHARED_LOADER_PATCH_MEMBER + ".gpu_resources"
-SHARED_LOADER_README_MEMBER = "BingusSharedLoader-README.txt"
-SHARED_LOADER_MANIFEST_MEMBER = "BingusSharedLoader-manifest.json"
-MOD_OPTIONS_MENU_ZIP_SHA256 = "a977d84e7f8fda62c587b5b5af2012aab3fa792e31945a9c8d5f458bfd453e13"
-MOD_OPTIONS_MENU_ZIP_SIZE = 1_179_177
-MOD_OPTIONS_MENU_PATCH_MEMBER = "Addon/9ba626afa44a3aa3.patch_0"
-MOD_OPTIONS_MENU_STREAM_MEMBER = MOD_OPTIONS_MENU_PATCH_MEMBER + ".stream"
-MOD_OPTIONS_MENU_GPU_MEMBER = MOD_OPTIONS_MENU_PATCH_MEMBER + ".gpu_resources"
-MOD_OPTIONS_MENU_PATCH_SHA256 = "ce6229cffe8c78706a37293ac64f553becb7f3816aa0cc6fbb108d74956b68a5"
-MOD_OPTIONS_MENU_BLOB_SHA256 = "ea07ab3bc87bfef067230a0aa236e1f9282cfa54e80f6fc07924bd56ab399ee3"
-MOD_OPTIONS_MENU_SOURCE_SHA256 = "e03334c76d9b4b064378076a08d7e85e11e757bafa9fc0380aff5669fee13c07"
-MOD_OPTIONS_MENU_LICENSE_SHA256 = "4ee36d70b08394ea8241a6615fdc892802bd8eeac5693dc907631f76afa54d11"
-MOD_OPTIONS_MENU_RESOURCE_NAME = "mods/cowboybingus/mod_options_menu"
-MOD_OPTIONS_MENU_RESOURCE_HASH = 0xFD50351F21814B0E
-MOD_OPTIONS_MENU_RESOURCE_TYPE = 0xA14E8DFA2CD117E2
 
 
 def validate_native_dll(
     dll: bytes,
     metadata: bytes,
     catalogue: dict[str, object] | None = None,
-    free_service_config_sha256: str | None = None,
 ) -> tuple[int, str]:
     """核验固定原生 helper 的meta、SHA-256和PE入口布局。"""
     try:
@@ -109,18 +79,12 @@ def validate_native_dll(
         or not isinstance(meta.get("target_languages_sha256"), str)
         or len(meta.get("target_languages_sha256", "")) != 64
         or any(char not in "0123456789abcdef" for char in meta.get("target_languages_sha256", ""))
-        or not isinstance(meta.get("free_service_config_sha256"), str)
-        or len(meta.get("free_service_config_sha256", "")) != 64
-        or any(char not in "0123456789abcdef" for char in meta.get("free_service_config_sha256", ""))
         or not isinstance(imports, list)
         or any(not isinstance(item, str) or not item or len(item) > 260 for item in imports)
     ):
         raise ValueError("原生 helper meta 的ABI、架构或字段不匹配")
     if meta["target_languages_sha256"] != expected_catalogue_sha256:
         raise ValueError("原生 helper meta 的目标语言目录摘要不匹配")
-    if (free_service_config_sha256 is not None and
-            meta["free_service_config_sha256"] != free_service_config_sha256):
-        raise ValueError("原生 helper meta 的免费服务配置摘要不匹配；DLL与meta可能来自旧配置")
     size = len(dll)
     digest = hashlib.sha256(dll).hexdigest()
     if size == 0 or meta["size"] != size or meta["sha256"].lower() != digest:
@@ -167,7 +131,6 @@ def standalone_module_source(
     dll: bytes,
     metadata: bytes,
     catalogue: dict[str, object] | None = None,
-    free_service_config_sha256: str | None = None,
 ) -> bytes:
     """将已核验的固定DLL作为hex载荷写入Lua加载器的唯一payload标记。"""
     if template.startswith((b"\xef\xbb\xbf", b"\x1b")) or b"\0" in template:
@@ -175,9 +138,7 @@ def standalone_module_source(
     template.decode("utf-8")
     if template.count(NATIVE_PAYLOAD_MARKER) != 1:
         raise ValueError("原生Lua适配器必须恰好包含一个payload标记")
-    size, digest = validate_native_dll(
-        dll, metadata, catalogue, free_service_config_sha256,
-    )
+    size, digest = validate_native_dll(dll, metadata, catalogue)
     if len(template) + size * 2 > MAX_SOURCE_BYTES:
         raise ValueError("DLL hex载荷将超过512 KiB Lua源码上限；请将结果交由主控评估")
     payload = (
@@ -464,179 +425,6 @@ def make_lua_resource_archive(resources: list[tuple[int, bytes]]) -> bytes:
     return bytes(archive)
 
 
-def _verified_shared_loader_resource(patch: bytes) -> bytes:
-    """校验固定v18 patch布局后返回原始resource blob。"""
-    if len(patch) != 20816 or hashlib.sha256(patch).hexdigest() != SHARED_LOADER_PATCH_SHA256:
-        raise ValueError("Bingus Shared Loader v18 patch大小或SHA-256不匹配")
-    header = struct.unpack_from("<III20sQQ24s", patch, 0)
-    if header != (0xF0000011, 1, 1, bytes(20), len(patch), 0, bytes(24)):
-        raise ValueError("Bingus Shared Loader v18 archive头布局不匹配")
-    type_record = struct.unpack_from("<IIQIIII", patch, 72)
-    if type_record != (0, 0, RESOURCE_TYPE, 1, 0, 16, 16):
-        raise ValueError("Bingus Shared Loader v18资源类型布局不匹配")
-    entry = struct.unpack_from("<7Q6I", patch, 104)
-    expected_entry = (
-        SHARED_LOADER_RESOURCE_HASH,
-        RESOURCE_TYPE,
-        192,
-        0,
-        0,
-        0,
-        0,
-        20620,
-        0,
-        0,
-        16,
-        16,
-        0,
-    )
-    if entry != expected_entry:
-        raise ValueError("Bingus Shared Loader v18 TOC entry布局不匹配")
-    resource = patch[192 : 192 + entry[7]]
-    if len(resource) != entry[7] or patch[192 + entry[7] :] != bytes(len(patch) - 192 - entry[7]):
-        raise ValueError("Bingus Shared Loader v18 resource边界或填充不匹配")
-    if hashlib.sha256(resource).hexdigest() != SHARED_LOADER_RESOURCE_SHA256:
-        raise ValueError("Bingus Shared Loader v18 Lua resource SHA-256不匹配")
-    if struct.unpack_from("<II", resource, 0) != (20612, 2) or len(resource) != 20620:
-        raise ValueError("Bingus Shared Loader v18 Lua resource envelope不匹配")
-    return resource
-
-
-def load_shared_loader_assets(loader_zip: Path | str | None = None) -> tuple[bytes, bytes, bytes]:
-    """从本机固定v18 ZIP读取白名单资源与原始说明文件，不解压其他条目。"""
-    loader_zip_path = Path(loader_zip) if loader_zip is not None else SHARED_LOADER_ZIP
-    try:
-        zip_size = loader_zip_path.stat().st_size
-        if zip_size <= 0 or zip_size > 4 * 1024 * 1024:
-            raise ValueError("本机 Bingus Shared Loader v18 ZIP 超出大小上限")
-        package_bytes = loader_zip_path.read_bytes()
-    except OSError as error:
-        raise ValueError(f"缺少 Bingus Shared Loader v18 ZIP：{loader_zip_path}") from error
-    if len(package_bytes) != zip_size or hashlib.sha256(package_bytes).hexdigest() != SHARED_LOADER_ZIP_SHA256:
-        raise ValueError("本机 Bingus Shared Loader v18 ZIP SHA-256不匹配")
-
-    required_names = (
-        SHARED_LOADER_PATCH_MEMBER,
-        SHARED_LOADER_STREAM_MEMBER,
-        SHARED_LOADER_GPU_MEMBER,
-        SHARED_LOADER_README_MEMBER,
-        SHARED_LOADER_MANIFEST_MEMBER,
-    )
-    try:
-        with zipfile.ZipFile(BytesIO(package_bytes), "r") as package:
-            matches: dict[str, list[zipfile.ZipInfo]] = {name: [] for name in required_names}
-            for info in package.infolist():
-                if info.filename in matches:
-                    matches[info.filename].append(info)
-            for name, infos in matches.items():
-                if len(infos) != 1:
-                    raise ValueError(f"Bingus Shared Loader v18 缺少或重复白名单条目：{name}")
-                if infos[0].file_size > 64 * 1024:
-                    raise ValueError(f"Bingus Shared Loader v18 白名单条目超过大小上限：{name}")
-            patch, stream, gpu = (
-                package.read(matches[name][0])
-                for name in (SHARED_LOADER_PATCH_MEMBER, SHARED_LOADER_STREAM_MEMBER, SHARED_LOADER_GPU_MEMBER)
-            )
-            readme = package.read(matches[SHARED_LOADER_README_MEMBER][0])
-            manifest = package.read(matches[SHARED_LOADER_MANIFEST_MEMBER][0])
-    except (OSError, zipfile.BadZipFile, RuntimeError, EOFError) as error:
-        raise ValueError("本机 Bingus Shared Loader v18 ZIP 无法安全读取") from error
-    if stream or gpu:
-        raise ValueError("Bingus Shared Loader v18 patch 的 stream/gpu_resources sidecar 必须为空")
-    return _verified_shared_loader_resource(patch), readme, manifest
-
-
-def _verified_mod_options_menu_resource(patch: bytes) -> bytes:
-    """校验固定MOM v1.2 patch边界并返回未改写的Lua resource。"""
-    if resource_hash(MOD_OPTIONS_MENU_RESOURCE_NAME) != MOD_OPTIONS_MENU_RESOURCE_HASH:
-        raise ValueError("ModOptionsMenu v1.2资源名hash与固定值不匹配")
-    if len(patch) != 139_136 or hashlib.sha256(patch).hexdigest() != MOD_OPTIONS_MENU_PATCH_SHA256:
-        raise ValueError("ModOptionsMenu v1.2 patch大小或SHA-256不匹配")
-    header = struct.unpack_from("<III20sQQ24s", patch, 0)
-    if header != (0xF0000011, 1, 1, bytes(20), len(patch), 0, bytes(24)):
-        raise ValueError("ModOptionsMenu v1.2 archive头布局不匹配")
-    type_record = struct.unpack_from("<IIQIIII", patch, 72)
-    if type_record != (0, 0, MOD_OPTIONS_MENU_RESOURCE_TYPE, 1, 0, 16, 16):
-        raise ValueError("ModOptionsMenu v1.2资源类型或计数不匹配")
-    entry = struct.unpack_from("<7Q6I", patch, 104)
-    expected_entry = (
-        MOD_OPTIONS_MENU_RESOURCE_HASH,
-        MOD_OPTIONS_MENU_RESOURCE_TYPE,
-        192,
-        0,
-        0,
-        0,
-        0,
-        138_936,
-        0,
-        0,
-        16,
-        16,
-        0,
-    )
-    if entry != expected_entry:
-        raise ValueError("ModOptionsMenu v1.2 TOC entry布局不匹配")
-    resource_start = entry[2]
-    resource_end = resource_start + entry[7]
-    if resource_end > len(patch) or patch[resource_end:] != bytes(len(patch) - resource_end):
-        raise ValueError("ModOptionsMenu v1.2 resource边界或尾部填充不匹配")
-    resource = patch[resource_start:resource_end]
-    if hashlib.sha256(resource).hexdigest() != MOD_OPTIONS_MENU_BLOB_SHA256:
-        raise ValueError("ModOptionsMenu v1.2 Lua resource SHA-256不匹配")
-    if len(resource) != 138_936 or struct.unpack_from("<II", resource, 0) != (138_928, 2):
-        raise ValueError("ModOptionsMenu v1.2 Lua resource envelope不匹配")
-    source = resource[8:]
-    if hashlib.sha256(source).hexdigest() != MOD_OPTIONS_MENU_SOURCE_SHA256:
-        raise ValueError("ModOptionsMenu v1.2 Lua source SHA-256不匹配")
-    try:
-        source.decode("utf-8")
-    except UnicodeError as error:
-        raise ValueError("ModOptionsMenu v1.2 Lua source不是有效UTF-8") from error
-    return resource
-
-
-def load_mod_options_menu_resource(menu_zip: Path | str | None = None) -> bytes:
-    """读取固定release ZIP中的MOM patch，只校验并返回原始Lua resource。"""
-    menu_zip_path = Path(menu_zip) if menu_zip is not None else MOD_OPTIONS_MENU_ZIP
-    try:
-        zip_size = menu_zip_path.stat().st_size
-        if zip_size != MOD_OPTIONS_MENU_ZIP_SIZE or zip_size > MAX_ARCHIVE_SIZE:
-            raise ValueError("ModOptionsMenu v1.2 ZIP大小不匹配或超过上限")
-        package_bytes = menu_zip_path.read_bytes()
-    except OSError as error:
-        raise ValueError(f"缺少ModOptionsMenu v1.2 ZIP：{menu_zip_path}") from error
-    if len(package_bytes) != zip_size or hashlib.sha256(package_bytes).hexdigest() != MOD_OPTIONS_MENU_ZIP_SHA256:
-        raise ValueError("ModOptionsMenu v1.2 ZIP SHA-256不匹配")
-
-    required_names = (
-        MOD_OPTIONS_MENU_PATCH_MEMBER,
-        MOD_OPTIONS_MENU_STREAM_MEMBER,
-        MOD_OPTIONS_MENU_GPU_MEMBER,
-    )
-    try:
-        with zipfile.ZipFile(BytesIO(package_bytes), "r") as package:
-            matches: dict[str, list[zipfile.ZipInfo]] = {name: [] for name in required_names}
-            for info in package.infolist():
-                if info.filename in matches:
-                    matches[info.filename].append(info)
-            for name, infos in matches.items():
-                if len(infos) != 1:
-                    raise ValueError(f"ModOptionsMenu v1.2 ZIP缺少或重复白名单条目：{name}")
-            if matches[MOD_OPTIONS_MENU_PATCH_MEMBER][0].file_size != 139_136:
-                raise ValueError("ModOptionsMenu v1.2 patch条目长度不匹配")
-            for name in (MOD_OPTIONS_MENU_STREAM_MEMBER, MOD_OPTIONS_MENU_GPU_MEMBER):
-                if matches[name][0].file_size != 0:
-                    raise ValueError("ModOptionsMenu v1.2 patch sidecar必须为空")
-            patch = package.read(matches[MOD_OPTIONS_MENU_PATCH_MEMBER][0])
-            stream = package.read(matches[MOD_OPTIONS_MENU_STREAM_MEMBER][0])
-            gpu = package.read(matches[MOD_OPTIONS_MENU_GPU_MEMBER][0])
-    except (OSError, zipfile.BadZipFile, RuntimeError, EOFError) as error:
-        raise ValueError("ModOptionsMenu v1.2 ZIP无法安全读取") from error
-    if stream or gpu:
-        raise ValueError("ModOptionsMenu v1.2 patch sidecar必须为空")
-    return _verified_mod_options_menu_resource(patch)
-
-
 def entry_source(
     source: bytes,
     core_source: bytes,
@@ -767,7 +555,7 @@ def entry_source(
 
 
 def _read_common_license_files() -> dict[str, bytes]:
-    """读取两种包都需要的项目 GPL 与 cJSON 许可。"""
+    """读取插件包需要的项目 GPL 与 cJSON 许可。"""
     try:
         project_license = PROJECT_LICENSE.read_bytes()
     except OSError as error:
@@ -782,79 +570,20 @@ def _read_common_license_files() -> dict[str, bytes]:
     }
 
 
-def _load_dependency_assets(
-    loader_zip: Path | str | None,
-    menu_zip: Path | str | None,
-) -> dict[str, bytes]:
-    """一次性核验并读取两个前置的资源、许可和来源材料。"""
-    loader_resource, loader_readme, loader_manifest = load_shared_loader_assets(loader_zip)
-    menu_resource = load_mod_options_menu_resource(menu_zip)
-    try:
-        menu_license = MOD_OPTIONS_MENU_LICENSE.read_bytes()
-        menu_source_note = MOD_OPTIONS_MENU_SOURCE.read_bytes()
-    except OSError as error:
-        raise ValueError("standalone包缺少ModOptionsMenu许可证或来源说明") from error
-    if len(menu_license) != 674 or hashlib.sha256(menu_license).hexdigest() != MOD_OPTIONS_MENU_LICENSE_SHA256:
-        raise ValueError("ModOptionsMenu许可证字节与固定上游原文不匹配")
-    loader_zip_path = Path(loader_zip) if loader_zip is not None else SHARED_LOADER_ZIP
-    loader_input_note = (
-        "artifacts/Bingus-Shared-Loader-v18.zip"
-        if _same_path(loader_zip_path, SHARED_LOADER_ZIP)
-        else "命令行 --loader-zip 指定的 ZIP"
-    )
-    loader_source_note = (
-        "Bingus Shared Loader v18 来源说明\n\n"
-        "上游项目：https://github.com/CowboyBingus/BingusSharedLoader\n"
-        f"本机构建输入：{loader_input_note}\n"
-        f"输入 ZIP SHA-256：{SHARED_LOADER_ZIP_SHA256}\n\n"
-        "本包从用户本机已有的上游 ZIP 中读取固定白名单条目。Loader Lua resource 在合并进本插件 patch 时保持原始字节。\n"
-        "随包保留的 README 和 manifest 是上游文件原文。本说明不为 Bingus Shared Loader 声明或新增许可证。\n"
-    ).encode("utf-8")
-    return {
-        "loader_resource": loader_resource,
-        "loader_readme": loader_readme,
-        "loader_manifest": loader_manifest,
-        "loader_source_note": loader_source_note,
-        "menu_resource": menu_resource,
-        "menu_license": menu_license,
-        "menu_source_note": menu_source_note,
-    }
-
-
-def _manifest_description(include_dependencies: bool) -> str:
-    dependency_note = (
-        "内置 Bingus Shared Loader v18 和 Mod Options Menu v1.2，无需另外导入。"
-        if include_dependencies
-        else "此包不含 Bingus Shared Loader v18 或 Mod Options Menu v1.2，使用前需分别安装这两个前置。"
-    )
+def _manifest_description() -> str:
     return (
         "进程内聊天翻译：通过游戏内原生网络线程将聊天交给配置的翻译服务，"
         "翻译成功后显示原文、换行和“译文：”加译文；服务判断无需回写时保持原文，请求失败显示简短提示，不广播译文。"
         "读取 HD2CT_API_URL、HD2CT_MODEL、HD2CT_API_KEY 和 HD2CT_APP_ID 环境变量；"
         "启用状态与请求超时由游戏内菜单控制。"
-        + dependency_note
-        + "Arsenal 默认优先级请放在列表最底；启用 first-mod-wins 时请放在列表最顶。"
+        "Arsenal 默认优先级请放在列表最底；启用 first-mod-wins 时请放在列表最顶。"
     )
 
 
-def _assemble_addon_files(
-    entry: bytes,
-    *,
-    include_dependencies: bool,
-    common_licenses: dict[str, bytes],
-    dependency_assets: dict[str, bytes] | None,
-) -> dict[str, bytes]:
+def _assemble_addon_files(entry: bytes, *, common_licenses: dict[str, bytes]) -> dict[str, bytes]:
     resource = struct.pack("<II", len(entry), 2) + entry
-    resources = [(resource_hash(RESOURCE_NAME), resource)]
-    if include_dependencies:
-        if dependency_assets is None:
-            raise ValueError("IncludeDependencies包缺少已核验的前置资源")
-        resources.extend((
-            (SHARED_LOADER_RESOURCE_HASH, dependency_assets["loader_resource"]),
-            (MOD_OPTIONS_MENU_RESOURCE_HASH, dependency_assets["menu_resource"]),
-        ))
-    archive = make_lua_resource_archive(resources)
-    description = _manifest_description(include_dependencies)
+    archive = make_lua_resource_archive([(resource_hash(RESOURCE_NAME), resource)])
+    description = _manifest_description()
     manifest = {
         "Version": 1,
         "Guid": str(uuid.UUID(ADDON_GUID)),
@@ -868,42 +597,17 @@ def _assemble_addon_files(
             }
         ],
     }
-    files = {
+    return {
         "manifest.json": (json.dumps(manifest, ensure_ascii=False, indent=2) + "\n").encode("utf-8"),
         "Addon/" + ARCHIVE_NAME: archive,
         "Addon/" + ARCHIVE_NAME + ".stream": b"",
         "Addon/" + ARCHIVE_NAME + ".gpu_resources": b"",
         **common_licenses,
     }
-    if include_dependencies:
-        assert dependency_assets is not None
-        files.update({
-            "LICENSES/BingusSharedLoader-README.txt": dependency_assets["loader_readme"],
-            "LICENSES/BingusSharedLoader-manifest.json": dependency_assets["loader_manifest"],
-            "LICENSES/BingusSharedLoader-SOURCE.txt": dependency_assets["loader_source_note"],
-            "LICENSES/ModOptionsMenu-LICENSE.txt": dependency_assets["menu_license"],
-            "LICENSES/ModOptionsMenu-SOURCE.txt": dependency_assets["menu_source_note"],
-        })
-    return files
 
 
-def addon_files(
-    entry: bytes,
-    *,
-    loader_zip: Path | str | None = None,
-    menu_zip: Path | str | None = None,
-    include_dependencies: bool = True,
-) -> dict[str, bytes]:
-    common_licenses = _read_common_license_files()
-    dependency_assets = (
-        _load_dependency_assets(loader_zip, menu_zip) if include_dependencies else None
-    )
-    return _assemble_addon_files(
-        entry,
-        include_dependencies=include_dependencies,
-        common_licenses=common_licenses,
-        dependency_assets=dependency_assets,
-    )
+def addon_files(entry: bytes) -> dict[str, bytes]:
+    return _assemble_addon_files(entry, common_licenses=_read_common_license_files())
 
 
 def _same_path(left: Path, right: Path) -> bool:
@@ -920,25 +624,48 @@ def _beijing_moment(now: datetime | None = None) -> datetime:
     return moment.astimezone(BEIJING_TIMEZONE)
 
 
-def _variant_name(include_dependencies: bool) -> str:
-    return INCLUDE_DEPENDENCIES_VARIANT if include_dependencies else NO_DEPENDENCIES_VARIANT
+def _validate_version(version: str) -> str:
+    if (
+        not isinstance(version, str)
+        or len(version) > 64
+        or ".." in version
+        or re.fullmatch(r"[0-9]+(?:\.[0-9]+)*(?:[-+][A-Za-z0-9](?:[A-Za-z0-9._+\-]*[A-Za-z0-9])?)?", version, re.ASCII) is None
+    ):
+        raise ValueError("VERSION 必须是有效版本号（最多64字符，不能包含路径或空白）")
+    return version
 
 
-def _delivery_filename(variant: str, moment: datetime) -> str:
-    if variant not in (NO_DEPENDENCIES_VARIANT, INCLUDE_DEPENDENCIES_VARIANT):
-        raise ValueError("未知的安装包变体")
-    return f"{DELIVERY_PREFIX}{variant}{moment:%Y%m%d%H%M%S}.zip"
+def read_version(version_path: Path | str | None = None) -> str:
+    """严格读取根目录 VERSION 的单行版本号。"""
+    path = Path(version_path) if version_path is not None else VERSION_FILE
+    try:
+        value = path.read_bytes().decode("utf-8", errors="strict")
+    except OSError as error:
+        raise ValueError(f"无法读取版本文件 VERSION：{path}") from error
+    except UnicodeError as error:
+        raise ValueError(f"版本文件 VERSION 不是有效 UTF-8：{path}") from error
+    if value.endswith("\r\n"):
+        value = value[:-2]
+    elif value.endswith("\n"):
+        value = value[:-1]
+    if "\r" in value or "\n" in value:
+        raise ValueError("VERSION 必须只包含一行版本号")
+    return _validate_version(value)
+
+
+def _delivery_filename(version: str, moment: datetime) -> str:
+    return f"{DELIVERY_PREFIX}_{_validate_version(version)}_{moment:%Y%m%d%H%M%S}.zip"
 
 
 def default_output_path(
     now: datetime | None = None,
     *,
-    include_dependencies: bool = True,
+    output_dir: Path | str | None = None,
+    version_path: Path | str | None = None,
 ) -> Path:
-    """返回北京时间命名的单包默认路径；默认返回含前置版本。"""
-    return ROOT / "artifacts" / _delivery_filename(
-        _variant_name(include_dependencies), _beijing_moment(now)
-    )
+    """返回版本号与北京时间命名的单包路径。"""
+    directory = Path(output_dir) if output_dir is not None else ROOT / "artifacts"
+    return directory / _delivery_filename(read_version(version_path), _beijing_moment(now))
 
 
 def _delivery_filename_match(filename: str) -> re.Match[str] | None:
@@ -946,6 +673,7 @@ def _delivery_filename_match(filename: str) -> re.Match[str] | None:
     if match is None:
         return None
     try:
+        _validate_version(match.group(1))
         datetime.strptime(match.group(2), "%Y%m%d%H%M%S")
     except ValueError:
         return None
@@ -953,55 +681,11 @@ def _delivery_filename_match(filename: str) -> re.Match[str] | None:
 
 
 def is_delivery_filename(filename: str) -> bool:
-    """只接受两种变体且日历时间有效的交付文件名。"""
+    """检查交付文件名中的版本号与日历时间。"""
     return _delivery_filename_match(filename) is not None
 
-
-def _paired_output_paths(
-    output_anchor: Path | str | None = None,
-    *,
-    output_dir: Path | str | None = None,
-    now: datetime | None = None,
-) -> tuple[Path, Path]:
-    """按一个北京时间时间戳派生两种包的目标路径。"""
-    if output_anchor is not None and output_dir is not None:
-        raise ValueError("--output 与 --output-dir 不能同时指定")
-    if output_anchor is not None:
-        anchor = Path(output_anchor)
-        match = _delivery_filename_match(anchor.name)
-        if match is None:
-            raise ValueError("--output 文件名必须是带有效北京时间时间戳的新安装包变体名")
-        timestamp = match.group(2)
-        directory = anchor.parent
-    else:
-        timestamp = _beijing_moment(now).strftime("%Y%m%d%H%M%S")
-        directory = Path(output_dir) if output_dir is not None else ROOT / "artifacts"
-    return (
-        directory / f"{DELIVERY_PREFIX}{NO_DEPENDENCIES_VARIANT}{timestamp}.zip",
-        directory / f"{DELIVERY_PREFIX}{INCLUDE_DEPENDENCIES_VARIANT}{timestamp}.zip",
-    )
-
-
-def _select_output_path(
-    output: Path | str | None,
-    *,
-    include_dependencies: bool,
-    now: datetime | None = None,
-) -> Path:
-    """保留单包构建API的任意显式路径，默认名使用对应的新变体。"""
-    if output is None:
-        return default_output_path(now, include_dependencies=include_dependencies)
-    return Path(output)
-
-
-def _build_input_paths(
-    dll_path: Path,
-    meta_path: Path,
-    free_config_path: Path,
-    loader_zip_path: Path,
-    menu_zip_path: Path,
-) -> tuple[Path, ...]:
-    """列出全部输入路径，NoDependencies也保留覆盖保护。"""
+def _build_input_paths(dll_path: Path, meta_path: Path, version_path: Path) -> tuple[Path, ...]:
+    """列出构建读取的全部文件，供输出覆盖保护使用。"""
     return (
         ROOT / "game" / "chat_probe.lua",
         ROOT / "game" / "chat_probe_core.lua",
@@ -1011,33 +695,22 @@ def _build_input_paths(
         ROOT / "game" / "settings.lua",
         dll_path,
         meta_path,
-        free_config_path,
+        version_path,
         STANDALONE_LICENSE,
         PROJECT_LICENSE,
-        MOD_OPTIONS_MENU_LICENSE,
-        MOD_OPTIONS_MENU_SOURCE,
         target_languages.CATALOGUE_PATH,
-        loader_zip_path,
-        menu_zip_path,
         menu_locales.CATALOGUE_PATH,
     )
 
 
-def _preflight_outputs(output_paths: tuple[Path, ...], input_paths: tuple[Path, ...]) -> None:
-    for index, path in enumerate(output_paths):
-        if any(_same_path(path, prior) for prior in output_paths[:index]):
-            raise ValueError("两个安装包输出路径不能相同")
-        if any(_same_path(path, source) for source in input_paths):
-            raise ValueError("输出不能覆盖构建输入文件")
-    existing = [path for path in output_paths if os.path.lexists(path)]
-    if existing:
-        names = "、".join(path.name for path in existing)
-        raise ValueError(f"交付包已存在，拒绝覆盖：{names}")
+def _preflight_output(output_path: Path, input_paths: tuple[Path, ...]) -> None:
+    if any(_same_path(output_path, source) for source in input_paths):
+        raise ValueError("输出不能覆盖构建输入文件")
+    if os.path.lexists(output_path):
+        raise ValueError(f"交付包已存在，拒绝覆盖：{output_path.name}")
 
 
-def _build_packaged_entry(
-    dll_path: Path, meta_path: Path, free_service_config_sha256: str,
-) -> bytes:
+def _build_packaged_entry(dll_path: Path, meta_path: Path) -> bytes:
     entry_path = ROOT / "game" / "chat_probe.lua"
     core_path = ROOT / "game" / "chat_probe_core.lua"
     observer_path = ROOT / "game" / "research" / "chat_observe_core.lua"
@@ -1055,7 +728,6 @@ def _build_packaged_entry(
     metadata = meta_path.read_bytes()
     native_module = standalone_module_source(
         standalone_module_path.read_bytes(), dll, metadata, catalogue,
-        free_service_config_sha256,
     )
     settings_module = target_language_settings_source(
         settings_path.read_bytes(), catalogue, localizations
@@ -1080,169 +752,65 @@ def _write_archive(file_object, files: dict[str, bytes]) -> None:
             package.writestr(info, content)
 
 
-def _write_artifact_archives(
-    artifacts: tuple[tuple[Path, dict[str, bytes]], ...],
-) -> tuple[Path, ...]:
-    """先独占创建所有目标，再写ZIP；失败时清理本次创建的部分文件。"""
-    handles = []
-    created_paths: list[Path] = []
+def _write_artifact(path: Path, files: dict[str, bytes]) -> Path:
+    """独占创建ZIP；写入失败时仅清理本次创建的文件。"""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    created = False
     try:
-        for path, _ in artifacts:
-            path.parent.mkdir(parents=True, exist_ok=True)
-        for path, _ in artifacts:
-            handle = path.open("xb")
-            handles.append(handle)
-            created_paths.append(path)
-        for (_, files), handle in zip(artifacts, handles):
+        with path.open("xb") as handle:
+            created = True
             _write_archive(handle, files)
-        return tuple(path for path, _ in artifacts)
     except BaseException:
-        for handle in handles:
-            try:
-                handle.close()
-            except OSError:
-                pass
-        for path in created_paths:
+        if created:
             try:
                 path.unlink(missing_ok=True)
             except OSError:
                 pass
         raise
-    finally:
-        for handle in handles:
-            if not handle.closed:
-                handle.close()
+    return path
 
 
 def build_artifact(
-    output: Path | str | None = None,
-    *,
-    include_dependencies: bool = True,
-    loader_zip: Path | str | None = None,
-    menu_zip: Path | str | None = None,
-    native_dll: Path | str | None = None,
-    native_meta: Path | str | None = None,
-    free_config: Path | str | None = None,
-) -> Path:
-    """构建单个变体；默认生成IncludeDependencies包。"""
-    dll_path = Path(native_dll) if native_dll is not None else STANDALONE_DLL
-    meta_path = Path(native_meta) if native_meta is not None else STANDALONE_META
-    free_config_path = Path(free_config) if free_config is not None else DEFAULT_FREE_CONFIG
-    loader_zip_path = Path(loader_zip) if loader_zip is not None else SHARED_LOADER_ZIP
-    menu_zip_path = Path(menu_zip) if menu_zip is not None else MOD_OPTIONS_MENU_ZIP
-    output_path = _select_output_path(
-        output, include_dependencies=include_dependencies
-    )
-    input_paths = _build_input_paths(
-        dll_path, meta_path, free_config_path, loader_zip_path, menu_zip_path,
-    )
-    _preflight_outputs((output_path,), input_paths)
-    try:
-        _, free_service_digest = free_service_config.load_config(free_config_path)
-    except ValueError as error:
-        raise ValueError(str(error)) from error
-    packaged_entry = _build_packaged_entry(dll_path, meta_path, free_service_digest)
-    common_licenses = _read_common_license_files()
-    dependency_assets = (
-        _load_dependency_assets(loader_zip_path, menu_zip_path)
-        if include_dependencies
-        else None
-    )
-    files = _assemble_addon_files(
-        packaged_entry,
-        include_dependencies=include_dependencies,
-        common_licenses=common_licenses,
-        dependency_assets=dependency_assets,
-    )
-    return _write_artifact_archives(((output_path, files),))[0]
-
-
-def build_artifacts(
-    output_anchor: Path | str | None = None,
-    *,
     output_dir: Path | str | None = None,
-    loader_zip: Path | str | None = None,
-    menu_zip: Path | str | None = None,
+    *,
     native_dll: Path | str | None = None,
     native_meta: Path | str | None = None,
-    free_config: Path | str | None = None,
     now: datetime | None = None,
-) -> tuple[Path, Path]:
-    """一次读取和组装输入，构建同时间戳的无前置版与含前置版。"""
-    output_paths = _paired_output_paths(
-        output_anchor, output_dir=output_dir, now=now
-    )
+    version_path: Path | str | None = None,
+) -> Path:
+    """构建唯一的 standalone Arsenal 安装包。"""
     dll_path = Path(native_dll) if native_dll is not None else STANDALONE_DLL
     meta_path = Path(native_meta) if native_meta is not None else STANDALONE_META
-    free_config_path = Path(free_config) if free_config is not None else DEFAULT_FREE_CONFIG
-    loader_zip_path = Path(loader_zip) if loader_zip is not None else SHARED_LOADER_ZIP
-    menu_zip_path = Path(menu_zip) if menu_zip is not None else MOD_OPTIONS_MENU_ZIP
-    input_paths = _build_input_paths(
-        dll_path, meta_path, free_config_path, loader_zip_path, menu_zip_path,
+    version_file = Path(version_path) if version_path is not None else VERSION_FILE
+    output_path = default_output_path(
+        now, output_dir=output_dir, version_path=version_file,
     )
-    _preflight_outputs(output_paths, input_paths)
-
-    try:
-        _, free_service_digest = free_service_config.load_config(free_config_path)
-    except ValueError as error:
-        raise ValueError(str(error)) from error
-    packaged_entry = _build_packaged_entry(dll_path, meta_path, free_service_digest)
-    common_licenses = _read_common_license_files()
-    dependency_assets = _load_dependency_assets(loader_zip_path, menu_zip_path)
-    no_dependencies_files = _assemble_addon_files(
-        packaged_entry,
-        include_dependencies=False,
-        common_licenses=common_licenses,
-        dependency_assets=None,
-    )
-    include_dependencies_files = _assemble_addon_files(
-        packaged_entry,
-        include_dependencies=True,
-        common_licenses=common_licenses,
-        dependency_assets=dependency_assets,
-    )
-    return _write_artifact_archives((
-        (output_paths[0], no_dependencies_files),
-        (output_paths[1], include_dependencies_files),
-    ))
+    input_paths = _build_input_paths(dll_path, meta_path, version_file)
+    _preflight_output(output_path, input_paths)
+    packaged_entry = _build_packaged_entry(dll_path, meta_path)
+    files = addon_files(packaged_entry)
+    return _write_artifact(output_path, files)
 
 
-def main() -> None:
+def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    output_group = parser.add_mutually_exclusive_group()
-    output_group.add_argument(
-        "--output",
-        type=Path,
-        help="路径锚点；文件名须为任一新安装包变体和有效北京时间戳，程序会在同目录生成两包。",
+    parser.add_argument(
+        "--output-dir", type=Path,
+        help="ZIP输出目录；默认使用项目artifacts目录。",
     )
-    output_group.add_argument(
-        "--output-dir",
-        type=Path,
-        help="两包的输出目录；默认使用项目artifacts目录。",
-    )
-    parser.add_argument("--loader-zip", type=Path, help="Bingus Shared Loader v18来源ZIP；默认使用项目artifacts路径。")
-    parser.add_argument("--menu-zip", type=Path, help="ModOptionsMenu v1.2来源ZIP；默认使用项目artifacts路径。")
     parser.add_argument("--native-dll", type=Path, help="原生HTTP helper DLL；默认使用项目artifacts/native路径。")
     parser.add_argument("--native-meta", type=Path, help="原生HTTP helper meta JSON；默认使用项目artifacts/native路径。")
-    parser.add_argument("--free-config", type=Path, default=DEFAULT_FREE_CONFIG,
-                        help="免费服务私有配置JSON；默认config/free-service.private.json。")
-    args = parser.parse_args()
-    if args.output is not None and not is_delivery_filename(args.output.name):
-        parser.error("--output必须使用两个新安装包变体之一及有效北京时间戳")
+    args = parser.parse_args(argv)
     try:
-        outputs = build_artifacts(
-            args.output,
+        output = build_artifact(
             output_dir=args.output_dir,
-            loader_zip=args.loader_zip,
-            menu_zip=args.menu_zip,
             native_dll=args.native_dll,
             native_meta=args.native_meta,
-            free_config=args.free_config,
         )
     except (OSError, ValueError) as error:
         parser.error(str(error))
-    for output in outputs:
-        print(f"已构建HD2聊天插件ZIP：{output}")
+    print(f"已构建HD2聊天插件ZIP：{output}")
+    return 0
 
 
 if __name__ == "__main__":

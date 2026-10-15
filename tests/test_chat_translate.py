@@ -35,10 +35,6 @@ local function new_env(identity_callback)
         response_throw = false,
         apply_throw = false,
         submit_calls = {},
-        local_player_name_calls = 0,
-        local_player_name_value = nil,
-        local_player_name_throw = false,
-        local_player_name_callback = nil,
         identity_calls = 0,
         identity_message = nil,
         response_calls = {},
@@ -61,18 +57,12 @@ local function new_env(identity_callback)
             if message then return "ok", message end
             return "empty"
         end,
-        submit = function(token, body, flags, player_name)
+        submit = function(token, body, flags)
             env.submit_calls[#env.submit_calls + 1] = {
-                token = token, body = body, flags = flags, player_name = player_name,
+                token = token, body = body, flags = flags,
             }
             if env.submit_throw then error("PRIVATE_SUBMIT_SECRET") end
             return true
-        end,
-        local_player_name = function()
-            env.local_player_name_calls = env.local_player_name_calls + 1
-            if env.local_player_name_throw then error("PRIVATE_PLAYER_NAME_SECRET") end
-            if env.local_player_name_callback then return env.local_player_name_callback() end
-            return env.local_player_name_value
         end,
         response = function(token)
             env.response_calls[#env.response_calls + 1] = token
@@ -177,37 +167,12 @@ local function one_baseline_and_chinese_case()
             failures = counters(flag_env).submit_failures,
         }
     end
-    local function submit_player_name_case(callback, should_throw)
-        local name_env = new_env()
-        finish_baseline(name_env)
-        name_env.local_player_name_callback = callback
-        name_env.local_player_name_throw = should_throw == true
-        local message = make_message(0, "player name source", 0, 77, false)
-        message.sender_name = "ChatSender"
-        name_env.messages[0] = message
-        step(name_env)
-        local token = name_env.submit_calls[1] and name_env.submit_calls[1].token
-        if token then
-            name_env.responses[token] = "OK\nplayer name translation"
-            step(name_env)
-        end
-        return {
-            player_name = name_env.submit_calls[1] and name_env.submit_calls[1].player_name,
-            sender_name = message.sender_name,
-            name_calls = name_env.local_player_name_calls,
-            submits = #name_env.submit_calls,
-            failures = counters(name_env).submit_failures,
-            adapter_errors = counters(name_env).adapter_errors,
-            applies = #name_env.apply_calls,
-        }
-    end
     return {
         after_baseline = after_baseline,
         submits = #env.submit_calls,
         applies = #env.apply_calls,
         submitted_body = env.submit_calls[1] and env.submit_calls[1].body or "",
         self_flag = env.submit_calls[1] and env.submit_calls[1].flags or -1,
-        submitted_player_name = env.submit_calls[1] and env.submit_calls[1].player_name,
         false_flag = submit_flag_for(false),
         unknown_flag = submit_flag_for(nil),
         identity_callbacks = {
@@ -215,11 +180,6 @@ local function one_baseline_and_chinese_case()
             other_result = submit_callback_case(function() return false end, true),
             unknown_result = submit_callback_case(function() return nil end, true),
             exception = submit_callback_case(function() error("PRIVATE_IDENTITY_CALLBACK") end, true),
-        },
-        player_name_callbacks = {
-            cached_local_name = submit_player_name_case(function() return "LocalCacheName" end),
-            missing = submit_player_name_case(function() return nil end),
-            exception = submit_player_name_case(function() error("PRIVATE_PLAYER_NAME_CALLBACK") end),
         },
         cancels = #env.cancel_calls,
         unchanged = manifest.counters.translation_unchanged,
@@ -409,17 +369,9 @@ local function one_error_message_case()
         missing_config = run_error_response_case("MISSING_CONFIG"),
         network = run_error_response_case("NETWORK"),
         bad_response = run_error_response_case("BAD_RESPONSE"),
-        unsupported_service = run_error_response_case("UNSUPPORTED_SERVICE"),
         auth_invalid = run_error_response_case("AUTH_INVALID"),
         access_denied = run_error_response_case("ACCESS_DENIED"),
         quota_exceeded = run_error_response_case("QUOTA_EXCEEDED"),
-        free_quota_exceeded = run_error_response_case("FREE_QUOTA_EXCEEDED"),
-        free_server_error = run_error_response_case("FREE_SERVER_ERROR"),
-        free_upgrade_required = run_error_response_case("FREE_UPGRADE_REQUIRED"),
-        free_request_text_too_long = run_error_response_case("FREE_REQUEST_TEXT_TOO_LONG"),
-        free_player_unknown = run_error_response_case("FREE_PLAYER_UNKNOWN"),
-        free_player_invalid = run_error_response_case("FREE_PLAYER_INVALID"),
-        free_daily_limit = run_error_response_case("FREE_DAILY_LIMIT"),
         unsupported_language = run_error_response_case("UNSUPPORTED_LANGUAGE"),
         request_invalid = run_error_response_case("REQUEST_INVALID"),
         service_error = run_error_response_case("SERVICE_ERROR"),
@@ -548,19 +500,6 @@ class ChatTranslateCoreTests(unittest.TestCase):
             self.assertTrue(case["same_message"])
             self.assertEqual(case["submits"], 1)
             self.assertEqual(case["failures"], 0)
-        player_names = baseline["player_name_callbacks"]
-        self.assertEqual(player_names["cached_local_name"]["player_name"], "LocalCacheName")
-        self.assertEqual(player_names["cached_local_name"]["sender_name"], "ChatSender")
-        for label in ("cached_local_name", "missing", "exception"):
-            with self.subTest(player_name_callback=label):
-                case = player_names[label]
-                self.assertEqual(case["name_calls"], 1)
-                self.assertEqual(case["submits"], 1)
-                self.assertEqual(case["failures"], 0)
-                self.assertEqual(case["adapter_errors"], 0)
-                self.assertEqual(case["applies"], 1)
-        self.assertIsNone(player_names["missing"].get("player_name"))
-        self.assertIsNone(player_names["exception"].get("player_name"))
         self.assertEqual(baseline["applies"], 0)
         self.assertEqual(baseline["unchanged"], 0)
         self.assertEqual(baseline["cancels"], 1)
@@ -602,17 +541,9 @@ class ChatTranslateCoreTests(unittest.TestCase):
             "missing_config": "翻译配置不完整",
             "network": "网络连接失败",
             "bad_response": "返回内容无效",
-            "unsupported_service": "暂不支持此翻译服务",
             "auth_invalid": "翻译凭据或签名无效",
             "access_denied": "无权使用此翻译服务",
             "quota_exceeded": "翻译额度不足",
-            "free_quota_exceeded": "免费版的余额已用尽，请自行配置提供商",
-            "free_server_error": "服务器错误，请联系作者",
-            "free_upgrade_required": "请升级hd2-chat-translate以继续使用免费版服务",
-            "free_request_text_too_long": "请求的文本过长",
-            "free_player_unknown": "无法识别本地玩家",
-            "free_player_invalid": "玩家身份哈希无效",
-            "free_daily_limit": "今日免费次数已用尽，请明天再试",
             "unsupported_language": "不支持此语言",
             "request_invalid": "请求参数有误",
             "service_error": "翻译服务异常",

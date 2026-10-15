@@ -1,4 +1,4 @@
-"""依次构建原生DLL和两种standalone Arsenal安装包。"""
+"""依次构建原生DLL和standalone Arsenal安装包。"""
 
 from __future__ import annotations
 
@@ -13,7 +13,6 @@ NATIVE_BUILD_SCRIPT = (ROOT / "tools" / "build_native_http.py").resolve()
 PACKAGE_BUILD_SCRIPT = (ROOT / "tools" / "build_package.py").resolve()
 DEFAULT_DLL = (ROOT / "artifacts" / "native" / "hd2ct_http.dll").resolve()
 DEFAULT_META = (ROOT / "artifacts" / "native" / "hd2ct_http.meta.json").resolve()
-DEFAULT_FREE_CONFIG = (ROOT / "config" / "free-service.private.json").resolve()
 
 
 def _resolved_input_path(value: str, invocation_directory: Path) -> str:
@@ -49,10 +48,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--cc", default="gcc", help="MinGW-w64 GCC命令名或路径，默认gcc")
     parser.add_argument("--objdump", help="objdump命令名或路径，默认使用GCC同目录工具")
-    parser.add_argument("--loader-zip", help="Bingus Shared Loader v18来源ZIP")
-    parser.add_argument("--menu-zip", help="Mod Options Menu v1.2来源ZIP")
-    parser.add_argument("--output-dir", help="两种安装包的输出目录")
-    parser.add_argument("--free-config", help="免费服务私有配置JSON；默认config/free-service.private.json")
+    parser.add_argument("--output-dir", help="安装包的输出目录")
     args = parser.parse_args(argv)
 
     try:
@@ -64,10 +60,6 @@ def main(argv: list[str] | None = None) -> int:
             str(DEFAULT_DLL),
             "--meta",
             str(DEFAULT_META),
-            "--free-config",
-            _resolved_input_path(
-                args.free_config or str(DEFAULT_FREE_CONFIG), invocation_directory,
-            ),
             "--cc",
             _tool_argument(args.cc, invocation_directory),
         ]
@@ -87,19 +79,7 @@ def main(argv: list[str] | None = None) -> int:
             str(DEFAULT_DLL),
             "--native-meta",
             str(DEFAULT_META),
-            "--free-config",
-            _resolved_input_path(
-                args.free_config or str(DEFAULT_FREE_CONFIG), invocation_directory,
-            ),
         ]
-        if args.loader_zip is not None:
-            package_command.extend(
-                ("--loader-zip", _resolved_input_path(args.loader_zip, invocation_directory))
-            )
-        if args.menu_zip is not None:
-            package_command.extend(
-                ("--menu-zip", _resolved_input_path(args.menu_zip, invocation_directory))
-            )
         if args.output_dir is not None:
             package_command.extend(
                 ("--output-dir", _resolved_input_path(args.output_dir, invocation_directory))

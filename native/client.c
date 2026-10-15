@@ -15,7 +15,6 @@ typedef struct HD2CT_JobSlot {
     uint64_t submitted_ms;
     uint64_t request_deadline_ms;
     char token[HD2CT_MAX_TOKEN + 1u];
-    char player_name[HD2CT_MAX_PLAYER_NAME + 1u];
     char source[HD2CT_MAX_SOURCE + 1u];
     uint32_t source_bytes;
     char result[HD2CT_MAX_RESULT + 1u];
@@ -378,8 +377,6 @@ static int hd2ct_take_next_job_locked(HD2CT_WorkerJob *copy)
     copy->submitted_ms = g_jobs[selected].submitted_ms;
     copy->flags = g_jobs[selected].flags;
     memcpy(copy->token, g_jobs[selected].token, sizeof(copy->token));
-    memcpy(copy->player_name, g_jobs[selected].player_name,
-           sizeof(copy->player_name));
     memcpy(copy->source, g_jobs[selected].source, sizeof(copy->source));
     copy->source_bytes = g_jobs[selected].source_bytes;
     return 1;
@@ -444,8 +441,6 @@ static int hd2ct_set_job_cache_fingerprint(HD2CT_WorkerJob *job)
         field_lengths[field_count++] = strlen(job->api_key);
         break;
     case HD2CT_ADAPTER_FREE:
-        fields[field_count] = job->player_name;
-        field_lengths[field_count++] = strlen(job->player_name);
         break;
     default:
         goto fail;
@@ -739,23 +734,13 @@ static void hd2ct_start_bootstrap(void)
 }
 
 uint32_t HD2CT_Submit(const char *token, const char *body, uint32_t bytes,
-                      uint32_t flags, const char *player_name)
+                      uint32_t flags, const char *reserved)
 {
     size_t token_length;
-    size_t player_name_length = 0;
     uint32_t i;
     uint32_t free_slot = HD2CT_JOB_COUNT;
     uint64_t serial;
-    if (player_name != NULL) {
-        player_name_length = hd2ct_bounded_length(player_name,
-                                                  HD2CT_MAX_PLAYER_NAME);
-        if (player_name_length > HD2CT_MAX_PLAYER_NAME ||
-            (player_name_length != 0 &&
-             !hd2ct_valid_utf8((const unsigned char *)player_name,
-                               player_name_length, 0))) {
-            return 0u;
-        }
-    }
+    (void)reserved;
     if ((flags & ~HD2CT_MESSAGE_SELF) != 0u ||
         body == NULL || bytes == 0 ||
         bytes > HD2CT_MAX_SOURCE || !hd2ct_valid_token(token, &token_length) ||
@@ -792,10 +777,6 @@ uint32_t HD2CT_Submit(const char *token, const char *body, uint32_t bytes,
     g_jobs[free_slot].flags = flags;
     memcpy(g_jobs[free_slot].token, token, token_length);
     g_jobs[free_slot].token[token_length] = '\0';
-    if (player_name_length != 0) {
-        memcpy(g_jobs[free_slot].player_name, player_name, player_name_length);
-    }
-    g_jobs[free_slot].player_name[player_name_length] = '\0';
     memcpy(g_jobs[free_slot].source, body, bytes);
     g_jobs[free_slot].source[bytes] = '\0';
     g_jobs[free_slot].source_bytes = bytes;

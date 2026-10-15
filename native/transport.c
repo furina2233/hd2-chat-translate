@@ -1,5 +1,4 @@
 #include "internal.h"
-#include "adapter/free_auth.h"
 
 #include <string.h>
 #include <stdio.h>
@@ -58,8 +57,7 @@ const char *hd2ct_winhttp_failure(uint64_t deadline, DWORD error)
     return "NETWORK";
 }
 
-static int hd2ct_prepare_url_parts(const char *url, uint32_t adapter_id,
-                                   HD2CT_UrlParts *out)
+static int hd2ct_prepare_url_parts(const char *url, HD2CT_UrlParts *out)
 {
     size_t length = strlen(url);
     memset(out, 0, sizeof(*out));
@@ -88,12 +86,9 @@ static int hd2ct_prepare_url_parts(const char *url, uint32_t adapter_id,
     }
     if (out->components.nScheme == INTERNET_SCHEME_HTTP &&
         !hd2ct_local_http_host(out->host)) {
-        if (adapter_id != HD2CT_ADAPTER_FREE ||
-            strcmp(url, HD2CT_FREE_ENDPOINT) != 0) {
-            free(out->wide_url);
-            out->wide_url = NULL;
-            return 0;
-        }
+        free(out->wide_url);
+        out->wide_url = NULL;
+        return 0;
     }
     out->port = out->components.nPort;
     out->secure = out->components.nScheme == INTERNET_SCHEME_HTTPS;
@@ -171,7 +166,7 @@ static void hd2ct_http_provider_request(HINTERNET session,
         failure_code = "CANCELLED";
         goto cleanup;
     }
-    if (!hd2ct_prepare_url_parts(job->url, job->adapter_id, &url_parts)) {
+    if (!hd2ct_prepare_url_parts(job->url, &url_parts)) {
         failure_code = "INVALID_URL";
         goto cleanup;
     }
@@ -317,12 +312,7 @@ static void hd2ct_http_provider_request(HINTERNET session,
     }
     if (status_code < 200u || status_code >= 300u) {
         char code[32];
-        if (job->adapter_id == HD2CT_ADAPTER_FREE &&
-            status_code >= 500u && status_code < 600u) {
-            (void)snprintf(code, sizeof(code), "%s", "FREE_SERVER_ERROR");
-        } else {
-            (void)snprintf(code, sizeof(code), "HTTP_%lu", (unsigned long)status_code);
-        }
+        (void)snprintf(code, sizeof(code), "HTTP_%lu", (unsigned long)status_code);
         hd2ct_build_error(result, HD2CT_MAX_RESULT + 1u, result_bytes, code);
         ok = 1;
         goto cleanup;
@@ -409,74 +399,76 @@ void hd2ct_http_worker_request(HINTERNET session, HD2CT_BingState *bing_state,
                                int *successful, int *request_attempted,
                                uint64_t request_deadline)
 {
-    int bing_attempted = 0;
-    int fallback_attempted = 0;
     *successful = 0;
     *request_attempted = 0;
     if (job->adapter_id == HD2CT_ADAPTER_FREE) {
-#if !defined(HD2CT_TESTING) || defined(HD2CT_BING_TEST_BASE_URL)
+#if defined(HD2CT_TESTING) && !defined(HD2CT_BING_TEST_BASE_URL)
+        (void)bing_state;
+        if (hd2ct_job_cancelled(job->slot_index, job->serial)) {
+            hd2ct_build_error(result, HD2CT_MAX_RESULT + 1u,
+                              result_bytes, "CANCELLED");
+        } else if (hd2ct_remaining_ms(request_deadline) == 0u) {
+            hd2ct_build_error(result, HD2CT_MAX_RESULT + 1u,
+                              result_bytes, "TIMEOUT");
+        } else {
+            hd2ct_build_error(result, HD2CT_MAX_RESULT + 1u,
+                              result_bytes, "SERVICE_ERROR");
+        }
+        return;
+#else
         HD2CT_BingContext context;
         char translated[HD2CT_MAX_TRANSLATION + 1u];
         uint32_t translated_bytes = 0;
-        uint64_t bing_deadline;
-        uint32_t remaining = hd2ct_remaining_ms(request_deadline);
-        uint32_t budget = remaining / 2u;
-        int bing_result = HD2CT_BING_FALLBACK;
+        int bing_attempted = 0;
+        int bing_result;
         const char *failure_code = "NETWORK";
-        if (budget > 6000u) budget = 6000u;
-        if (budget != 0u && bing_state != NULL) {
-            bing_deadline = GetTickCount64() + budget;
-            if (bing_deadline > request_deadline) bing_deadline = request_deadline;
-            context.state = bing_state;
-            context.job = job;
-            context.deadline = bing_deadline;
-            context.request_attempted = &bing_attempted;
-            context.failure_code = &failure_code;
-            bing_result = hd2ct_bing_translate(&context, translated,
-                                               &translated_bytes);
-            if (bing_result == HD2CT_BING_TRANSLATED) {
-                memcpy(result, "OK\n", 3u);
-                memcpy(result + 3u, translated, translated_bytes);
-                result_bytes[0] = translated_bytes + 3u;
-                result[result_bytes[0]] = '\0';
-                *successful = 1;
-                *request_attempted = bing_attempted;
-                SecureZeroMemory(translated, sizeof(translated));
-                return;
-            }
-            SecureZeroMemory(translated, sizeof(translated));
-            if (bing_result == HD2CT_BING_CANCELLED ||
-                hd2ct_job_cancelled(job->slot_index, job->serial)) {
-                hd2ct_build_error(result, HD2CT_MAX_RESULT + 1u,
-                                  result_bytes, "CANCELLED");
-                *request_attempted = bing_attempted;
-                return;
-            }
-            if (bing_result == HD2CT_BING_RATE_LIMITED) {
-                hd2ct_build_error(result, HD2CT_MAX_RESULT + 1u,
-                                  result_bytes, "RATE_LIMITED");
-                *request_attempted = bing_attempted;
-                return;
-            }
-            if (hd2ct_remaining_ms(request_deadline) == 0u) {
-                hd2ct_build_error(result, HD2CT_MAX_RESULT + 1u,
-                                  result_bytes, "TIMEOUT");
-                *request_attempted = bing_attempted;
-                return;
-            }
-        }
-#endif
-        if (job->player_name[0] == '\0') {
+        if (hd2ct_job_cancelled(job->slot_index, job->serial)) {
             hd2ct_build_error(result, HD2CT_MAX_RESULT + 1u,
-                              result_bytes, "FREE_PLAYER_UNKNOWN");
-            *request_attempted = bing_attempted;
+                              result_bytes, "CANCELLED");
             return;
         }
-        hd2ct_http_provider_request(session, job, result, result_bytes,
-                                    successful, &fallback_attempted,
-                                    request_deadline);
-        *request_attempted = bing_attempted || fallback_attempted;
+        if (hd2ct_remaining_ms(request_deadline) == 0u) {
+            hd2ct_build_error(result, HD2CT_MAX_RESULT + 1u,
+                              result_bytes, "TIMEOUT");
+            return;
+        }
+        if (bing_state == NULL) {
+            hd2ct_build_error(result, HD2CT_MAX_RESULT + 1u,
+                              result_bytes, "SERVICE_ERROR");
+            return;
+        }
+        context.state = bing_state;
+        context.job = job;
+        context.deadline = request_deadline;
+        context.request_attempted = &bing_attempted;
+        context.failure_code = &failure_code;
+        bing_result = hd2ct_bing_translate(&context, translated,
+                                           &translated_bytes);
+        *request_attempted = bing_attempted;
+        if (bing_result == HD2CT_BING_TRANSLATED) {
+            memcpy(result, "OK\n", 3u);
+            memcpy(result + 3u, translated, translated_bytes);
+            *result_bytes = translated_bytes + 3u;
+            result[*result_bytes] = '\0';
+            *successful = 1;
+            SecureZeroMemory(translated, sizeof(translated));
+            return;
+        }
+        SecureZeroMemory(translated, sizeof(translated));
+        if (bing_result == HD2CT_BING_CANCELLED ||
+            hd2ct_job_cancelled(job->slot_index, job->serial)) {
+            failure_code = "CANCELLED";
+        } else if (bing_result == HD2CT_BING_RATE_LIMITED) {
+            failure_code = "RATE_LIMITED";
+        } else if (hd2ct_remaining_ms(request_deadline) == 0u) {
+            failure_code = "TIMEOUT";
+        } else if (failure_code == NULL || failure_code[0] == '\0') {
+            failure_code = "NETWORK";
+        }
+        hd2ct_build_error(result, HD2CT_MAX_RESULT + 1u,
+                          result_bytes, failure_code);
         return;
+#endif
     }
     hd2ct_http_provider_request(session, job, result, result_bytes,
                                 successful, request_attempted,

@@ -2117,18 +2117,10 @@ local function initialize_probe()
         return result
     end
 
-    local function observer_translate_local_player_name()
-        if translate_identity_state.player_name_ready then
-            return translate_identity_state.player_name
-        end
-        return nil
-    end
-
     return {
         state = translate_identity_state,
         cache_step = observer_translate_identity_cache_step,
         is_self_message = observer_translate_is_self_message,
-        local_player_name = observer_translate_local_player_name,
     }
     end)()
 
@@ -2349,16 +2341,9 @@ local function initialize_probe()
             and numeric <= 9007199254740991 and string.format("%.0f", numeric) == counter
     end
 
-    local function observer_translate_publish_request(token, body, flags, player_name)
+    local function observer_translate_publish_request(token, body, flags)
         if flags == nil then flags = 0 end
         if type(flags) ~= "number" or (flags ~= 0 and flags ~= 1) then return false end
-        if player_name == "" then
-            player_name = nil
-        elseif player_name ~= nil and (type(player_name) ~= "string" or #player_name > 128
-            or not translate_core or type(translate_core.valid_text) ~= "function"
-            or not translate_core.valid_text(player_name, 128)) then
-            player_name = nil
-        end
         if STANDALONE_ENABLED then
             if not TRANSLATE_ENABLED or not translate_heartbeat_fresh
                 or not observer_translate_valid_token(token)
@@ -2369,7 +2354,7 @@ local function initialize_probe()
                 return false
             end
             local ok, submitted = pcall(function()
-                return native_transport_api.submit(token, body, flags, player_name)
+                return native_transport_api.submit(token, body, flags)
             end)
             if not ok then return false, "SUBMIT_EXCEPTION" end
             return submitted == true
@@ -3382,7 +3367,6 @@ local function initialize_probe()
         end
         adapter.submit = protect(observer_translate_publish_request, "submit")
         adapter.is_self_message = translate_identity.is_self_message
-        adapter.local_player_name = translate_identity.local_player_name
         adapter.response = protect(observer_translate_read_response, "response")
         adapter.apply = protect(observer_translate_apply, "apply_total")
         adapter.cancel = protect(observer_translate_cancel)

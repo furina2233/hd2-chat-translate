@@ -15,7 +15,7 @@ __declspec(dllexport) uint32_t __cdecl HD2CT_Submit(
     const char *body,
     uint32_t bytes,
     uint32_t flags,
-    const char *player_name); /* UTF-8本地玩家姓名；NULL或空字符串表示未知。 */
+    const char *reserved); /* 兼容参数，保留但不读取。 */
 /* 成功以 OK\n 返回；无需改写的消息以 SKIP\n 返回；ERR\n 后仅含固定错误码。 */
 /* 结果均以 NUL 结尾，written 不含末尾 NUL。 */
 __declspec(dllexport) uint32_t __cdecl HD2CT_Poll(
