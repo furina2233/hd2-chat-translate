@@ -11,7 +11,8 @@
 ## 安装与更新
 
 1. 正常关闭游戏，在 HD2Arsenal 导入。
-2. 点击部署后启动游戏。需要你已安装`Bingus Shared Loader`和`Mod Options Menu`两个前置模组。
+2. 点击部署。需要你已安装`Bingus Shared Loader`和`Mod Options Menu`两个前置模组。
+3. 启动游戏。
 
 ## 免费使用、开箱即用
 
