@@ -40,6 +40,16 @@ TARGET_LANGUAGE_IDS = (
     "pt",
     "it",
 )
+INTERFACE_TYPE_IDS = (
+    "free",
+    "chat_completions",
+    "anthropic",
+    "baidu",
+    "youdao",
+    "bing_cn",
+    "bing_global",
+    "google",
+)
 TEXT_KEYS = (
     "target_language_label",
     "target_language_description",
@@ -50,10 +60,13 @@ TEXT_KEYS = (
     "timeout_label",
     "timeout_description",
     "timeout_choice_format",
+    "interface_type_label",
+    "interface_type_description",
 )
-LOCALE_KEYS = frozenset((*TEXT_KEYS, "target_languages"))
+LOCALE_KEYS = frozenset((*TEXT_KEYS, "target_languages", "interface_types"))
 LABEL_KEYS = frozenset((
-    "target_language_label", "enabled_label", "ignore_self_label", "timeout_label"
+    "target_language_label", "enabled_label", "ignore_self_label", "timeout_label",
+    "interface_type_label",
 ))
 DESCRIPTION_KEYS = frozenset(
     (
@@ -61,6 +74,7 @@ DESCRIPTION_KEYS = frozenset(
         "enabled_description",
         "ignore_self_description",
         "timeout_description",
+        "interface_type_description",
     )
 )
 MAX_LABEL_LENGTH = 64
@@ -145,6 +159,18 @@ def validate_catalogue(value: object) -> dict[str, object]:
             _validate_text(
                 target_languages[target_id],
                 name=f"{locale}.target_languages.{target_id}",
+                maximum=MAX_CHOICE_LENGTH,
+            )
+
+        interface_types = _require_exact_keys(
+            entry["interface_types"],
+            frozenset(INTERFACE_TYPE_IDS),
+            f"{locale}.interface_types",
+        )
+        for interface_type_id in INTERFACE_TYPE_IDS:
+            _validate_text(
+                interface_types[interface_type_id],
+                name=f"{locale}.interface_types.{interface_type_id}",
                 maximum=MAX_CHOICE_LENGTH,
             )
 

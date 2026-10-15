@@ -11,6 +11,8 @@
       "timeout_label": "Request timeout",
       "timeout_description": "Maximum time to wait for a single request.",
       "timeout_choice_format": "{seconds} seconds",
+      "interface_type_label": "Interface type",
+      "interface_type_description": "Select the translation service interface. The choice applies to subsequent messages after pressing APPLY.",
       "target_languages": {
         "zh_cn": "Chinese (Simplified)",
         "zh_tw": "Chinese (Traditional)",
@@ -22,6 +24,16 @@
         "es": "Spanish",
         "pt": "Portuguese",
         "it": "Italian"
+      },
+      "interface_types": {
+        "free": "Free",
+        "chat_completions": "Chat Completions API",
+        "anthropic": "Anthropic API",
+        "baidu": "Baidu Translate",
+        "youdao": "Youdao Translate",
+        "bing_cn": "Bing Translate (Azure China)",
+        "bing_global": "Bing Translate (Azure Global)",
+        "google": "Google Translate"
       }
     },
     "en-GB": {
@@ -34,6 +46,8 @@
       "timeout_label": "Request timeout",
       "timeout_description": "Maximum time to wait for a single request.",
       "timeout_choice_format": "{seconds} seconds",
+      "interface_type_label": "Interface type",
+      "interface_type_description": "Select the translation service interface. The choice applies to subsequent messages after pressing APPLY.",
       "target_languages": {
         "zh_cn": "Chinese (Simplified)",
         "zh_tw": "Chinese (Traditional)",
@@ -45,6 +59,16 @@
         "es": "Spanish",
         "pt": "Portuguese",
         "it": "Italian"
+      },
+      "interface_types": {
+        "free": "Free",
+        "chat_completions": "Chat Completions API",
+        "anthropic": "Anthropic API",
+        "baidu": "Baidu Translate",
+        "youdao": "Youdao Translate",
+        "bing_cn": "Bing Translate (Azure China)",
+        "bing_global": "Bing Translate (Azure Global)",
+        "google": "Google Translate"
       }
     },
     "fr": {
@@ -57,6 +81,8 @@
       "timeout_label": "Délai d’attente de la requête",
       "timeout_description": "Durée maximale d’attente pour une seule requête.",
       "timeout_choice_format": "{seconds} secondes",
+      "interface_type_label": "Type d’interface",
+      "interface_type_description": "Choisissez le service de traduction. Le choix s’applique aux messages suivants après avoir appuyé sur APPLY.",
       "target_languages": {
         "zh_cn": "Chinois (simplifié)",
         "zh_tw": "Chinois (traditionnel)",
@@ -68,6 +94,16 @@
         "es": "Espagnol",
         "pt": "Portugais",
         "it": "Italien"
+      },
+      "interface_types": {
+        "free": "Gratuit",
+        "chat_completions": "API Chat Completions",
+        "anthropic": "API Anthropic",
+        "baidu": "Traduction Baidu",
+        "youdao": "Traduction Youdao",
+        "bing_cn": "Bing Translate (Azure Chine)",
+        "bing_global": "Bing Translate (Azure Global)",
+        "google": "Google Traduction"
       }
     },
     "it": {
@@ -80,6 +116,8 @@
       "timeout_label": "Timeout della richiesta",
       "timeout_description": "Tempo massimo di attesa per una singola richiesta.",
       "timeout_choice_format": "{seconds} secondi",
+      "interface_type_label": "Tipo di interfaccia",
+      "interface_type_description": "Scegli il servizio di traduzione. La scelta si applica ai messaggi successivi dopo aver premuto APPLY.",
       "target_languages": {
         "zh_cn": "Cinese (semplificato)",
         "zh_tw": "Cinese (tradizionale)",
@@ -91,6 +129,16 @@
         "es": "Spagnolo",
         "pt": "Portoghese",
         "it": "Italiano"
+      },
+      "interface_types": {
+        "free": "Gratuito",
+        "chat_completions": "API Chat Completions",
+        "anthropic": "API Anthropic",
+        "baidu": "Traduzione Baidu",
+        "youdao": "Traduzione Youdao",
+        "bing_cn": "Bing Translate (Azure Cina)",
+        "bing_global": "Bing Translate (Azure Global)",
+        "google": "Google Traduttore"
       }
     },
     "de": {
@@ -103,6 +151,8 @@
       "timeout_label": "Anfragezeitlimit",
       "timeout_description": "Maximale Wartezeit für eine einzelne Anfrage.",
       "timeout_choice_format": "{seconds} Sekunden",
+      "interface_type_label": "Schnittstellentyp",
+      "interface_type_description": "Wählen Sie den Übersetzungsdienst. Die Auswahl gilt nach dem Drücken von APPLY für nachfolgende Nachrichten.",
       "target_languages": {
         "zh_cn": "Chinesisch (vereinfacht)",
         "zh_tw": "Chinesisch (traditionell)",
@@ -114,6 +164,16 @@
         "es": "Spanisch",
         "pt": "Portugiesisch",
         "it": "Italienisch"
+      },
+      "interface_types": {
+        "free": "Kostenlos",
+        "chat_completions": "Chat Completions API",
+        "anthropic": "Anthropic API",
+        "baidu": "Baidu Übersetzer",
+        "youdao": "Youdao Übersetzer",
+        "bing_cn": "Bing Translate (Azure China)",
+        "bing_global": "Bing Translate (Azure Global)",
+        "google": "Google Übersetzer"
       }
     },
     "es": {
@@ -126,6 +186,8 @@
       "timeout_label": "Tiempo de espera de la solicitud",
       "timeout_description": "Tiempo máximo de espera para una sola solicitud.",
       "timeout_choice_format": "{seconds} segundos",
+      "interface_type_label": "Tipo de interfaz",
+      "interface_type_description": "Elige el servicio de traducción. La selección se aplicará a los mensajes posteriores después de pulsar APPLY.",
       "target_languages": {
         "zh_cn": "Chino (simplificado)",
         "zh_tw": "Chino (tradicional)",
@@ -137,6 +199,16 @@
         "es": "Español",
         "pt": "Portugués",
         "it": "Italiano"
+      },
+      "interface_types": {
+        "free": "Gratis",
+        "chat_completions": "API Chat Completions",
+        "anthropic": "API Anthropic",
+        "baidu": "Traducción de Baidu",
+        "youdao": "Traducción de Youdao",
+        "bing_cn": "Bing Translate (Azure China)",
+        "bing_global": "Bing Translate (Azure Global)",
+        "google": "Traductor de Google"
       }
     },
     "es-419": {
@@ -149,6 +221,8 @@
       "timeout_label": "Tiempo límite de la solicitud",
       "timeout_description": "Tiempo máximo de espera para una sola solicitud.",
       "timeout_choice_format": "{seconds} segundos",
+      "interface_type_label": "Tipo de interfaz",
+      "interface_type_description": "Elige el servicio de traducción. La selección se aplicará a los mensajes posteriores después de presionar APPLY.",
       "target_languages": {
         "zh_cn": "Chino (simplificado)",
         "zh_tw": "Chino (tradicional)",
@@ -160,6 +234,16 @@
         "es": "Español",
         "pt": "Portugués",
         "it": "Italiano"
+      },
+      "interface_types": {
+        "free": "Gratis",
+        "chat_completions": "API Chat Completions",
+        "anthropic": "API Anthropic",
+        "baidu": "Traducción de Baidu",
+        "youdao": "Traducción de Youdao",
+        "bing_cn": "Bing Translate (Azure China)",
+        "bing_global": "Bing Translate (Azure Global)",
+        "google": "Traductor de Google"
       }
     },
     "ja": {
@@ -172,6 +256,8 @@
       "timeout_label": "リクエストのタイムアウト",
       "timeout_description": "1回のリクエストで待機する最大時間です。",
       "timeout_choice_format": "{seconds}秒",
+      "interface_type_label": "インターフェースの種類",
+      "interface_type_description": "翻訳サービスを選択します。APPLYを押すと、その後のメッセージに選択が適用されます。",
       "target_languages": {
         "zh_cn": "中国語（簡体字）",
         "zh_tw": "中国語（繁体字）",
@@ -183,6 +269,16 @@
         "es": "スペイン語",
         "pt": "ポルトガル語",
         "it": "イタリア語"
+      },
+      "interface_types": {
+        "free": "無料",
+        "chat_completions": "Chat Completions API",
+        "anthropic": "Anthropic API",
+        "baidu": "Baidu 翻訳",
+        "youdao": "Youdao 翻訳",
+        "bing_cn": "Bing Translate (Azure China)",
+        "bing_global": "Bing Translate (Azure Global)",
+        "google": "Google 翻訳"
       }
     },
     "ko": {
@@ -195,6 +291,8 @@
       "timeout_label": "요청 시간 제한",
       "timeout_description": "단일 요청의 최대 대기 시간입니다.",
       "timeout_choice_format": "{seconds}초",
+      "interface_type_label": "인터페이스 유형",
+      "interface_type_description": "번역 서비스를 선택합니다. APPLY를 누르면 이후 메시지에 선택이 적용됩니다.",
       "target_languages": {
         "zh_cn": "중국어 (간체)",
         "zh_tw": "중국어 (번체)",
@@ -206,6 +304,16 @@
         "es": "스페인어",
         "pt": "포르투갈어",
         "it": "이탈리아어"
+      },
+      "interface_types": {
+        "free": "무료",
+        "chat_completions": "Chat Completions API",
+        "anthropic": "Anthropic API",
+        "baidu": "바이두 번역",
+        "youdao": "유다오 번역",
+        "bing_cn": "Bing Translate (Azure China)",
+        "bing_global": "Bing Translate (Azure Global)",
+        "google": "Google 번역"
       }
     },
     "pt-BR": {
@@ -218,6 +326,8 @@
       "timeout_label": "Tempo limite da solicitação",
       "timeout_description": "Tempo máximo de espera de uma única solicitação.",
       "timeout_choice_format": "{seconds} segundos",
+      "interface_type_label": "Tipo de interface",
+      "interface_type_description": "Escolha o serviço de tradução. A escolha se aplica às próximas mensagens após pressionar APPLY.",
       "target_languages": {
         "zh_cn": "Chinês (simplificado)",
         "zh_tw": "Chinês (tradicional)",
@@ -229,6 +339,16 @@
         "es": "Espanhol",
         "pt": "Português",
         "it": "Italiano"
+      },
+      "interface_types": {
+        "free": "Gratuito",
+        "chat_completions": "API Chat Completions",
+        "anthropic": "API Anthropic",
+        "baidu": "Tradução Baidu",
+        "youdao": "Tradução Youdao",
+        "bing_cn": "Bing Translate (Azure China)",
+        "bing_global": "Bing Translate (Azure Global)",
+        "google": "Tradutor do Google"
       }
     },
     "pt": {
@@ -241,6 +361,8 @@
       "timeout_label": "Tempo limite do pedido",
       "timeout_description": "Tempo máximo de espera de um pedido.",
       "timeout_choice_format": "{seconds} segundos",
+      "interface_type_label": "Tipo de interface",
+      "interface_type_description": "Escolha o serviço de tradução. A escolha se aplica às próximas mensagens após premir APPLY.",
       "target_languages": {
         "zh_cn": "Chinês simplificado",
         "zh_tw": "Chinês tradicional",
@@ -252,6 +374,16 @@
         "es": "Espanhol",
         "pt": "Português",
         "it": "Italiano"
+      },
+      "interface_types": {
+        "free": "Gratuito",
+        "chat_completions": "API Chat Completions",
+        "anthropic": "API Anthropic",
+        "baidu": "Tradução Baidu",
+        "youdao": "Tradução Youdao",
+        "bing_cn": "Bing Translate (Azure China)",
+        "bing_global": "Bing Translate (Azure Global)",
+        "google": "Tradutor Google"
       }
     },
     "pl": {
@@ -264,6 +396,8 @@
       "timeout_label": "Limit czasu żądania",
       "timeout_description": "Maksymalny czas oczekiwania na pojedyncze żądanie.",
       "timeout_choice_format": "{seconds} s",
+      "interface_type_label": "Typ interfejsu",
+      "interface_type_description": "Wybierz usługę tłumaczenia. Wybór zostanie zastosowany do kolejnych wiadomości po naciśnięciu APPLY.",
       "target_languages": {
         "zh_cn": "Chiński (uproszczony)",
         "zh_tw": "Chiński (tradycyjny)",
@@ -275,6 +409,16 @@
         "es": "Hiszpański",
         "pt": "Portugalski",
         "it": "Włoski"
+      },
+      "interface_types": {
+        "free": "Bezpłatny",
+        "chat_completions": "API Chat Completions",
+        "anthropic": "Anthropic API",
+        "baidu": "Tłumacz Baidu",
+        "youdao": "Tłumacz Youdao",
+        "bing_cn": "Bing Translate (Azure China)",
+        "bing_global": "Bing Translate (Azure Global)",
+        "google": "Tłumacz Google"
       }
     },
     "ru": {
@@ -287,6 +431,8 @@
       "timeout_label": "Тайм-аут запроса",
       "timeout_description": "Максимальное время ожидания одного запроса.",
       "timeout_choice_format": "{seconds} секунд",
+      "interface_type_label": "Тип интерфейса",
+      "interface_type_description": "Выберите службу перевода. Выбор будет применён к последующим сообщениям после нажатия APPLY.",
       "target_languages": {
         "zh_cn": "Китайский (упрощённый)",
         "zh_tw": "Китайский (традиционный)",
@@ -298,6 +444,16 @@
         "es": "Испанский",
         "pt": "Португальский",
         "it": "Итальянский"
+      },
+      "interface_types": {
+        "free": "Бесплатно",
+        "chat_completions": "API Chat Completions",
+        "anthropic": "API Anthropic",
+        "baidu": "Перевод Baidu",
+        "youdao": "Перевод Youdao",
+        "bing_cn": "Bing Translate (Azure China)",
+        "bing_global": "Bing Translate (Azure Global)",
+        "google": "Google Переводчик"
       }
     },
     "zh-Hans": {
@@ -310,6 +466,8 @@
       "timeout_label": "请求超时",
       "timeout_description": "单次请求最长等待时间。",
       "timeout_choice_format": "{seconds}秒",
+      "interface_type_label": "接口类型",
+      "interface_type_description": "选择翻译服务接口，应用后对后续消息生效。",
       "target_languages": {
         "zh_cn": "简体中文",
         "zh_tw": "繁体中文",
@@ -321,6 +479,16 @@
         "es": "西班牙语",
         "pt": "葡萄牙语",
         "it": "意大利语"
+      },
+      "interface_types": {
+        "free": "免费版",
+        "chat_completions": "Chat Completions接口",
+        "anthropic": "Anthropic接口",
+        "baidu": "百度翻译",
+        "youdao": "有道翻译",
+        "bing_cn": "必应翻译国内版",
+        "bing_global": "必应翻译国际版",
+        "google": "谷歌翻译"
       }
     },
     "zh-Hant": {
@@ -333,6 +501,8 @@
       "timeout_label": "請求逾時",
       "timeout_description": "單次請求的最長等待時間。",
       "timeout_choice_format": "{seconds}秒",
+      "interface_type_label": "介面類型",
+      "interface_type_description": "選擇翻譯服務介面，套用後對後續訊息生效。",
       "target_languages": {
         "zh_cn": "簡體中文",
         "zh_tw": "繁體中文",
@@ -344,6 +514,16 @@
         "es": "西班牙語",
         "pt": "葡萄牙語",
         "it": "義大利語"
+      },
+      "interface_types": {
+        "free": "免費版",
+        "chat_completions": "Chat Completions介面",
+        "anthropic": "Anthropic介面",
+        "baidu": "百度翻譯",
+        "youdao": "有道翻譯",
+        "bing_cn": "必應翻譯國內版",
+        "bing_global": "必應翻譯國際版",
+        "google": "Google 翻譯"
       }
     }
   }

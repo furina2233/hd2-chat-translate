@@ -32,6 +32,8 @@ TARGET_LANGUAGE_CATALOGUE = target_languages.load_catalogue()
 AI_RESPONSE_FORMAT = {
     "type": "json_object",
 }
+INTERFACE_TYPE_OPTION_ID = "hd2chattranslate.interface_type"
+ANTHROPIC_VERSION = "2023-06-01"
 
 ENVIRONMENT_CHILD = r"""
 import ctypes
@@ -43,6 +45,8 @@ import threading
 from pathlib import Path
 
 dll_path, registry_json = sys.argv[1], sys.argv[2]
+fixture = json.loads(registry_json)
+process_region = fixture.pop("__process_region", None)
 arguments = sys.argv[3:]
 expected_config = None
 actions = []
@@ -63,6 +67,8 @@ os.environ.update({
     "HD2CT_ENABLED": "1",
     "HD2CT_TIMEOUT_SECONDS": "77",
 })
+if process_region is not None:
+    os.environ["HD2CT_REGION"] = process_region
 
 lib = ctypes.CDLL(dll_path)
 lib.fixture_ClearRegistry.argtypes = []
@@ -86,6 +92,11 @@ lib.fixture_NormalizeUrl.argtypes = [
     ctypes.c_uint32, ctypes.c_char_p, ctypes.c_void_p, ctypes.c_uint32,
 ]
 lib.fixture_NormalizeUrl.restype = ctypes.c_uint32
+lib.fixture_PrepareJobConfig.argtypes = [
+    ctypes.c_uint32, ctypes.c_void_p, ctypes.c_uint32,
+    ctypes.c_void_p, ctypes.c_uint32, ctypes.POINTER(ctypes.c_uint32),
+]
+lib.fixture_PrepareJobConfig.restype = ctypes.c_uint32
 lib.fixture_CacheCount.argtypes = []
 lib.fixture_CacheCount.restype = ctypes.c_uint32
 lib.fixture_RateCount.argtypes = []
@@ -145,7 +156,6 @@ lib.fixture_BingTranslate.argtypes = [
 lib.fixture_BingTranslate.restype = ctypes.c_int
 
 lib.fixture_ClearRegistry()
-fixture = json.loads(registry_json)
 registry_delay = fixture.pop("__registry_delay_ms", 0)
 target_values_path = fixture.pop("__target_values_path", None)
 has_target_primary = "__target_primary" in fixture
@@ -300,6 +310,21 @@ for action in actions:
             ctypes.cast(output, ctypes.c_void_p), len(output),
         )
         action_results.append({"accepted": accepted, "url": output.value.decode("utf-8")})
+    elif op == "prepare_config":
+        url = ctypes.create_string_buffer(2049)
+        region = ctypes.create_string_buffer(65)
+        adapter_id = ctypes.c_uint32()
+        status = lib.fixture_PrepareJobConfig(
+            action["interface_type"], ctypes.cast(url, ctypes.c_void_p),
+            len(url), ctypes.cast(region, ctypes.c_void_p), len(region),
+            ctypes.byref(adapter_id),
+        )
+        action_results.append({
+            "status": status,
+            "url": url.value.decode("utf-8"),
+            "region": region.value.decode("utf-8"),
+            "adapter_id": adapter_id.value,
+        })
     elif op == "target_file":
         write_target_values_file(action["kind"], action.get("contents"))
         action_results.append({"written": True})
@@ -481,6 +506,29 @@ __declspec(dllexport) int __cdecl fixture_ParseBingResponse(
         body, body_bytes, target, translation, translation_bytes, failure_code);
 }
 
+__declspec(dllexport) int __cdecl fixture_ParseOfficialBingResponse(
+    char *response, uint32_t response_bytes, uint32_t target_language,
+    char *translation, uint32_t *translation_bytes, char *failure_code,
+    uint32_t failure_capacity)
+{
+    HD2CT_WorkerJob job;
+    const char *code = "BAD_RESPONSE";
+    int accepted;
+    if (response == NULL || translation == NULL || translation_bytes == NULL ||
+        failure_code == NULL || failure_capacity == 0u) return 0;
+    memset(&job, 0, sizeof(job));
+    memcpy(job.source, "Hold this position.", sizeof("Hold this position."));
+    job.source_bytes = (uint32_t)(sizeof("Hold this position.") - 1u);
+    job.target_language = target_language;
+    *translation_bytes = 0u;
+    accepted = hd2ct_parse_bing_response(
+        &job, response, response_bytes, translation, translation_bytes, &code);
+    if (code == NULL) code = "BAD_RESPONSE";
+    if (strlen(code) + 1u > failure_capacity) return 0;
+    memcpy(failure_code, code, strlen(code) + 1u);
+    return accepted;
+}
+
 static HD2CT_BingState fixture_bing_states[2];
 static volatile LONG fixture_bing_state_initialized[2];
 static volatile LONG64 fixture_bing_serial = 1000;
@@ -623,6 +671,29 @@ __declspec(dllexport) int __cdecl fixture_ParseAiResponse(
     return result;
 }
 
+__declspec(dllexport) int __cdecl fixture_ParseAnthropicResponse(
+    char *response, uint32_t response_bytes, uint32_t target_language,
+    char *translation, uint32_t *translation_bytes, char *failure_code,
+    uint32_t failure_capacity)
+{
+    HD2CT_WorkerJob job;
+    const char *code = "BAD_RESPONSE";
+    int accepted;
+    if (response == NULL || translation == NULL || translation_bytes == NULL ||
+        failure_code == NULL || failure_capacity == 0u) return 0;
+    memset(&job, 0, sizeof(job));
+    memcpy(job.source, "Hold this position.", sizeof("Hold this position."));
+    job.source_bytes = (uint32_t)(sizeof("Hold this position.") - 1u);
+    job.target_language = target_language;
+    *translation_bytes = 0u;
+    accepted = hd2ct_parse_anthropic_response(
+        &job, response, response_bytes, translation, translation_bytes, &code);
+    if (code == NULL) code = "BAD_RESPONSE";
+    if (strlen(code) + 1u > failure_capacity) return 0;
+    memcpy(failure_code, code, strlen(code) + 1u);
+    return accepted;
+}
+
 __declspec(dllexport) void __cdecl fixture_ClearRegistry(void)
 {
     SecureZeroMemory(fixture_values, sizeof(fixture_values));
@@ -719,6 +790,38 @@ __declspec(dllexport) uint32_t __cdecl fixture_NormalizeUrl(
     uint32_t adapter_id, const char *url, char *out, uint32_t capacity)
 {
     return hd2ct_normalize_url(url, adapter_id, out, capacity) ? 1u : 0u;
+}
+
+__declspec(dllexport) uint32_t __cdecl fixture_PrepareJobConfig(
+    uint32_t interface_type, char *url, uint32_t url_capacity,
+    char *region, uint32_t region_capacity, uint32_t *adapter_id)
+{
+    HD2CT_WorkerJob job;
+    uint32_t status;
+    size_t url_length;
+    size_t region_length;
+    if (url == NULL || url_capacity == 0u || region == NULL ||
+        region_capacity == 0u || adapter_id == NULL) {
+        return HD2CT_STATUS_INVALID_CONFIG;
+    }
+    url[0] = '\0';
+    region[0] = '\0';
+    *adapter_id = HD2CT_ADAPTER_UNKNOWN;
+    memset(&job, 0, sizeof(job));
+    status = hd2ct_prepare_job_config(&job, interface_type);
+    if (status == HD2CT_STATUS_READY) {
+        url_length = strlen(job.url);
+        region_length = strlen(job.region);
+        if (url_length >= url_capacity || region_length >= region_capacity) {
+            status = HD2CT_STATUS_INVALID_CONFIG;
+        } else {
+            memcpy(url, job.url, url_length + 1u);
+            memcpy(region, job.region, region_length + 1u);
+            *adapter_id = job.adapter_id;
+        }
+    }
+    SecureZeroMemory(&job, sizeof(job));
+    return status;
 }
 
 __declspec(dllexport) uint32_t __cdecl fixture_CacheCount(void)
@@ -932,13 +1035,26 @@ def bing_response(translation: str, target: str = "zh-Hans") -> bytes:
     ).encode("utf-8")
 
 
+def anthropic_response(content: list[dict], stop_reason: str = "end_turn",
+                       **extra: object) -> bytes:
+    response = {
+        "type": "message",
+        "role": "assistant",
+        "stop_reason": stop_reason,
+        "content": content,
+    }
+    response.update(extra)
+    return json.dumps(response, ensure_ascii=False,
+                      separators=(",", ":")).encode("utf-8")
+
+
 class FakeState:
     def __init__(self) -> None:
         self.lock = threading.Lock()
         self.paths: list[str] = []
         self.get_paths: list[str] = []
         self.get_headers: list[dict[str, str]] = []
-        self.payloads: list[dict] = []
+        self.payloads: list[dict | list] = []
         self.content_types: list[str] = []
         self.status = 200
         self.response = provider_response(result_content())
@@ -947,6 +1063,7 @@ class FakeState:
         self.set_cookie = "hd2ct-bing=fixture-cookie; Path=/; HttpOnly"
         self.response_by_target: dict[str, bytes] = {}
         self.response_by_path: dict[str, bytes] = {}
+        self.response_by_payload_kind: dict[str, bytes] = {}
         self.status_by_path: dict[str, int] = {}
         self.delay = 0.0
         self.get_delay = 0.0
@@ -973,6 +1090,7 @@ class FakeState:
             self.get_delay = 0.0
             self.response_by_target.clear()
             self.response_by_path.clear()
+            self.response_by_payload_kind.clear()
             self.status_by_path.clear()
             self.delay_by_path.clear()
             self.response_headers_by_path.clear()
@@ -1086,11 +1204,15 @@ class NativeHttpWorkerTests(unittest.TestCase):
                     response = state.response_by_path.get(path, state.response)
                     has_response_for_path = path in state.response_by_path
                     response_by_target = dict(state.response_by_target)
+                    response_by_payload_kind = dict(state.response_by_payload_kind)
                     response_headers = dict(state.response_headers_by_path.get(path, {}))
                     delay = state.delay_by_path.get(path, state.delay)
                     request_started_marker = state.request_started_marker
-                response_key = payload.get("target") or payload.get("to")
-                if response_key is None and isinstance(payload.get("messages"), list):
+                response_key = None
+                if isinstance(payload, dict):
+                    response_key = payload.get("target") or payload.get("to")
+                if (response_key is None and isinstance(payload, dict) and
+                        isinstance(payload.get("messages"), list)):
                     prompt = payload["messages"][0].get("content", "")
                     if isinstance(prompt, str):
                         response_key = next(
@@ -1107,6 +1229,17 @@ class NativeHttpWorkerTests(unittest.TestCase):
                         )
                 if not has_response_for_path and response_key in response_by_target:
                     response = response_by_target[response_key]
+                if not has_response_for_path and isinstance(payload, dict):
+                    payload_kind = (
+                        "anthropic" if "system" in payload and "max_tokens" in payload
+                        else "chat" if "response_format" in payload
+                        else None
+                    )
+                    if payload_kind in response_by_payload_kind:
+                        response = response_by_payload_kind[payload_kind]
+                elif not has_response_for_path and isinstance(payload, list):
+                    if "bing" in response_by_payload_kind:
+                        response = response_by_payload_kind["bing"]
                 if request_started_marker is not None:
                     request_started_marker.write_text("started", encoding="ascii")
                 if delay:
@@ -1159,6 +1292,10 @@ class NativeHttpWorkerTests(unittest.TestCase):
         ignore_self_value: str | None = None,
         free_service_url: str | None = None,
         bing_base_url: str | None = None,
+        interface_type: int | str | None = None,
+        user_registry_overrides: dict[str, str] | None = None,
+        machine_registry: dict[str, str] | None = None,
+        process_region: str | None = None,
     ) -> dict:
         selected_url = url if url is not None else self.url + "/"
         config = {
@@ -1170,18 +1307,23 @@ class NativeHttpWorkerTests(unittest.TestCase):
         }
         if "baidu" in selected_url.lower() or "youdao" in selected_url.lower():
             config["HD2CT_APP_ID"] = "fake-app-id"
+        if user_registry_overrides:
+            config.update(user_registry_overrides)
         with tempfile.TemporaryDirectory(
             prefix="hd2ct-menu-values-", dir=str(NATIVE_TEST_ROOT)
         ) as temporary_directory:
             values_path = Path(temporary_directory) / "ModOptionsMenu.values"
             registry = {
                 "user": config,
+                "machine": machine_registry or {},
                 "__target_values_path": str(values_path),
                 "__target_primary": self._runtime_values_text(
                     target_language_index, enabled_value, timeout_index,
-                    ignore_self_value,
+                    ignore_self_value, interface_type,
                 ),
             }
+            if process_region is not None:
+                registry["__process_region"] = process_region
             return self.run_environment_child(
                 registry, actions=actions, timeout=timeout,
                 free_service_url=free_service_url,
@@ -1459,6 +1601,7 @@ class NativeHttpWorkerTests(unittest.TestCase):
     def _runtime_values_text(
         target_index: int = 1, enabled_value: str = "true", timeout_index: int = 2,
         ignore_self_value: str | None = None,
+        interface_type: int | str | None = None,
     ) -> str:
         options = TARGET_LANGUAGE_CATALOGUE["menu_options"]
         values = [
@@ -1470,6 +1613,8 @@ class NativeHttpWorkerTests(unittest.TestCase):
             values.append(
                 f"{options['ignore_self']['option_id']}\t{ignore_self_value}\n"
             )
+        if interface_type is not None:
+            values.append(f"{INTERFACE_TYPE_OPTION_ID}\t{interface_type}\n")
         return "".join(values)
 
     def _exercise_target_values_fallbacks(self) -> None:
@@ -2356,6 +2501,486 @@ class NativeHttpWorkerTests(unittest.TestCase):
         self.assertEqual(free_http_error["actions"][1]["result"], "ERR\nFREE_SERVER_ERROR")
         self.assertNotIn("private server error body", json.dumps(free_http_error))
 
+    def _exercise_official_protocol_requests(self) -> None:
+        fixture = ctypes.CDLL(str(self.environment_test_dll()))
+        fixture.fixture_SelectAdapter.argtypes = [ctypes.c_char_p, ctypes.c_char_p]
+        fixture.fixture_SelectAdapter.restype = ctypes.c_uint32
+        auto_routes = (
+            (b"", b"fake-model", 6),
+            (b"http://127.0.0.1/anthropic/custom", b"fake-model", 8),
+            (b"http://127.0.0.1/custom/messages/", b"fake-model", 8),
+            (b"http://127.0.0.1/openai/compat", b"claude-leftover", 1),
+            (b"http://127.0.0.1/bing/custom", b"", 7),
+            (b"http://127.0.0.1/google/bing", b"", 2),
+            (b"http://127.0.0.1/baidu", b"", 3),
+            (b"http://127.0.0.1/youdao", b"", 4),
+            (b"http://127.0.0.1/custom-service", b"", 5),
+        )
+        for url, model, expected in auto_routes:
+            with self.subTest(auto_route=(url, model)):
+                self.assertEqual(fixture.fixture_SelectAdapter(url, model), expected)
+        fixture.fixture_SelectAdapter = None
+        fixture_handle = fixture._handle
+        del fixture
+        gc.collect()
+        free_library = ctypes.windll.kernel32.FreeLibrary
+        free_library.argtypes = [ctypes.c_void_p]
+        free_library.restype = ctypes.c_int
+        self.assertEqual(free_library(fixture_handle), 1)
+
+        normalization_cases = (
+            (7, self.url, self.url + "/translate"),
+            (7, "https://eastus.cognitiveservices.azure.com",
+             "https://eastus.cognitiveservices.azure.com/translator/text/v3.0/translate"),
+            (7, "https://eastasia.cognitiveservices.azure.cn",
+             "https://eastasia.cognitiveservices.azure.cn/translator/text/v3.0/translate"),
+            (7, "https://api.translator.azure.cn",
+             "https://api.translator.azure.cn/translate"),
+            (8, self.url, self.url + "/v1/messages"),
+            (8, self.url + "/v1", self.url + "/v1/messages"),
+            (8, self.url + "/v1/", self.url + "/v1/messages"),
+            (8, self.url + "/custom/messages", self.url + "/custom/messages"),
+            (7, self.url + "/custom/bing", self.url + "/custom/bing"),
+        )
+        normalization_actions = [
+            {"op": "normalize", "adapter_id": adapter_id, "url": url}
+            for adapter_id, url, _ in normalization_cases
+        ]
+        normalization_actions.extend([
+            {"op": "normalize", "adapter_id": 7, "url": self.url + "?unsafe=query"},
+            {"op": "normalize", "adapter_id": 8, "url": self.url + "#unsafe"},
+        ])
+        normalized = self.run_environment_child({}, actions=normalization_actions)
+        for index, (_, _, expected) in enumerate(normalization_cases):
+            self.assertEqual(normalized["actions"][index], {
+                "accepted": 1, "url": expected,
+            })
+        self.assertEqual(normalized["actions"][-2]["accepted"], 0)
+        self.assertEqual(normalized["actions"][-1]["accepted"], 0)
+
+        for interface_type, expected_url in (
+            (6, "https://api.translator.azure.cn/translate"),
+            (7, "https://api.cognitive.microsofttranslator.com/translate"),
+        ):
+            with self.subTest(bing_default_interface=interface_type):
+                self.state.clear()
+                prepared = self.run_child(
+                    "",
+                    actions=[{"op": "prepare_config",
+                              "interface_type": interface_type}],
+                    interface_type=interface_type,
+                    model="",
+                )
+                self.assertEqual(prepared["actions"][0], {
+                    "status": 0,
+                    "url": expected_url,
+                    "region": "",
+                    "adapter_id": 7,
+                })
+                self.assertEqual(self.state.paths, [])
+
+        self.state.clear()
+        source = "Need an extraction route."
+        anthropic_json = result_content("正在前往撤离点", is_target_language=False)
+        self.state.response = anthropic_response([
+            {"type": "text", "text": anthropic_json[:13]},
+            {"type": "text", "text": anthropic_json[13:]},
+        ])
+        automatic_anthropic = self.run_child(
+            self.url + "/messages",
+            [
+                {"op": "submit", "token": "anthropic-auto",
+                 "body_hex": source.encode("utf-8").hex()},
+                {"op": "wait", "token": "anthropic-auto"},
+            ],
+            model="fake-model",
+        )
+        self.assertEqual(automatic_anthropic["actions"][1]["result"],
+                         "OK\n正在前往撤离点")
+        self.assertEqual(self.state.paths, ["/messages"])
+        payload = self.state.payloads[0]
+        self.assertEqual(set(payload), {"model", "max_tokens", "system", "messages"})
+        self.assertEqual(payload["model"], "fake-model")
+        self.assertEqual(payload["max_tokens"], 4096)
+        self.assertEqual(payload["messages"], [{"role": "user", "content": source}])
+        self.assertIn("目标语言为简体中文", payload["system"])
+        self.assertNotIn("response_format", payload)
+        self.assertNotIn("tools", payload)
+        headers = {name.lower(): value for name, value in self.state.headers[0].items()}
+        self.assertEqual(headers.get("x-api-key"), "fake-api-key")
+        self.assertEqual(headers.get("anthropic-version"), ANTHROPIC_VERSION)
+        self.assertNotIn("authorization", headers)
+
+        self.state.clear()
+        self.state.response = anthropic_response([
+            {"type": "text", "text": result_content("繁體翻譯")},
+        ])
+        traditional = self.run_child(
+            self.url + "/anthropic-custom",
+            [
+                {"op": "submit", "token": "anthropic-traditional",
+                 "body_hex": source.encode("utf-8").hex()},
+                {"op": "wait", "token": "anthropic-traditional"},
+            ],
+            target_language_index=2,
+            model="stale-chat-model",
+            interface_type=3,
+        )
+        self.assertEqual(traditional["actions"][1]["result"], "OK\n繁體翻譯")
+        self.assertEqual(self.state.paths, ["/anthropic-custom"])
+        self.assertIn("繁體中文", self.state.payloads[0]["system"])
+        self.assertNotIn("Charger=牛", self.state.payloads[0]["system"])
+        self.assertNotIn("lol=哈哈", self.state.payloads[0]["system"])
+
+        self.state.clear()
+        source = "Move to extraction."
+        self.state.response_by_payload_kind = {
+            "chat": provider_response(result_content("Chat translation")),
+            "anthropic": anthropic_response([
+                {"type": "text", "text": result_content("Anthropic translation")},
+            ]),
+            "bing": bing_response("Bing translation"),
+        }
+        switched = self.run_child(
+            self.url + "/shared-custom-endpoint",
+            [
+                {"op": "submit", "token": "interface-chat-one",
+                 "body_hex": source.encode("utf-8").hex()},
+                {"op": "wait", "token": "interface-chat-one"},
+                {"op": "target_file", "kind": "primary",
+                 "contents": self._runtime_values_text(interface_type=3)},
+                {"op": "submit", "token": "interface-anthropic",
+                 "body_hex": source.encode("utf-8").hex()},
+                {"op": "wait", "token": "interface-anthropic"},
+                {"op": "target_file", "kind": "primary",
+                 "contents": self._runtime_values_text(interface_type=7)},
+                {"op": "submit", "token": "interface-bing",
+                 "body_hex": source.encode("utf-8").hex()},
+                {"op": "wait", "token": "interface-bing"},
+                {"op": "target_file", "kind": "primary",
+                 "contents": self._runtime_values_text(interface_type=2)},
+                {"op": "submit", "token": "interface-chat-cache",
+                 "body_hex": source.encode("utf-8").hex()},
+                {"op": "wait", "token": "interface-chat-cache"},
+            ],
+            model="stale-claude-model",
+            interface_type=2,
+            user_registry_overrides={
+                "HD2CT_APP_ID": "invalid app id",
+                "HD2CT_REGION": "user-east-2",
+            },
+            machine_registry={"HD2CT_REGION": "machine-west"},
+            process_region="process-fake-region",
+        )
+        self.assertEqual(switched["actions"][1]["result"], "OK\nChat translation")
+        self.assertEqual(switched["actions"][4]["result"], "OK\nAnthropic translation")
+        self.assertEqual(switched["actions"][7]["result"], "OK\nBing translation")
+        self.assertEqual(switched["actions"][10]["result"], "OK\nChat translation")
+        self.assertEqual(self.state.paths, [
+            "/shared-custom-endpoint",
+            "/shared-custom-endpoint",
+            "/shared-custom-endpoint?api-version=3.0&to=zh-Hans",
+        ])
+        self.assertEqual(len(self.state.payloads), 3)
+        self.assertEqual(self.state.payloads[2], [{"Text": source}])
+        self.assertEqual(self.state.payloads[1]["system"],
+                         self.state.payloads[0]["messages"][0]["content"])
+        bing_headers = {
+            name.lower(): value for name, value in self.state.headers[2].items()
+        }
+        self.assertEqual(bing_headers.get("ocp-apim-subscription-key"), "fake-api-key")
+        self.assertEqual(bing_headers.get("ocp-apim-subscription-region"), "user-east-2")
+        self.assertNotIn("authorization", bing_headers)
+        self.assertEqual(parse_qs(urlsplit(self.state.paths[2]).query), {
+            "api-version": ["3.0"], "to": ["zh-Hans"],
+        })
+        self.assertEqual(switched["cache_count"], 3)
+
+        self.state.clear()
+        self.state.response = bing_response("自动识别回退")
+        invalid_menu_fallback = self.run_child(
+            self.url + "/bing-invalid-menu",
+            [
+                {"op": "submit", "token": "invalid-menu-auto",
+                 "body_hex": source.encode("utf-8").hex()},
+                {"op": "wait", "token": "invalid-menu-auto"},
+            ],
+            model="",
+            interface_type=9,
+        )
+        self.assertEqual(invalid_menu_fallback["actions"][1]["result"],
+                         "OK\n自动识别回退")
+        self.assertEqual(urlsplit(self.state.paths[0]).path, "/bing-invalid-menu")
+
+        self.state.clear()
+        self.state.response = bing_response("显式恢复")
+        recovered = self.run_child(
+            self.url + "/unsupported-bootstrap",
+            [
+                {"op": "submit", "token": "explicit-recovers-bootstrap",
+                 "body_hex": source.encode("utf-8").hex()},
+                {"op": "wait", "token": "explicit-recovers-bootstrap"},
+            ],
+            model="",
+            interface_type=7,
+        )
+        self.assertEqual(recovered["actions"][1]["result"], "OK\n显式恢复")
+        self.assertEqual(urlsplit(self.state.paths[0]).path, "/unsupported-bootstrap")
+
+        self.state.clear()
+        self.state.response = google_response("Google translation", "en")
+        irrelevant_values = self.run_child(
+            self.url + "/google-explicit",
+            [
+                {"op": "submit", "token": "google-ignores-ai-and-region",
+                 "body_hex": source.encode("utf-8").hex()},
+                {"op": "wait", "token": "google-ignores-ai-and-region"},
+            ],
+            model="stale-claude-model",
+            interface_type=8,
+            user_registry_overrides={
+                "HD2CT_APP_ID": "invalid app id",
+                "HD2CT_REGION": "invalid_region!",
+            },
+            process_region="process-fake-region",
+        )
+        self.assertEqual(irrelevant_values["actions"][1]["result"],
+                         "OK\nGoogle translation")
+        google_headers = {
+            name.lower(): value for name, value in self.state.headers[0].items()
+        }
+        self.assertNotIn("ocp-apim-subscription-region", google_headers)
+
+        self.state.clear()
+        self.state.response = bing_response("空 region 合法")
+        empty_region = self.run_child(
+            self.url + "/bing-empty-region",
+            [
+                {"op": "submit", "token": "bing-empty-region",
+                 "body_hex": source.encode("utf-8").hex()},
+                {"op": "wait", "token": "bing-empty-region"},
+            ],
+            interface_type=7,
+            user_registry_overrides={"HD2CT_REGION": ""},
+            machine_registry={"HD2CT_REGION": "machine-region"},
+            process_region="process-fake-region",
+        )
+        self.assertEqual(empty_region["actions"][1]["result"], "OK\n空 region 合法")
+        empty_headers = {
+            name.lower(): value for name, value in self.state.headers[0].items()
+        }
+        self.assertNotIn("ocp-apim-subscription-region", empty_headers)
+
+        self.state.clear()
+        invalid_region = self.run_child(
+            self.url + "/bing-invalid-region",
+            [
+                {"op": "submit", "token": "bing-invalid-region",
+                 "body_hex": source.encode("utf-8").hex()},
+                {"op": "wait", "token": "bing-invalid-region"},
+            ],
+            interface_type=7,
+            user_registry_overrides={"HD2CT_REGION": "invalid_region!"},
+            machine_registry={"HD2CT_REGION": "machine-region"},
+            process_region="process-region",
+        )
+        self.assertEqual(invalid_region["actions"][1]["result"], "ERR\nINVALID_CONFIG")
+        self.assertEqual(self.state.paths, [])
+
+        self.state.clear()
+        self.state.response = free_success_response("FREE translation")
+        free_selected = self.run_child(
+            self.url + "/unsupported-free-bootstrap",
+            [
+                {"op": "submit", "token": "explicit-free",
+                 "body_hex": source.encode("utf-8").hex(),
+                 "player_name": "Fixture Player"},
+                {"op": "wait", "token": "explicit-free"},
+            ],
+            model="",
+            interface_type=1,
+            free_service_url=self.url + "/translate",
+        )
+        self.assertEqual(free_selected["actions"][1]["result"], "OK\nFREE translation")
+        self.assertEqual(self.state.paths, ["/translate"])
+        self.assertNotIn("/unsupported-free-bootstrap", " ".join(self.state.paths))
+
+        for name, enabled_value, flags in (
+            ("disabled-before-config", "false", 0),
+            ("self-before-config", "true", 1),
+        ):
+            with self.subTest(explicit_skip=name):
+                self.state.clear()
+                actions = [
+                    {"op": "submit", "token": name, "flags": flags,
+                     "body_hex": source.encode("utf-8").hex()},
+                    {"op": "wait", "token": name},
+                ]
+                skipped = self.run_child(
+                    self.url + "/messages",
+                    actions,
+                    model="",
+                    enabled_value=enabled_value,
+                    interface_type=3,
+                )
+                self.assertEqual(skipped["actions"][1]["result"], "SKIP\n")
+                self.assertEqual(self.state.paths, [])
+
+    def _exercise_official_response_parsers(self) -> None:
+        fixture = ctypes.CDLL(str(self.environment_test_dll()))
+        function_argtypes = [
+            ctypes.c_void_p, ctypes.c_uint32, ctypes.c_uint32,
+            ctypes.c_void_p, ctypes.POINTER(ctypes.c_uint32),
+            ctypes.c_void_p, ctypes.c_uint32,
+        ]
+        for function_name in (
+            "fixture_ParseAnthropicResponse",
+            "fixture_ParseOfficialBingResponse",
+        ):
+            function = getattr(fixture, function_name)
+            function.argtypes = function_argtypes
+            function.restype = ctypes.c_int
+
+        def parse_response(
+            function_name: str, response: bytes, target_language: int = 1,
+        ) -> tuple[bool, str, str]:
+            body = ctypes.create_string_buffer(response, len(response) + 1)
+            translation = ctypes.create_string_buffer(16385)
+            written = ctypes.c_uint32()
+            failure_code = ctypes.create_string_buffer(64)
+            accepted = getattr(fixture, function_name)(
+                ctypes.cast(body, ctypes.c_void_p), len(response), target_language,
+                ctypes.cast(translation, ctypes.c_void_p), ctypes.byref(written),
+                ctypes.cast(failure_code, ctypes.c_void_p), len(failure_code),
+            )
+            return (
+                bool(accepted),
+                translation.raw[:written.value].decode("utf-8"),
+                failure_code.value.decode("ascii"),
+            )
+
+        inner = result_content("Anthropic parser translation")
+        complete = anthropic_response([
+            {"type": "text", "text": inner[:11]},
+            {"type": "text", "text": inner[11:]},
+        ])
+        accepted, translation, failure = parse_response(
+            "fixture_ParseAnthropicResponse", complete,
+        )
+        self.assertTrue(accepted)
+        self.assertEqual(translation, "Anthropic parser translation")
+        self.assertEqual(failure, "BAD_RESPONSE")
+        stop_sequence = anthropic_response(
+            [{"type": "text", "text": inner}], stop_reason="stop_sequence",
+        )
+        self.assertTrue(parse_response(
+            "fixture_ParseAnthropicResponse", stop_sequence,
+        )[0])
+        already_target = anthropic_response([
+            {"type": "text", "text": result_content("ignored", True)},
+        ])
+        accepted, translation, _ = parse_response(
+            "fixture_ParseAnthropicResponse", already_target,
+        )
+        self.assertTrue(accepted)
+        self.assertEqual(translation, "Hold this position.")
+
+        anthropic_invalid = (
+            ("malformed-json", b"not JSON", "BAD_RESPONSE"),
+            ("wrong-role", anthropic_response(
+                [{"type": "text", "text": inner}], role="user",
+            ), "BAD_RESPONSE"),
+            ("max-tokens", anthropic_response(
+                [{"type": "text", "text": inner}], stop_reason="max_tokens",
+            ), "BAD_RESPONSE"),
+            ("unknown-stop", anthropic_response(
+                [{"type": "text", "text": inner}], stop_reason="pending",
+            ), "BAD_RESPONSE"),
+            ("stop-details-refusal", anthropic_response(
+                [{"type": "text", "text": inner}],
+                stop_details={"type": "refusal"},
+            ), "BAD_RESPONSE"),
+            ("tool-use", anthropic_response([
+                {"type": "tool_use", "id": "fixture", "name": "x"},
+            ], stop_reason="tool_use"), "BAD_RESPONSE"),
+            ("empty-content", anthropic_response([]), "BAD_RESPONSE"),
+            ("inner-extra-field", anthropic_response([
+                {"type": "text", "text": '{"is_target_language":false,'
+                 '"translation":"bad","extra":1}'},
+            ]), "BAD_RESPONSE"),
+            ("inner-duplicate-field", anthropic_response([
+                {"type": "text", "text": '{"is_target_language":false,'
+                 '"translation":"one","translation":"two"}'},
+            ]), "BAD_RESPONSE"),
+            ("inner-nul", anthropic_response([
+                {"type": "text", "text": '{"is_target_language":false,'
+                 '"translation":"\\u0000"}'},
+            ]), "BAD_RESPONSE"),
+            ("error-object", json.dumps({
+                "type": "error", "error": {"message": "private anthropic error"},
+            }, separators=(",", ":")).encode("utf-8"), "SERVICE_ERROR"),
+            ("invalid-utf8", b'{"type":"message","role":"assistant",'
+             b'"stop_reason":"end_turn","content":[{"type":"text",'
+             b'"text":"\xff"}]}', "BAD_RESPONSE"),
+        )
+        for name, response, expected_code in anthropic_invalid:
+            with self.subTest(anthropic_response=name):
+                accepted, translation, code = parse_response(
+                    "fixture_ParseAnthropicResponse", response,
+                )
+                self.assertFalse(accepted)
+                self.assertEqual(translation, "")
+                self.assertEqual(code, expected_code)
+                self.assertNotIn("private anthropic error", code)
+
+        bing_valid = bing_response("Bing parser translation", "zh-Hans")
+        accepted, translation, failure = parse_response(
+            "fixture_ParseOfficialBingResponse", bing_valid,
+        )
+        self.assertTrue(accepted)
+        self.assertEqual(translation, "Bing parser translation")
+        self.assertEqual(failure, "BAD_RESPONSE")
+        bing_invalid = (
+            ("malformed-json", b"not JSON", "BAD_RESPONSE"),
+            ("wrong-target", bing_response("wrong target", "en"), "BAD_RESPONSE"),
+            ("multiple-responses", b'[{"translations":[{"text":"a",'
+             b'"to":"zh-Hans"}]},{"translations":[{"text":"b",'
+             b'"to":"zh-Hans"}]}]', "BAD_RESPONSE"),
+            ("multiple-translations", b'[{"translations":[{"text":"a",'
+             b'"to":"zh-Hans"},{"text":"b","to":"zh-Hans"}]}]',
+             "BAD_RESPONSE"),
+            ("missing-to", b'[{"translations":[{"text":"missing target"}]}]',
+             "BAD_RESPONSE"),
+            ("duplicate-text", b'[{"translations":[{"text":"one",'
+             b'"text":"two","to":"zh-Hans"}]}]', "BAD_RESPONSE"),
+            ("escaped-nul", b'[{"translations":[{"text":"\\u0000",'
+             b'"to":"zh-Hans"}]}]', "BAD_RESPONSE"),
+            ("error-object", b'{"error":{"message":"private Bing error"}}',
+             "SERVICE_ERROR"),
+            ("invalid-utf8", b'[{"translations":[{"text":"\xff",'
+             b'"to":"zh-Hans"}]}]', "BAD_RESPONSE"),
+        )
+        for name, response, expected_code in bing_invalid:
+            with self.subTest(official_bing_response=name):
+                accepted, translation, code = parse_response(
+                    "fixture_ParseOfficialBingResponse", response,
+                )
+                self.assertFalse(accepted)
+                self.assertEqual(translation, "")
+                self.assertEqual(code, expected_code)
+                self.assertNotIn("private Bing error", code)
+
+        fixture.fixture_ParseAnthropicResponse = None
+        fixture.fixture_ParseOfficialBingResponse = None
+        fixture_handle = fixture._handle
+        del parse_response
+        del fixture
+        gc.collect()
+        free_library = ctypes.windll.kernel32.FreeLibrary
+        free_library.argtypes = [ctypes.c_void_p]
+        free_library.restype = ctypes.c_int
+        self.assertEqual(free_library(fixture_handle), 1)
+
     def test_endpoint_completion_covers_root_v1_and_custom_paths(self) -> None:
         cases = (
             ("", "/chat/completions"),
@@ -2777,6 +3402,8 @@ class NativeHttpWorkerTests(unittest.TestCase):
         for adapter_name in ("ai", "google", "baidu", "youdao"):
             self._exercise_target_language_adapter(adapter_name)
         self.assert_environment_initialization_uses_registry()
+        self._exercise_official_protocol_requests()
+
     def test_english_translation_preserves_chinese_and_model_translation(self) -> None:
         self.state.response = provider_response(result_content("前往撤离点", is_target_language=False))
         english = "Move to extraction"
@@ -3368,6 +3995,46 @@ class NativeHttpWorkerTests(unittest.TestCase):
         free_library.argtypes = [ctypes.c_void_p]
         free_library.restype = ctypes.c_int
         self.assertEqual(free_library(fixture_handle), 1)
+
+        for interface_type, route_name in ((3, "anthropic"), (7, "bing")):
+            with self.subTest(official_http_401=route_name):
+                self.state.clear()
+                self.state.status = 401
+                self.state.response = f"private {route_name} HTTP body".encode("utf-8")
+                unauthorized = self.run_child(
+                    self.url + "/shared-401",
+                    [
+                        {"op": "submit", "token": "official-401-" + route_name,
+                         "body_hex": "4869"},
+                        {"op": "wait", "token": "official-401-" + route_name},
+                    ],
+                    interface_type=interface_type,
+                )
+                self.assertEqual(unauthorized["actions"][1]["result"], "ERR\nHTTP_401")
+                self.assertNotIn(f"private {route_name} HTTP body",
+                                 json.dumps(unauthorized))
+
+        for interface_type, route_name, error_body in (
+            (3, "anthropic", b'{"type":"error","error":{"message":"private anthropic body"}}'),
+            (7, "bing", b'{"error":{"message":"private Bing body"}}'),
+        ):
+            with self.subTest(official_error_body=route_name):
+                self.state.clear()
+                self.state.response = error_body
+                failed = self.run_child(
+                    self.url + "/shared-provider-error",
+                    [
+                        {"op": "submit", "token": "official-error-" + route_name,
+                         "body_hex": "4869"},
+                        {"op": "wait", "token": "official-error-" + route_name},
+                    ],
+                    interface_type=interface_type,
+                )
+                self.assertEqual(failed["actions"][1]["result"],
+                                 "ERR\nSERVICE_ERROR")
+                self.assertNotIn(error_body.decode("utf-8"), json.dumps(failed))
+
+        self._exercise_official_response_parsers()
 
     def test_game_thread_submit_does_not_wait_for_slow_http(self) -> None:
         self.state.delay = 0.6

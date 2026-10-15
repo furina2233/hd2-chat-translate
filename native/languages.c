@@ -18,6 +18,8 @@ typedef struct HD2CT_ParsedValues {
     uint32_t ignore_self_valid;
     uint32_t timeout_index;
     uint32_t timeout_valid;
+    uint32_t interface_type;
+    uint32_t interface_type_valid;
 } HD2CT_ParsedValues;
 
 const HD2CT_TargetLanguage *hd2ct_target_language(uint32_t index)
@@ -163,12 +165,14 @@ static int hd2ct_parse_values_text(const unsigned char *text, size_t length,
     static const char enabled_option_id[] = HD2CT_ENABLED_OPTION_ID;
     static const char ignore_self_option_id[] = HD2CT_IGNORE_SELF_OPTION_ID;
     static const char timeout_option_id[] = HD2CT_TIMEOUT_OPTION_ID;
+    static const char interface_type_option_id[] = HD2CT_INTERFACE_TYPE_OPTION_ID;
     size_t cursor = 0u;
     memset(parsed, 0, sizeof(*parsed));
     parsed->target_language = HD2CT_DEFAULT_TARGET_LANGUAGE;
     parsed->enabled = HD2CT_ENABLED_DEFAULT;
     parsed->ignore_self = HD2CT_IGNORE_SELF_DEFAULT;
     parsed->timeout_index = HD2CT_DEFAULT_TIMEOUT_INDEX;
+    parsed->interface_type = HD2CT_INTERFACE_AUTO;
     while (cursor < length) {
         size_t line_start = cursor;
         size_t line_end;
@@ -181,6 +185,7 @@ static int hd2ct_parse_values_text(const unsigned char *text, size_t length,
         int enabled_line;
         int ignore_self_line;
         int timeout_line;
+        int interface_type_line;
         while (cursor < length && text[cursor] != '\r' && text[cursor] != '\n') {
             if (text[cursor] == '\t' && tab == SIZE_MAX) tab = cursor;
             ++cursor;
@@ -204,6 +209,10 @@ static int hd2ct_parse_values_text(const unsigned char *text, size_t length,
         timeout_line = tab - line_start == sizeof(timeout_option_id) - 1u &&
             memcmp(text + line_start, timeout_option_id,
                    sizeof(timeout_option_id) - 1u) == 0;
+        interface_type_line = tab - line_start ==
+                sizeof(interface_type_option_id) - 1u &&
+            memcmp(text + line_start, interface_type_option_id,
+                   sizeof(interface_type_option_id) - 1u) == 0;
         for (i = tab + 1u; i < line_end; ++i) {
             if (text[i] == '\t') {
                 extra_tab = 1;
@@ -230,6 +239,11 @@ static int hd2ct_parse_values_text(const unsigned char *text, size_t length,
             parsed->timeout_valid = !extra_tab && hd2ct_parse_index(
                 value, value_length, HD2CT_TIMEOUT_CHOICE_COUNT,
                 &parsed->timeout_index);
+        } else if (interface_type_line) {
+            parsed->interface_type = HD2CT_INTERFACE_AUTO;
+            parsed->interface_type_valid = !extra_tab && hd2ct_parse_index(
+                value, value_length, HD2CT_INTERFACE_TYPE_COUNT,
+                &parsed->interface_type);
         }
     }
     return parsed->any_valid_line != 0u;
@@ -261,6 +275,9 @@ static void hd2ct_apply_parsed_values(const HD2CT_ParsedValues *parsed,
         settings->timeout_seconds =
             g_hd2ct_timeout_seconds[parsed->timeout_index - 1u];
     }
+    if (parsed->interface_type_valid != 0u) {
+        settings->interface_type = parsed->interface_type;
+    }
 }
 
 void hd2ct_read_applied_settings(HD2CT_RuntimeSettings *settings)
@@ -272,6 +289,7 @@ void hd2ct_read_applied_settings(HD2CT_RuntimeSettings *settings)
     int read_ok;
     if (settings == NULL) return;
     settings->target_language = HD2CT_DEFAULT_TARGET_LANGUAGE;
+    settings->interface_type = HD2CT_INTERFACE_AUTO;
     settings->timeout_seconds = HD2CT_DEFAULT_TIMEOUT_SECONDS;
     settings->enabled = HD2CT_ENABLED_DEFAULT;
     settings->ignore_self = HD2CT_IGNORE_SELF_DEFAULT;

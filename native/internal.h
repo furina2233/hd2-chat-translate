@@ -29,6 +29,8 @@
 #define HD2CT_MAX_URL 2048u
 #define HD2CT_MAX_MODEL 256u
 #define HD2CT_MAX_KEY 4096u
+#define HD2CT_MAX_REGION 64u
+#define HD2CT_CACHE_FINGERPRINT_LENGTH 64u
 #define HD2CT_MAX_RESPONSE 1000000u
 #define HD2CT_MAX_VALUES_FILE_BYTES (512u * 1024u)
 #define HD2CT_MAX_VALUES_PATH 32768u
@@ -65,7 +67,21 @@ enum {
     HD2CT_ADAPTER_BAIDU = 3,
     HD2CT_ADAPTER_YOUDAO = 4,
     HD2CT_ADAPTER_UNKNOWN = 5,
-    HD2CT_ADAPTER_FREE = 6
+    HD2CT_ADAPTER_FREE = 6,
+    HD2CT_ADAPTER_BING = 7,
+    HD2CT_ADAPTER_ANTHROPIC = 8
+};
+
+enum {
+    HD2CT_INTERFACE_AUTO = 0,
+    HD2CT_INTERFACE_FREE = 1,
+    HD2CT_INTERFACE_CHAT_COMPLETIONS = 2,
+    HD2CT_INTERFACE_ANTHROPIC = 3,
+    HD2CT_INTERFACE_BAIDU = 4,
+    HD2CT_INTERFACE_YOUDAO = 5,
+    HD2CT_INTERFACE_BING_CN = 6,
+    HD2CT_INTERFACE_BING_GLOBAL = 7,
+    HD2CT_INTERFACE_GOOGLE = 8
 };
 
 typedef struct HD2CT_WorkerJob {
@@ -81,7 +97,11 @@ typedef struct HD2CT_WorkerJob {
     char model[HD2CT_MAX_MODEL + 1u];
     char api_key[HD2CT_MAX_KEY + 1u];
     char app_id[HD2CT_MAX_KEY + 1u];
+    char region[HD2CT_MAX_REGION + 1u];
     uint32_t adapter_id;
+    uint32_t interface_type;
+    uint32_t cache_fingerprint_valid;
+    char cache_fingerprint[HD2CT_CACHE_FINGERPRINT_LENGTH + 1u];
     uint32_t target_language;
     uint32_t timeout_seconds;
     uint32_t menu_enabled;
@@ -123,6 +143,7 @@ enum {
 
 typedef struct HD2CT_RuntimeSettings {
     uint32_t target_language;
+    uint32_t interface_type;
     uint32_t timeout_seconds;
     uint32_t enabled;
     uint32_t ignore_self;
@@ -145,6 +166,9 @@ typedef struct HD2CT_BuiltRequest {
     const char *header_name;
     const char *header_prefix;
     const char *header_value;
+    const char *header2_name;
+    const char *header2_value;
+    char query[128];
 } HD2CT_BuiltRequest;
 
 typedef struct HD2CT_AdapterBase {
@@ -190,9 +214,12 @@ int hd2ct_local_http_host(const wchar_t *host);
 int hd2ct_normalize_url(const char *input, uint32_t adapter_id,
                         char *normalized, size_t normalized_capacity);
 int hd2ct_valid_secret(const char *value, size_t maximum);
+int hd2ct_valid_region(const char *value);
 int hd2ct_valid_model_key(const char *model, const char *api_key);
 int hd2ct_read_environment_value(const wchar_t *name, char *out,
                                  size_t out_capacity, int *present);
+uint32_t hd2ct_prepare_job_config(HD2CT_WorkerJob *job,
+                                  uint32_t interface_type);
 
 /* 共享菜单目录与MOM已应用设置读取。 */
 const HD2CT_TargetLanguage *hd2ct_target_language(uint32_t index);
@@ -218,6 +245,23 @@ int hd2ct_build_ai_request(const HD2CT_WorkerJob *job, HD2CT_BuiltRequest *reque
 int hd2ct_parse_ai_response(const HD2CT_WorkerJob *job, char *body,
                             size_t body_bytes, char *translation,
                             uint32_t *translation_bytes, const char **failure_code);
+int hd2ct_make_ai_system_prompt(const HD2CT_WorkerJob *job, char *output,
+                                size_t output_capacity);
+int hd2ct_parse_ai_translation_json(const char *source, uint32_t source_bytes,
+                                    char *json, size_t json_bytes,
+                                    char *translation,
+                                    uint32_t *translation_bytes);
+int hd2ct_build_bing_request(const HD2CT_WorkerJob *job, HD2CT_BuiltRequest *request);
+int hd2ct_parse_bing_response(const HD2CT_WorkerJob *job, char *body,
+                              size_t body_bytes, char *translation,
+                              uint32_t *translation_bytes,
+                              const char **failure_code);
+int hd2ct_build_anthropic_request(const HD2CT_WorkerJob *job,
+                                  HD2CT_BuiltRequest *request);
+int hd2ct_parse_anthropic_response(const HD2CT_WorkerJob *job, char *body,
+                                   size_t body_bytes, char *translation,
+                                   uint32_t *translation_bytes,
+                                   const char **failure_code);
 int hd2ct_build_google_request(const HD2CT_WorkerJob *job, HD2CT_BuiltRequest *request);
 int hd2ct_parse_google_response(const HD2CT_WorkerJob *job, char *body,
                                size_t body_bytes, char *translation,

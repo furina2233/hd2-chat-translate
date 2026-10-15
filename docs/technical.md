@@ -8,7 +8,7 @@
 - [game/chat_probe_core.lua](../game/chat_probe_core.lua) 校验固定游戏构建及代码签名，并限制内存读取。
 - [game/chat_translate_core.lua](../game/chat_translate_core.lua) 管理新消息、请求队列、响应、过期和回写状态。
 - [game/chat_http_native.lua](../game/chat_http_native.lua) 校验并加载随包嵌入的原生 DLL。
-- [game/settings.lua](../game/settings.lua) 向 Mod Options Menu 注册目标语言、启用、自己消息过滤和请求超时选项，不读取服务凭据。
+- [game/settings.lua](../game/settings.lua) 向 Mod Options Menu 注册目标语言、启用、自己消息过滤、请求超时和接口类型选项，不读取服务凭据。
 - [native/client.c](../native/client.c) 管理公开 ABI、后台线程、队列、缓存与限流；原生客户端各模块共同链接为一个 DLL。
 - [tools/build_package.py](../tools/build_package.py) 将 Lua addon 和原生模块构建为含前置或需单独安装前置的 Arsenal 安装包。
 
@@ -25,15 +25,20 @@
 | [config.c](../native/config.c) | 持久环境变量读取、配置校验和 URL 补全 |
 | [languages.c](../native/languages.c) | 后台读取已应用的目标语言并提供服务商语言码 |
 | [adapter/base.c](../native/adapter/base.c) | 基适配器、服务选型、适配器表与共用表单、签名工具 |
-| [adapter/chat_completions.c](../native/adapter/chat_completions.c) | Chat Completions 请求、提示词与响应解析 |
+| [adapter/ai_common.c](../native/adapter/ai_common.c) | 两种 AI 协议共用的提示词和译文 JSON 校验 |
+| [adapter/chat_completions.c](../native/adapter/chat_completions.c) | Chat Completions 请求与响应解析 |
+| [adapter/anthropic.c](../native/adapter/anthropic.c) | Anthropic Messages 请求与响应解析 |
 | [adapter/google.c](../native/adapter/google.c) | Google Basic v2 请求与响应解析 |
 | [adapter/baidu.c](../native/adapter/baidu.c) | 百度通用翻译请求与响应解析 |
 | [adapter/youdao.c](../native/adapter/youdao.c) | 有道文本翻译请求与响应解析 |
-| [adapter/bing.c](../native/adapter/bing.c) | FREE 首选的 Bing 网页会话、请求与响应解析 |
+| [adapter/bing.c](../native/adapter/bing.c) | Azure 中国区与全球 Translator 官方接口 |
+| [adapter/bing_rp.c](../native/adapter/bing_rp.c) | FREE 首选的 Bing 网页会话、请求与响应解析 |
 | [adapter/free.c](../native/adapter/free.c) | FREE 后备服务的请求、姓名哈希与响应解析 |
 | [transport.c](../native/transport.c) | WinHTTP 传输、请求截止时间、取消检查与网络资源清理 |
 
 各 `.c` 文件独立编译，私有函数只在 DLL 内链接。队列及线程共享状态集中在入口模块，通过少量私有函数协作；JSON 解析使用仓库内的 cJSON v1.7.19。
+
+安装包将原生 DLL 的十六进制载荷、Lua 模块和菜单数据合并到同一聊天 addon 资源中，合并结果须满足512 KiB上限。菜单字符串直接保存 UTF-8，转义引号、反斜杠和 ASCII 控制字符；打包及 LuaJIT 测试共同校验生成源码。
 
 客户端基础模块放在 `native/`，翻译适配器及其共用实现放在 `native/adapter/`，第三方依赖放在 `native/vendor/`。源码文件名使用按职责或接口命名的小写 `snake_case`；内部符号保留 `hd2ct_` 前缀，公开 ABI 保留 `HD2CT_` 前缀，交付 DLL 名为 `hd2ct_http.dll`。
 
@@ -57,19 +62,23 @@
 
 ## 配置与 HTTP/JSON 协议
 
-首次有效提交由原生客户端启动一次后台初始化，读取服务配置的 Windows 持久环境变量：先读 HKCU\Environment，再读 HKLM\SYSTEM\CurrentControlSet\Control\Session Manager\Environment。若用户变量存在，即使值为空或无效，也不回退到系统变量；不读取进程继承值。每个进程只初始化一次；服务选择、地址、凭据和配置有效性由 C 管理，启用状态、自己消息过滤和请求超时来自已应用的 Mod Options Menu 设置。
+首次有效提交由原生客户端启动一次后台初始化，读取服务配置的 Windows 持久环境变量：先读 HKCU\Environment，再读 HKLM\SYSTEM\CurrentControlSet\Control\Session Manager\Environment。若用户变量存在，即使值为空或无效，也不回退到系统变量；不读取进程继承值。初始化的自动选型配置每个进程只读取一次；已应用的显式接口类型则在后台开始处理每个任务时读取所需配置。服务选择、地址、凭据和配置有效性由 C 管理，接口类型、启用状态、自己消息过滤和请求超时来自已应用的 Mod Options Menu 设置。
 
-HD2CT_API_URL 缺失或为空字符串时选择 FREE，优先使用 Bing 网页翻译，失败时调用编译时配置的后备免费服务，跳过 model、key、appid 读取；非空 URL 继续按服务配置选择，纯空白仍按原校验处理。HD2CT_MODEL 非空时选择 AI 翻译；缺失、为空或仅含空白时选择机器翻译，按 URL 中忽略大小写的 google、baidu、youdao 依次匹配。已支持的 AI/机器翻译服务需要 HD2CT_API_URL 与 HD2CT_API_KEY，百度、有道还需要 HD2CT_APP_ID。模型名最多 256 字节，密钥与应用 ID 各最多 4096 字节，URL 最多 2048 字节。旧变量 HD2CT_ENABLED 与 HD2CT_TIMEOUT_SECONDS 不再读取，缺失或无效的 Mod Options Menu 启用项和自己消息过滤项默认开启，超时项默认20秒，可选10、20、30秒。凭据保存在进程内供请求使用；配置无效或后台初始化失败时会清零，菜单关闭不会清理凭据或停止 worker。
+已应用的“接口类型”优先于 URL 和模型名推断，菜单默认“免费版”。免费版忽略提供商环境变量，先使用 Bing 网页翻译，再回退编译时配置的后备服务。显式机器翻译不使用模型名；两种 AI 接口都需要 HD2CT_MODEL。普通服务需要 HD2CT_API_KEY；百度、有道还需要 HD2CT_APP_ID。除 Bing 官方接口可使用默认地址外，显式服务需要 HD2CT_API_URL。Bing 国内版在地址缺失或为空时使用 `https://api.translator.azure.cn`，国际版使用 `https://api.cognitive.microsofttranslator.com`；非空地址保留用户配置，允许代理及资源专属端点。两者使用同一官方协议，区域或多服务资源可通过 HD2CT_REGION 指定资源地区，例如 `chinanorth`、`eastasia`。地区最多64个 ASCII 字母、数字或连字符，不与应用 ID 共用。
 
-后台 worker 每次开始处理任务时，从 `%LOCALAPPDATA%\CowboyBingus\Helldivers2\Logs\ModOptionsMenu.values` 的同一份 primary/backup 文件快照读取本插件的目标语言、启用状态、自己消息过滤状态与超时。值缺失或无效时分别回退到简体中文、开启、开启和20秒；启用及自己消息过滤值只接受小写 `true`/`false`，超时值是1起始的三项 choice 索引。可读且有记录的 primary 中若缺少某项或该项值无效，使用该项默认值，不从旧 backup 覆盖；primary 不可读、损坏或没有有效记录时才尝试 backup。提交、轮询和游戏线程不做该文件 I/O。
+接口类型尚未保存、缺失或无效时，兼容自动选型：HD2CT_API_URL 缺失或为空选择 FREE；非空且 HD2CT_MODEL 有效非空时，URL 含 anthropic 或路径以 `/messages`（可带尾斜杠）结尾选择 Anthropic，其余选择 Chat Completions。无模型名时按 URL 中忽略大小写的 google、baidu、youdao、Bing/Azure Translator 标识选择机器翻译。模型名最多256字节，密钥与应用 ID 各最多4096字节，URL 最多2048字节。旧变量 HD2CT_ENABLED 与 HD2CT_TIMEOUT_SECONDS 不再读取。缺失或无效的启用项和自己消息过滤项默认开启，超时默认20秒，可选10、20、30秒。显式选择的配置错误只影响当前任务，不阻止后续通过 APPLY 切换服务。
 
-AI、Google、百度和有道适配器要求 HTTPS；只有 localhost、127.0.0.0/8 和 ::1 可使用 HTTP。FREE 后备服务只允许编译时固定端点使用远端 HTTP；Bing 网页请求使用固定的 HTTPS 域名。AI 适配器把地址根路径补全为 /chat/completions，或把精确的 /v1、/v1/ 补全为 /v1/chat/completions。已有机器翻译适配器仅把根路径补全为各自接口；其他路径保持原样。拒绝普通服务 URL 中的凭据、查询、片段、反斜杠、空白和控制字符；普通服务请求禁用重定向、cookies 和自动认证；Bing 使用独立的网页 Cookie 会话，地区跳转规则见下文。
+后台 worker 每次开始处理任务时，从 `%LOCALAPPDATA%\CowboyBingus\Helldivers2\Logs\ModOptionsMenu.values` 的同一份 primary/backup 文件快照读取本插件的目标语言、启用状态、自己消息过滤状态、超时与接口类型。前四项缺失或无效时分别回退到简体中文、开启、开启和20秒，接口类型缺失或无效时走自动选型；启用及自己消息过滤值只接受小写 `true`/`false`，choice 值是1起始的索引。可读且有记录的 primary 中若缺少某项或该项值无效，不从旧 backup 覆盖；primary 不可读、损坏或没有有效记录时才尝试 backup。提交、轮询和游戏线程不做该文件 I/O。
+
+普通适配器要求 HTTPS；只有 localhost、127.0.0.0/8 和 ::1 可使用 HTTP。FREE 后备服务只允许编译时固定端点使用远端 HTTP；Bing 网页请求使用固定的 HTTPS 域名。Chat Completions 将根路径补为 /chat/completions，将精确的 /v1、/v1/ 补为 /v1/chat/completions。Anthropic 将根路径、/v1、/v1/ 补为 /v1/messages。Bing 官方根路径补为 /translate，`*.cognitiveservices.azure.com` 与 `*.cognitiveservices.azure.cn` 资源根路径补为 /translator/text/v3.0/translate；其他完整路径保留。其余机翻仅补全根路径。拒绝普通配置 URL 中的凭据、查询、片段、反斜杠、空白和控制字符；Bing 官方的 api-version/to 查询由适配器生成。普通服务请求禁用重定向、cookies 和自动认证；Bing 网页使用独立 Cookie 会话，地区跳转规则见下文。
 
 AI 适配器使用 OpenAI-compatible Chat Completions 请求，只发送 `model`、`messages` 和 `response_format: {"type":"json_object"}`。请求不显式设置采样或思考参数，也不发送 `stream`；模型使用服务端默认策略及非流式默认行为。端点需同时实现兼容的 Chat Completions 与 JSON mode；供应商原生 API 不一定支持这两者。JSON mode 保证输出是合法 JSON 语法，不保证对象字段结构；提示词要求只返回 `is_target_language`（布尔值）和 `translation`（字符串），客户端再严格校验字段、类型、重复字段和额外字段。[DeepSeek Chat Completions 文档](https://api-docs.deepseek.com/api/create-chat-completion/)；[通义千问结构化输出文档](https://help.aliyun.com/zh/model-studio/qwen-structured-output)。完整简体中文请求示例见 [ai-request-example.json](ai-request-example.json)。
 
-系统提示词由通用部分和简体中文专属术语部分组成。通用部分填入目标语言并要求只翻译待处理聊天文本；仅 `zh_cn` 追加网络缩写、敌名和游戏术语对照，例如 Charger=牛、Spore Charger=孢子牛。繁体中文及其他目标语言不追加该段。
+两种 AI 协议共用 [ai_common.c](../native/adapter/ai_common.c) 中的中文提示词和严格译文校验。系统提示词由通用部分和简体中文专属术语部分组成。通用部分填入目标语言并要求只翻译待处理聊天文本；仅 `zh_cn` 追加网络缩写、敌名和游戏术语对照，例如 Charger=牛、Spore Charger=孢子牛。繁体中文及其他目标语言不追加该段。
 
-响应只接受 `choices[0].message.content` 中的完整 JSON 字符串；缺少 content 的工具调用响应会以 `BAD_RESPONSE` 拒绝，不执行工具、不发起后续请求，也不回退到其他响应字段。客户端校验 UTF-8、禁止 NUL、完整 JSON 消费、两个必需字段唯一出现、字段类型和译文长度。`is_target_language` 为 true 时返回原文保持结果；否则译文必须合法、非空且不超过 16,384 字节。译文与原文按字节完全相同时也返回 `SKIP`。请求超时由既有 10、20、30 秒设置控制。
+Anthropic 使用 Messages API，请求头为 `x-api-key` 与 `anthropic-version: 2023-06-01`，请求体包含 `model`、`max_tokens: 4096`、`system` 和单条 user `messages`，不发送 OpenAI 的 response_format。响应要求 assistant message，拼接 text 内容块后校验相同的译文 JSON；拒绝工具或其他非文本块、拒绝标记、截断及不支持的结束原因。仅接受完整的 end_turn 或 stop_sequence 结果，不执行工具、不续写。[Anthropic Messages API](https://platform.claude.com/docs/en/api/messages/create)、[结束原因说明](https://platform.claude.com/docs/en/build-with-claude/handling-stop-reasons)。
+
+Chat Completions 响应只接受 `choices[0].message.content` 中的完整 JSON 字符串；缺少 content 的工具调用响应会以 `BAD_RESPONSE` 拒绝，不执行工具、不发起后续请求，也不回退到其他响应字段。两种 AI 协议均校验 UTF-8、禁止 NUL、完整 JSON 消费、两个必需字段唯一出现、字段类型和译文长度。`is_target_language` 为 true 时返回原文保持结果；否则译文必须合法、非空且不超过16,384字节。译文与原文按字节完全相同时也返回 `SKIP`。请求超时由10、20、30秒设置控制。
 
 ## 原生任务接口
 
@@ -94,12 +103,13 @@ ABI 4 的 DLL 仍只导出三个函数，签名见 [client.h](../native/client.h
 | [Google Basic v2](https://docs.cloud.google.com/translate/docs/reference/rest/v2/translate) | POST /language/translate/v2；JSON q、target、format=text；[x-goog-api-key 请求头](https://docs.cloud.google.com/docs/authentication/api-keys-use)，不把密钥写入 URL | data.translations 的 translatedText、detectedSourceLanguage |
 | [百度通用翻译](https://fanyi-api.baidu.com/doc_bd/21) | POST /api/trans/vip/translate；UTF-8 表单 q、from=auto、to、appid、salt、sign；sign=MD5(appid+原始 q+salt+密钥)，小写十六进制 | from、trans_result 中的 dst |
 | [有道文本翻译](https://ai.youdao.com/DOCSIRMA/html/trans/api/wbfy/index.html) | POST /api；UTF-8 表单 q、from=auto、to、appKey、salt、curtime、signType=v3、sign、strict=true；sign=SHA256(appKey+input+salt+curtime+密钥) | errorCode=0、l、translation |
+| [Bing 官方 Translator](https://learn.microsoft.com/en-us/azure/ai-services/translator/text-translation/reference/v3/translate) | POST /translate?api-version=3.0&to=目标语言；JSON 数组含单个 Text；省略 from 自动检测；Ocp-Apim-Subscription-Key，按需增加 Ocp-Apim-Subscription-Region | 单条结果的唯一 translations 项，校验 text 与目标 to；简体中文 zh-Hans，繁体中文 zh-Hant |
 | FREE（首选 Bing） | GET /translator 获取网页会话，POST /ttranslatev3；表单 fromLang=auto-detect、text、to、网页 key、token；URL 参数 isVertical、IG、IID | 单条结果数组中的 translations[0].text，to 必须与目标语言匹配 |
 | FREE（后备服务） | POST 编译时配置的端点；JSON key1、key2、text、target_language；key2 是本地玩家姓名精确 UTF-8 字节的 SHA-256 小写十六进制，不裁剪空白、不转换大小写或进行 Unicode 归一化 | 成功和失败都要求 `data.text`、`data.reason` 字符串；成功时 reason 为空，失败时 reason 只映射为固定短码 |
 
 有道 input 按 Unicode 码点计数：最多 20 个码点时为完整 q，否则为前 10 个码点、十进制码点总数、后 10 个码点。签名使用尚未 URL 编码的 UTF-8 文本，表单各字段随后编码；curtime 为 UTC Unix 秒。签名及随机 salt 使用 Windows BCrypt。
 
-FREE 的 Bing 请求由 [bing.c](../native/adapter/bing.c) 在后台处理，参考 [XUnity 的 Bing 网页端点](https://github.com/bbepis/XUnity.AutoTranslator/blob/08324a58dcb26b76fc08e0fb2121098164579e73/src/Translators/BingTranslate/BingTranslateEndpoint.cs)。每个 worker 独立保存 Cookie、IG、IID 和页面 `params_AbusePreventionHelper` 中的临时 key/token，不读取浏览器用户 Cookie，也不执行网页脚本。页面存在多个 IID 时取第一个并校验其合法性，IG 和参数赋值要求唯一。简体中文使用 zh-Hans，繁体中文使用 zh-Hant，其余目标使用目录中的 Google 语言码。网页与响应最多1MB，JSON 有深度、节点和成员数量限制；HTTP 200 错误体、无效译文及目标不匹配都触发回退。
+FREE 的 Bing 请求由 [bing_rp.c](../native/adapter/bing_rp.c) 在后台处理，参考 [XUnity 的 Bing 网页端点](https://github.com/bbepis/XUnity.AutoTranslator/blob/08324a58dcb26b76fc08e0fb2121098164579e73/src/Translators/BingTranslate/BingTranslateEndpoint.cs)。每个 worker 独立保存 Cookie、IG、IID 和页面 `params_AbusePreventionHelper` 中的临时 key/token，不读取浏览器用户 Cookie，也不执行网页脚本。页面存在多个 IID 时取第一个并校验其合法性，IG 和参数赋值要求唯一。简体中文使用 zh-Hans，繁体中文使用 zh-Hant，其余目标使用目录中的 Google 语言码。网页与响应最多1MB，JSON 有深度、节点和成员数量限制；HTTP 200 错误体、无效译文及目标不匹配都触发回退。
 
 Bing 首先访问 `https://www.bing.com/translator`；只接受该 GET 跳转至 HTTPS、443端口、无用户信息且路径为 `/translator` 的 `cn.bing.com` 地址，随后在同一请求时限内使用固定 CN 地址，跳转查询参数不转发。其他跳转和 POST 跳转不跟随。会话最多缓存10分钟或75次翻译；失败后清理会话，该 worker 在60秒内直接使用后备服务。Bing 阶段最多使用剩余总时限的一半，且不超过6秒；后备服务使用同一总截止时间的剩余部分。取消、总超时耗尽或本地限流时停止，不再回退。Bing 成功时不访问后备服务器，也不消耗服务器的每日额度。
 
@@ -109,7 +119,9 @@ FREE 后备服务的端点和 key1 由 Git 忽略的 `config/free-service.privat
 
 每日额度耗尽映射为 `FREE_DAILY_LIMIT`（“今日免费次数已用尽，请明天再试”），姓名哈希无效映射为 `FREE_PLAYER_INVALID`（“玩家身份哈希无效”）。服务端余额耗尽映射为 `FREE_QUOTA_EXCEEDED`（“免费版的余额已用尽，请自行配置提供商”），服务端错误及 FREE 响应结构无效或 HTTP 5xx 映射为 `FREE_SERVER_ERROR`（“服务器错误，请联系作者”），免费校验码需要更新时映射为 `FREE_UPGRADE_REQUIRED`（“请升级hd2-chat-translate以继续使用免费版服务”）。其他适配器的 `QUOTA_EXCEEDED` 提示保持“翻译额度不足”。
 
-机器翻译不发送 AI 提示词；Google 省略 source 参数启用自动检测，百度、有道使用 from=auto。target/to 使用目标语言目录中的服务商语言码，默认分别为 zh-CN、zh、zh-CHS。有道 strict=true 保证按指定目标处理，避免默认自动中译英。成功结果按实际译文与原文比较，不按源语言字段替换为原文；完全相同返回 SKIP，不同返回 OK。缓存保存完整的 OK 或 SKIP 结果，键包含原文与目标语言，命中时保持同一显示决定。
+机器翻译不发送 AI 提示词；Google 省略 source 参数启用自动检测，百度、有道使用 from=auto，Bing 官方省略 from。target/to 使用目标语言目录中的服务商语言码，默认分别为 zh-CN、zh、zh-CHS、zh-Hans。有道 strict=true 保证按指定目标处理，避免默认自动中译英。成功结果按实际译文与原文比较，不按源语言字段替换为原文；完全相同返回 SKIP，不同返回 OK。缓存保存完整的 OK 或 SKIP 结果，键包含原文、目标语言和有效服务配置的 SHA-256 指纹；指纹覆盖接口选择、适配器、地址、模型、区域及凭据，字段带长度边界，不保存明文凭据副本。指纹生成失败时跳过缓存。切换接口或配置不会复用其他配置下的结果。
+
+Bing 国内版使用 [Azure 中国区端点](https://learn.microsoft.com/en-us/azure/ai-services/translator/reference/sovereign-clouds)，国际版使用全球端点；密钥、资源地区和端点应来自同一 Azure 云及资源。[认证要求](https://learn.microsoft.com/en-us/azure/ai-services/translator/text-translation/reference/authentication)。菜单的两个官方选项都不会调用 FREE 的网页翻译或后备服务。
 
 三家文本接口的公开文档没有给出自动检测同语种时可用于确定源文本为中文的专用错误码。[Google 文档](https://docs.cloud.google.com/translate/docs/languages)的同语言限制位于 AutoML 自定义模型范围，不能用于断言 Basic v2 的自动检测行为；百度 58001、有道 102 都可能表示其他不支持的语言。因此按实际响应判断成功或失败，通用语言错误显示短提示，不据此吞掉消息。同语种服务端响应需用有效凭据另行实测，离线回环只验证适配器解析与显示规则。
 
@@ -117,15 +129,15 @@ FREE 后备服务的端点和 key1 由 Git 忽略的 `config/free-service.privat
 
 ## 游戏内设置
 
-菜单使用 [Mod Options Menu v1.2](https://github.com/CowboyBingus/ModOptionsMenu/releases/tag/v1.2) 的原生 MODS 页、toggle/choice 类型及 APPLY 保存行为。安装包合并其未经修改的 Lua 资源和 0BSD 许可；四个选项 ID 分别为 `hd2chattranslate.target_language`、`hd2chattranslate.enabled`、`hd2chattranslate.ignore_self`、`hd2chattranslate.timeout`，共用 mod_id `hd2chattranslate`。默认值分别为索引1（简体中文）、true、true、索引2（20秒）。使用说明见[游戏内设置](settings.md)。
+菜单使用 [Mod Options Menu v1.2](https://github.com/CowboyBingus/ModOptionsMenu/releases/tag/v1.2) 的原生 MODS 页、toggle/choice 类型及 APPLY 保存行为。安装包合并其未经修改的 Lua 资源和 0BSD 许可；五个选项 ID 分别为 `hd2chattranslate.target_language`、`hd2chattranslate.enabled`、`hd2chattranslate.ignore_self`、`hd2chattranslate.timeout`、`hd2chattranslate.interface_type`，共用 mod_id `hd2chattranslate`。菜单默认值分别为索引1（简体中文）、true、true、索引2（20秒）、索引1（免费版）。接口类型值1至8依次为免费版、Chat Completions、Anthropic、百度、有道、Azure 中国区、Azure 全球、Google。使用说明见[游戏内设置](settings.md)。
 
 菜单文本由[resources/menu_locales.json](../resources/menu_locales.json)提供15种游戏UI语言的完整字符串；[tools/scripts/menu_locales.py](../tools/scripts/menu_locales.py)在构建时严格校验locale集合、字段、长度和超时占位符。打包器将一次读取的本地化快照编码进设置Lua模块。每个展示回调只用 rawget 读取 `_G.BingusTranslations` 的 version 与 canonical `game_language`，按精确locale、基础语言、英语的顺序选择文本；未知或无效注册表安全回退英语。回调不创建或修改注册表，也不读取游戏内存或Steam设置。MOM在每次打开ESC菜单时更新语言并重新求值函数文本，因此游戏语言变更在重新打开菜单后生效；游戏运行期间不读取语言文件。
 
-[resources/target_languages.json](../resources/target_languages.json) 的 schema 2 是四项菜单定义、AI 目标语言与三个机器翻译语言码的共同来源。[tools/scripts/target_languages.py](../tools/scripts/target_languages.py) 校验目录并在原生构建目录生成 C 表头，包含选项 ID、默认值和超时映射；打包时从同一目录生成 Lua 菜单项。语言保存值是从 1 开始的索引，已有语言顺序必须保持稳定。构建 metadata 的 `target_languages_sha256` 覆盖整个目录，安装包构建器拒绝 DLL 与菜单目录不一致的组合。
+[resources/target_languages.json](../resources/target_languages.json) 的 schema 2 是五项菜单定义、AI 目标语言与机器翻译语言码的共同来源。[tools/scripts/target_languages.py](../tools/scripts/target_languages.py) 校验目录并在原生构建目录生成 C 表头，包含选项 ID、默认值和超时映射；打包时从同一目录生成 Lua 菜单项。语言及接口类型保存值是从1开始的索引，已有选择顺序必须保持稳定。构建 metadata 的 `target_languages_sha256` 覆盖整个目录，安装包构建器拒绝 DLL 与菜单目录不一致的组合。
 
 C 在后台 worker 开始处理任务时读取 `%LOCALAPPDATA%\CowboyBingus\Helldivers2\Logs\ModOptionsMenu.values`，不在 Submit、Poll 或游戏更新帧中执行设置文件 I/O。只校验本插件的选项值；主文件缺失、不可读或没有制表符分隔记录时尝试 `.bak`，主文件已有记录而本插件项缺失或无效时直接使用默认中文。其他模组的开关、滑块等值不会导致读取旧备份。读取上限为 512 KiB，拒绝非普通文件与 reparse point，并允许菜单原子替换文件。此路径对应随包 loader 的默认日志目录；不支持其他 loader 自定义的日志目录。
 
-目标语言、启用状态、自己消息过滤和超时在该任务内保持不变，已开始的请求不会因 APPLY 改变，后续开始处理的任务使用新选择；缓存按语言隔离。Lua 设置模块不读取这些选项或服务凭据；它只为菜单展示读取上述本地化注册表。公开 C ABI 仍只有提交、轮询、取消三个函数。
+目标语言、启用状态、自己消息过滤、超时、接口类型及其有效配置在该任务内保持不变，已开始的请求不会因 APPLY 改变，后续开始处理的任务使用新选择；缓存按语言及服务配置隔离。Lua 设置模块不读取已应用值或服务凭据；它只为菜单展示读取上述本地化注册表。公开 C ABI 仍只有提交、轮询、取消三个函数。
 
 ## 调度、队列与数据上限
 

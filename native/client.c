@@ -29,6 +29,7 @@ typedef struct HD2CT_CacheEntry {
     uint32_t source_bytes;
     uint32_t target_language;
     uint32_t result_bytes;
+    char config_fingerprint[HD2CT_CACHE_FINGERPRINT_LENGTH + 1u];
     char source[HD2CT_MAX_SOURCE + 1u];
     char result[HD2CT_MAX_RESULT + 1u];
 } HD2CT_CacheEntry;
@@ -45,6 +46,7 @@ static char g_url[HD2CT_MAX_URL + 1u];
 static char g_model[HD2CT_MAX_MODEL + 1u];
 static char g_api_key[HD2CT_MAX_KEY + 1u];
 static char g_app_id[HD2CT_MAX_KEY + 1u];
+static char g_region[HD2CT_MAX_REGION + 1u];
 static volatile LONG g_adapter_id = HD2CT_ADAPTER_UNKNOWN;
 static volatile LONG g_enabled;
 static volatile LONG g_status = HD2CT_STATUS_MISSING_CONFIG;
@@ -68,6 +70,7 @@ static void hd2ct_clear_key_locked(void)
 {
     SecureZeroMemory(g_api_key, sizeof(g_api_key));
     SecureZeroMemory(g_app_id, sizeof(g_app_id));
+    SecureZeroMemory(g_region, sizeof(g_region));
     InterlockedExchange(&g_clear_key_pending, 0);
 }
 
@@ -147,6 +150,7 @@ static void hd2ct_zero_key(void)
 {
     SecureZeroMemory(g_api_key, sizeof(g_api_key));
     SecureZeroMemory(g_app_id, sizeof(g_app_id));
+    SecureZeroMemory(g_region, sizeof(g_region));
 }
 
 static void hd2ct_apply_cancel_all_locked(void)
@@ -230,10 +234,13 @@ static int hd2ct_find_cache_locked(const HD2CT_WorkerJob *job, char *result,
                                    uint32_t *result_bytes)
 {
     uint32_t i;
+    if (job->cache_fingerprint_valid == 0u) return 0;
     for (i = 0; i < HD2CT_CACHE_COUNT; ++i) {
         HD2CT_CacheEntry *entry = &g_cache[i];
         if (entry->used && entry->source_bytes == job->source_bytes &&
             entry->target_language == job->target_language &&
+            memcmp(entry->config_fingerprint, job->cache_fingerprint,
+                   sizeof(entry->config_fingerprint)) == 0 &&
             memcmp(entry->source, job->source, job->source_bytes) == 0) {
             entry->age = ++g_cache_age;
             memcpy(result, entry->result, entry->result_bytes);
@@ -251,10 +258,13 @@ static void hd2ct_put_cache_locked(const HD2CT_WorkerJob *job,
     uint32_t i;
     uint32_t target = 0;
     uint64_t oldest = UINT64_MAX;
+    if (job->cache_fingerprint_valid == 0u) return;
     for (i = 0; i < HD2CT_CACHE_COUNT; ++i) {
         HD2CT_CacheEntry *entry = &g_cache[i];
         if (entry->used && entry->source_bytes == job->source_bytes &&
             entry->target_language == job->target_language &&
+            memcmp(entry->config_fingerprint, job->cache_fingerprint,
+                   sizeof(entry->config_fingerprint)) == 0 &&
             memcmp(entry->source, job->source, job->source_bytes) == 0) {
             target = i;
             oldest = 0;
@@ -276,6 +286,8 @@ static void hd2ct_put_cache_locked(const HD2CT_WorkerJob *job,
     g_cache[target].source_bytes = job->source_bytes;
     g_cache[target].target_language = job->target_language;
     g_cache[target].result_bytes = result_bytes;
+    memcpy(g_cache[target].config_fingerprint, job->cache_fingerprint,
+           sizeof(g_cache[target].config_fingerprint));
     memcpy(g_cache[target].source, job->source, job->source_bytes);
     g_cache[target].source[job->source_bytes] = '\0';
     memcpy(g_cache[target].result, result, result_bytes);
@@ -418,8 +430,114 @@ static int hd2ct_take_next_job_locked(HD2CT_WorkerJob *copy)
     memcpy(copy->model, g_model, sizeof(copy->model));
     memcpy(copy->api_key, g_api_key, sizeof(copy->api_key));
     memcpy(copy->app_id, g_app_id, sizeof(copy->app_id));
+    memcpy(copy->region, g_region, sizeof(copy->region));
     copy->adapter_id = (uint32_t)InterlockedCompareExchange(&g_adapter_id, 0, 0);
     return 1;
+}
+
+static int hd2ct_set_job_cache_fingerprint(HD2CT_WorkerJob *job)
+{
+    unsigned char numeric_fields[2][sizeof(uint32_t)];
+    unsigned char length_prefixes[8][sizeof(uint64_t)];
+    const char *fields[8];
+    size_t field_lengths[8];
+    const char *parts[16];
+    size_t part_lengths[16];
+    size_t field_count = 0u;
+    size_t part_count = 0u;
+    size_t field_index;
+    size_t i;
+    char digest_hex[HD2CT_CACHE_FINGERPRINT_LENGTH + 1u];
+    memset(numeric_fields, 0, sizeof(numeric_fields));
+    memset(length_prefixes, 0, sizeof(length_prefixes));
+    memset(fields, 0, sizeof(fields));
+    memset(field_lengths, 0, sizeof(field_lengths));
+    memset(parts, 0, sizeof(parts));
+    memset(part_lengths, 0, sizeof(part_lengths));
+    memset(digest_hex, 0, sizeof(digest_hex));
+    for (i = 0; i < 2u; ++i) {
+        uint32_t value = i == 0u ? job->adapter_id : job->interface_type;
+        numeric_fields[i][0] = (unsigned char)(value & 0xffu);
+        numeric_fields[i][1] = (unsigned char)((value >> 8) & 0xffu);
+        numeric_fields[i][2] = (unsigned char)((value >> 16) & 0xffu);
+        numeric_fields[i][3] = (unsigned char)((value >> 24) & 0xffu);
+    }
+    fields[field_count] = (const char *)numeric_fields[0];
+    field_lengths[field_count++] = sizeof(uint32_t);
+    fields[field_count] = (const char *)numeric_fields[1];
+    field_lengths[field_count++] = sizeof(uint32_t);
+    fields[field_count] = job->url;
+    field_lengths[field_count++] = strlen(job->url);
+    switch (job->adapter_id) {
+    case HD2CT_ADAPTER_AI:
+    case HD2CT_ADAPTER_ANTHROPIC:
+        fields[field_count] = job->model;
+        field_lengths[field_count++] = strlen(job->model);
+        fields[field_count] = job->api_key;
+        field_lengths[field_count++] = strlen(job->api_key);
+        break;
+    case HD2CT_ADAPTER_BAIDU:
+    case HD2CT_ADAPTER_YOUDAO:
+        fields[field_count] = job->api_key;
+        field_lengths[field_count++] = strlen(job->api_key);
+        fields[field_count] = job->app_id;
+        field_lengths[field_count++] = strlen(job->app_id);
+        break;
+    case HD2CT_ADAPTER_BING:
+        fields[field_count] = job->api_key;
+        field_lengths[field_count++] = strlen(job->api_key);
+        fields[field_count] = job->region;
+        field_lengths[field_count++] = strlen(job->region);
+        break;
+    case HD2CT_ADAPTER_GOOGLE:
+        fields[field_count] = job->api_key;
+        field_lengths[field_count++] = strlen(job->api_key);
+        break;
+    case HD2CT_ADAPTER_FREE:
+        fields[field_count] = job->player_name;
+        field_lengths[field_count++] = strlen(job->player_name);
+        break;
+    default:
+        goto fail;
+    }
+    for (field_index = 0; field_index < field_count; ++field_index) {
+        uint64_t field_length = (uint64_t)field_lengths[field_index];
+        for (i = 0; i < sizeof(uint64_t); ++i) {
+            length_prefixes[field_index][i] =
+                (unsigned char)(field_length >> ((sizeof(uint64_t) - i - 1u) * 8u));
+        }
+        parts[part_count] = (const char *)length_prefixes[field_index];
+        part_lengths[part_count++] = sizeof(length_prefixes[field_index]);
+        parts[part_count] = fields[field_index];
+        part_lengths[part_count++] = field_lengths[field_index];
+    }
+    if (!hd2ct_digest_hex(BCRYPT_SHA256_ALGORITHM, parts, part_lengths,
+                          part_count,
+                          digest_hex, sizeof(digest_hex))) {
+        goto fail;
+    }
+    memcpy(job->cache_fingerprint, digest_hex, sizeof(digest_hex));
+    job->cache_fingerprint_valid = 1u;
+    SecureZeroMemory(numeric_fields, sizeof(numeric_fields));
+    SecureZeroMemory(length_prefixes, sizeof(length_prefixes));
+    SecureZeroMemory(fields, sizeof(fields));
+    SecureZeroMemory(field_lengths, sizeof(field_lengths));
+    SecureZeroMemory(parts, sizeof(parts));
+    SecureZeroMemory(part_lengths, sizeof(part_lengths));
+    SecureZeroMemory(digest_hex, sizeof(digest_hex));
+    return 1;
+
+fail:
+    SecureZeroMemory(job->cache_fingerprint, sizeof(job->cache_fingerprint));
+    job->cache_fingerprint_valid = 0u;
+    SecureZeroMemory(numeric_fields, sizeof(numeric_fields));
+    SecureZeroMemory(length_prefixes, sizeof(length_prefixes));
+    SecureZeroMemory(fields, sizeof(fields));
+    SecureZeroMemory(field_lengths, sizeof(field_lengths));
+    SecureZeroMemory(parts, sizeof(parts));
+    SecureZeroMemory(part_lengths, sizeof(part_lengths));
+    SecureZeroMemory(digest_hex, sizeof(digest_hex));
+    return 0;
 }
 
 static void hd2ct_process_job(HINTERNET session, HD2CT_BingState *bing_state,
@@ -442,6 +560,7 @@ static void hd2ct_process_job(HINTERNET session, HD2CT_BingState *bing_state,
     }
     hd2ct_read_applied_settings(&settings);
     job->target_language = settings.target_language;
+    job->interface_type = settings.interface_type;
     job->timeout_seconds = settings.timeout_seconds;
     job->menu_enabled = settings.enabled;
     job->ignore_self = settings.ignore_self;
@@ -457,6 +576,9 @@ static void hd2ct_process_job(HINTERNET session, HD2CT_BingState *bing_state,
         SecureZeroMemory(result, sizeof(result));
         return;
     }
+    if (job->interface_type != HD2CT_INTERFACE_AUTO) {
+        config_status = hd2ct_prepare_job_config(job, job->interface_type);
+    }
     if (config_status != HD2CT_STATUS_READY) {
         const char *code = config_status == HD2CT_STATUS_MISSING_CONFIG ?
             "MISSING_CONFIG" :
@@ -471,6 +593,7 @@ static void hd2ct_process_job(HINTERNET session, HD2CT_BingState *bing_state,
         SecureZeroMemory(result, sizeof(result));
         return;
     }
+    (void)hd2ct_set_job_cache_fingerprint(job);
     if (hd2ct_remaining_ms(deadline) == 0) {
         hd2ct_build_error(result, sizeof(result), &result_bytes, "EXPIRED");
         hd2ct_set_request_status(1005u);
@@ -631,6 +754,7 @@ static int hd2ct_start_workers(void)
 
 static int hd2ct_commit_config(const char *url, const char *model,
                                const char *api_key, const char *app_id,
+                               const char *region,
                                uint32_t *failure_status)
 {
     char normalized[HD2CT_MAX_URL + 1u];
@@ -641,10 +765,12 @@ static int hd2ct_commit_config(const char *url, const char *model,
     size_t model_length = hd2ct_bounded_length(model, HD2CT_MAX_MODEL);
     size_t key_length = hd2ct_bounded_length(api_key, HD2CT_MAX_KEY);
     size_t app_id_length = hd2ct_bounded_length(app_id, HD2CT_MAX_KEY);
+    size_t region_length = hd2ct_bounded_length(region, HD2CT_MAX_REGION);
     int signed_machine = adapter != NULL && adapter->app_id_required;
     *failure_status = HD2CT_STATUS_INVALID_CONFIG;
     if (url_length > HD2CT_MAX_URL || model_length > HD2CT_MAX_MODEL ||
-        key_length > HD2CT_MAX_KEY || app_id_length > HD2CT_MAX_KEY) {
+        key_length > HD2CT_MAX_KEY || app_id_length > HD2CT_MAX_KEY ||
+        region_length > HD2CT_MAX_REGION) {
         return 0;
     }
     if (adapter_id == HD2CT_ADAPTER_FREE && url_length == 0) {
@@ -652,6 +778,10 @@ static int hd2ct_commit_config(const char *url, const char *model,
     }
     if (adapter_id != HD2CT_ADAPTER_UNKNOWN) {
         if (adapter == NULL || adapter->base == NULL) return 0;
+        if (adapter_id == HD2CT_ADAPTER_BING &&
+            !hd2ct_valid_region(region)) {
+            return 0;
+        }
         if ((url_length == 0 && adapter_id != HD2CT_ADAPTER_FREE) ||
             (adapter->base->api_key_required && key_length == 0) ||
             (adapter->base->family == HD2CT_FAMILY_AI &&
@@ -676,9 +806,15 @@ static int hd2ct_commit_config(const char *url, const char *model,
     if (adapter_id != HD2CT_ADAPTER_UNKNOWN && adapter_id != HD2CT_ADAPTER_FREE) {
         memcpy(g_api_key, api_key, key_length + 1u);
         if (signed_machine) memcpy(g_app_id, app_id, app_id_length + 1u);
+        if (adapter_id == HD2CT_ADAPTER_BING) {
+            memcpy(g_region, region, region_length + 1u);
+        } else {
+            SecureZeroMemory(g_region, sizeof(g_region));
+        }
     } else {
         SecureZeroMemory(g_api_key, sizeof(g_api_key));
         SecureZeroMemory(g_app_id, sizeof(g_app_id));
+        SecureZeroMemory(g_region, sizeof(g_region));
     }
     InterlockedExchange(&g_adapter_id, (LONG)adapter_id);
     *failure_status = HD2CT_STATUS_READY;
@@ -691,6 +827,7 @@ static unsigned __stdcall hd2ct_bootstrap_main(void *parameter)
     char model[HD2CT_MAX_MODEL + 1u] = {0};
     char api_key[HD2CT_MAX_KEY + 1u] = {0};
     char app_id[HD2CT_MAX_KEY + 1u] = {0};
+    char region[HD2CT_MAX_REGION + 1u] = {0};
     int value_present = 0;
     uint32_t adapter_id;
     uint32_t failure_status = HD2CT_STATUS_INVALID_CONFIG;
@@ -724,8 +861,15 @@ static unsigned __stdcall hd2ct_bootstrap_main(void *parameter)
                 goto configure_workers;
             }
         }
+        if (adapter_id == HD2CT_ADAPTER_BING &&
+            !hd2ct_read_environment_value(L"HD2CT_REGION", region,
+                                          sizeof(region), &value_present)) {
+            service_status = HD2CT_STATUS_INVALID_CONFIG;
+            goto configure_workers;
+        }
     }
-    committed = hd2ct_commit_config(url, model, api_key, app_id, &failure_status);
+    committed = hd2ct_commit_config(url, model, api_key, app_id, region,
+                                    &failure_status);
     if (!committed) {
         service_status = failure_status;
     } else if (adapter_id == HD2CT_ADAPTER_UNKNOWN) {
@@ -739,6 +883,7 @@ configure_workers:
     if (service_status != HD2CT_STATUS_READY) {
         SecureZeroMemory(g_api_key, sizeof(g_api_key));
         SecureZeroMemory(g_app_id, sizeof(g_app_id));
+        SecureZeroMemory(g_region, sizeof(g_region));
     }
     if (!hd2ct_start_workers()) {
         goto done;
@@ -751,6 +896,7 @@ configure_workers:
 done:
     SecureZeroMemory(api_key, sizeof(api_key));
     SecureZeroMemory(app_id, sizeof(app_id));
+    SecureZeroMemory(region, sizeof(region));
     SecureZeroMemory(url, sizeof(url));
     SecureZeroMemory(model, sizeof(model));
     return 0;

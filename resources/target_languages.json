@@ -29,6 +29,23 @@
         {"label": "20秒", "seconds": 20},
         {"label": "30秒", "seconds": 30}
       ]
+    },
+    "interface_type": {
+      "option_id": "hd2chattranslate.interface_type",
+      "type": "choice",
+      "label": "接口类型",
+      "default_index": 1,
+      "description": "选择翻译服务接口，应用后对后续消息生效。",
+      "choices": [
+        {"id": "free", "label": "免费版"},
+        {"id": "chat_completions", "label": "Chat Completions接口"},
+        {"id": "anthropic", "label": "Anthropic接口"},
+        {"id": "baidu", "label": "百度翻译"},
+        {"id": "youdao", "label": "有道翻译"},
+        {"id": "bing_cn", "label": "必应翻译国内版"},
+        {"id": "bing_global", "label": "必应翻译国际版"},
+        {"id": "google", "label": "谷歌翻译"}
+      ]
     }
   },
   "languages": [

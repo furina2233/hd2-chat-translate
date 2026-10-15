@@ -7,6 +7,9 @@
 static const HD2CT_AdapterBase g_ai_translation_base = {
     HD2CT_FAMILY_AI, 1, 1, 1
 };
+static const HD2CT_AdapterBase g_anthropic_translation_base = {
+    HD2CT_FAMILY_AI, 1, 1, 0
+};
 static const HD2CT_AdapterBase g_machine_translation_base = {
     HD2CT_FAMILY_MACHINE, 0, 1, 0
 };
@@ -36,20 +39,62 @@ static int hd2ct_ascii_contains_ci(const char *text, const char *needle)
     return 0;
 }
 
+static int hd2ct_ascii_ends_ci(const char *text, size_t text_length,
+                               const char *suffix)
+{
+    size_t suffix_length = strlen(suffix);
+    size_t i;
+    if (suffix_length > text_length) return 0;
+    text += text_length - suffix_length;
+    for (i = 0; i < suffix_length; ++i) {
+        unsigned char left = (unsigned char)text[i];
+        unsigned char right = (unsigned char)suffix[i];
+        if (left >= 'A' && left <= 'Z') left = (unsigned char)(left + ('a' - 'A'));
+        if (right >= 'A' && right <= 'Z') right = (unsigned char)(right + ('a' - 'A'));
+        if (left != right) return 0;
+    }
+    return 1;
+}
+
+static int hd2ct_url_path_ends_messages(const char *url)
+{
+    const char *scheme_end = strstr(url, "://");
+    const char *path;
+    size_t path_length;
+    if (scheme_end == NULL) return 0;
+    path = strchr(scheme_end + 3, '/');
+    if (path == NULL) return 0;
+    path_length = strlen(path);
+    if (path_length != 0u && path[path_length - 1u] == '/') --path_length;
+    return hd2ct_ascii_ends_ci(path, path_length, "/messages");
+}
+
 uint32_t hd2ct_select_adapter(const char *url, const char *model)
 {
     size_t model_length;
     if (url == NULL || url[0] == '\0') return HD2CT_ADAPTER_FREE;
     model_length = hd2ct_bounded_length(model, HD2CT_MAX_MODEL);
-    if (g_ai_translation_base.model_required &&
-        model_length <= HD2CT_MAX_MODEL && model_length != 0 &&
-        !hd2ct_is_only_space(model, model_length)) {
+    if (g_ai_translation_base.model_required && model_length != 0 &&
+        (model_length > HD2CT_MAX_MODEL ||
+         !hd2ct_is_only_space(model, model_length))) {
+        if (hd2ct_ascii_contains_ci(url, "anthropic") ||
+            hd2ct_url_path_ends_messages(url)) {
+            return HD2CT_ADAPTER_ANTHROPIC;
+        }
         return HD2CT_ADAPTER_AI;
     }
     if (g_machine_translation_base.family == HD2CT_FAMILY_MACHINE) {
         if (hd2ct_ascii_contains_ci(url, "google")) return HD2CT_ADAPTER_GOOGLE;
         if (hd2ct_ascii_contains_ci(url, "baidu")) return HD2CT_ADAPTER_BAIDU;
         if (hd2ct_ascii_contains_ci(url, "youdao")) return HD2CT_ADAPTER_YOUDAO;
+        if (hd2ct_ascii_contains_ci(url, "bing") ||
+            hd2ct_ascii_contains_ci(url, "microsofttranslator") ||
+            hd2ct_ascii_contains_ci(url, "cognitiveservices.azure.com") ||
+            hd2ct_ascii_contains_ci(url, "translator.azure.cn") ||
+            hd2ct_ascii_contains_ci(url, "cognitiveservices.azure.cn") ||
+            hd2ct_ascii_contains_ci(url, "microsoftglobal")) {
+            return HD2CT_ADAPTER_BING;
+        }
     }
     return HD2CT_ADAPTER_UNKNOWN;
 }
@@ -209,7 +254,11 @@ static const HD2CT_Adapter g_adapters[] = {
      hd2ct_build_youdao_request, hd2ct_parse_youdao_response},
     {HD2CT_ADAPTER_UNKNOWN, &g_machine_translation_base, 0, NULL, NULL, NULL},
     {HD2CT_ADAPTER_FREE, &g_free_translation_base, 0, "/translate",
-     hd2ct_build_free_request, hd2ct_parse_free_response}
+     hd2ct_build_free_request, hd2ct_parse_free_response},
+    {HD2CT_ADAPTER_BING, &g_machine_translation_base, 0, "/translate",
+     hd2ct_build_bing_request, hd2ct_parse_bing_response},
+    {HD2CT_ADAPTER_ANTHROPIC, &g_anthropic_translation_base, 0, "/v1/messages",
+     hd2ct_build_anthropic_request, hd2ct_parse_anthropic_response}
 };
 
 const HD2CT_Adapter *hd2ct_adapter_for_id(uint32_t adapter_id)

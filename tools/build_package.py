@@ -193,8 +193,19 @@ def standalone_module_source(
 
 
 def _lua_string_literal(value: str) -> str:
-    """将UTF-8字符串编码成不受引号和反斜线影响的Lua字面量。"""
-    return '"' + "".join(f"\\{byte:03d}" for byte in value.encode("utf-8")) + '"'
+    """生成仅转义语法字符与ASCII控制字符的Lua字符串字面量。"""
+    escaped: list[str] = []
+    for character in value:
+        codepoint = ord(character)
+        if character == '"':
+            escaped.append('\\"')
+        elif character == "\\":
+            escaped.append("\\\\")
+        elif codepoint < 0x20 or codepoint == 0x7F:
+            escaped.append(f"\\{codepoint:03d}")
+        else:
+            escaped.append(character)
+    return '"' + "".join(escaped) + '"'
 
 
 def target_language_settings_source(
@@ -253,6 +264,25 @@ def target_language_settings_source(
     lines.extend([
         "            },",
         "        },",
+    ])
+    interface_type = data["menu_options"]["interface_type"]
+    lines.extend([
+        "        interface_type = {",
+        "            option_id = " + _lua_string_literal(interface_type["option_id"]) + ",",
+        "            type = " + _lua_string_literal(interface_type["type"]) + ",",
+        "            label = " + _lua_string_literal(interface_type["label"]) + ",",
+        f"            default_index = {interface_type['default_index']},",
+        "            description = " + _lua_string_literal(interface_type["description"]) + ",",
+        "            choices = {",
+    ])
+    for choice in interface_type["choices"]:
+        lines.append(
+            "                {id = %s, label = %s},"
+            % (_lua_string_literal(choice["id"]), _lua_string_literal(choice["label"]))
+        )
+    lines.extend([
+        "            },",
+        "        },",
         "    },",
         "    languages = {",
     ])
@@ -262,7 +292,7 @@ def target_language_settings_source(
             % (_lua_string_literal(language["id"]), _lua_string_literal(language["label"]))
         )
     lines.extend(["    },"])
-    injected = template.replace(SETTINGS_CATALOGUE_MARKER, "\n".join(lines).encode("ascii"), 1)
+    injected = template.replace(SETTINGS_CATALOGUE_MARKER, "\n".join(lines).encode("utf-8"), 1)
     if len(injected) > MAX_SOURCE_BYTES:
         raise ValueError("目标语言设置模块超过512 KiB源码上限")
     return menu_locales_source(injected, catalogue, localizations)
@@ -293,6 +323,19 @@ def menu_locales_source(
         or set(target_ids) != set(menu_locales.TARGET_LANGUAGE_IDS)
     ):
         raise ValueError("目标语言目录ID与菜单本地化选项不匹配")
+    menu_options = catalogue.get("menu_options")
+    interface_type = (
+        menu_options.get("interface_type") if isinstance(menu_options, dict) else None
+    )
+    interface_choices = (
+        interface_type.get("choices") if isinstance(interface_type, dict) else None
+    )
+    interface_ids = [
+        choice.get("id") if isinstance(choice, dict) else None
+        for choice in interface_choices
+    ] if isinstance(interface_choices, list) else []
+    if interface_ids != list(menu_locales.INTERFACE_TYPE_IDS):
+        raise ValueError("接口类型目录ID与菜单本地化选项不匹配")
 
     lines: list[str] = []
     locale_rows = translations["locales"]
@@ -310,8 +353,16 @@ def menu_locales_source(
                 "                [%d] = %s,"
                 % (index, _lua_string_literal(target_names[target_id]))
             )
+        lines.append("            },")
+        lines.append("            interface_type_choices = {")
+        interface_names = entry["interface_types"]
+        for index, interface_id in enumerate(interface_ids, start=1):
+            lines.append(
+                "                [%d] = %s,"
+                % (index, _lua_string_literal(interface_names[interface_id]))
+            )
         lines.extend(("            },", "        },"))
-    injected = template.replace(MENU_LOCALES_MARKER, "\n".join(lines).encode("ascii"), 1)
+    injected = template.replace(MENU_LOCALES_MARKER, "\n".join(lines).encode("utf-8"), 1)
     if len(injected) > MAX_SOURCE_BYTES:
         raise ValueError("目标语言设置模块超过512 KiB源码上限")
     return injected

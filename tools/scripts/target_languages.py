@@ -17,13 +17,37 @@ _ROOT_KEYS = {
     "schema_version", "option_id", "mod_id", "default_index", "menu_options", "languages"
 }
 _LANGUAGE_KEYS = {"id", "label", "ai_target", "google", "baidu", "youdao"}
-_MENU_OPTIONS_KEYS = {"enabled", "ignore_self", "timeout"}
+_MENU_OPTIONS_KEYS = {"enabled", "ignore_self", "timeout", "interface_type"}
 _ENABLED_OPTION_KEYS = {"option_id", "type", "label", "default", "description"}
 _IGNORE_SELF_OPTION_KEYS = {"option_id", "type", "label", "default", "description"}
 _TIMEOUT_OPTION_KEYS = {
     "option_id", "type", "label", "default_index", "description", "choices"
 }
 _TIMEOUT_CHOICE_KEYS = {"label", "seconds"}
+_INTERFACE_TYPE_OPTION_KEYS = {
+    "option_id", "type", "label", "default_index", "description", "choices"
+}
+_INTERFACE_TYPE_CHOICE_KEYS = {"id", "label"}
+_INTERFACE_TYPE_IDS = (
+    "free",
+    "chat_completions",
+    "anthropic",
+    "baidu",
+    "youdao",
+    "bing_cn",
+    "bing_global",
+    "google",
+)
+_INTERFACE_TYPE_LABELS = (
+    "免费版",
+    "Chat Completions接口",
+    "Anthropic接口",
+    "百度翻译",
+    "有道翻译",
+    "必应翻译国内版",
+    "必应翻译国际版",
+    "谷歌翻译",
+)
 _OPTION_ID = re.compile(r"^[a-z][a-z0-9]*(?:\.[a-z][a-z0-9_]*)+$")
 _MOD_ID = re.compile(r"^[a-z][a-z0-9_-]{1,63}$")
 _LANGUAGE_ID = re.compile(r"^[a-z][a-z0-9_-]{0,31}$")
@@ -66,7 +90,7 @@ def validate_catalogue(value: Any) -> dict[str, Any]:
 
     menu_options = value["menu_options"]
     if not isinstance(menu_options, dict) or set(menu_options) != _MENU_OPTIONS_KEYS:
-        raise ValueError("menu_options必须包含enabled、ignore_self与timeout")
+        raise ValueError("menu_options必须包含enabled、ignore_self、timeout与interface_type")
     enabled = menu_options["enabled"]
     if not isinstance(enabled, dict) or set(enabled) != _ENABLED_OPTION_KEYS:
         raise ValueError("enabled菜单项字段不符合schema")
@@ -128,7 +152,46 @@ def validate_catalogue(value: Any) -> dict[str, Any]:
                 or label != expected_labels[index]):
             raise ValueError("timeout choices必须依序为10、20、30秒")
         normalized_choices.append({"label": label, "seconds": seconds})
-    if len({option_id, enabled_id, ignore_self_id, timeout_id}) != 4:
+
+    interface_type = menu_options["interface_type"]
+    if (not isinstance(interface_type, dict)
+            or set(interface_type) != _INTERFACE_TYPE_OPTION_KEYS):
+        raise ValueError("interface_type菜单项字段不符合schema")
+    interface_type_id = _plain_text(
+        interface_type["option_id"], "menu_options.interface_type.option_id")
+    if (not _OPTION_ID.fullmatch(interface_type_id)
+            or interface_type_id != "hd2chattranslate.interface_type"):
+        raise ValueError("interface_type菜单项option_id格式无效")
+    interface_type_label = _plain_text(
+        interface_type["label"], "menu_options.interface_type.label")
+    if interface_type_label != "接口类型" or len(interface_type_label) > _LABEL_MAX_CHARACTERS:
+        raise ValueError("interface_type菜单项label不符合固定标签")
+    interface_type_description = _plain_text(
+        interface_type["description"], "menu_options.interface_type.description")
+    if interface_type_description != "选择翻译服务接口，应用后对后续消息生效。":
+        raise ValueError("interface_type菜单项description不符合固定说明")
+    interface_type_choices = interface_type["choices"]
+    if (interface_type["type"] != "choice"
+            or type(interface_type["default_index"]) is not int
+            or interface_type["default_index"] != 1
+            or not isinstance(interface_type_choices, list)
+            or len(interface_type_choices) != len(_INTERFACE_TYPE_IDS)):
+        raise ValueError("interface_type菜单项必须是默认索引1的八项choice")
+    normalized_interface_type_choices: list[dict[str, str]] = []
+    for index, choice in enumerate(interface_type_choices):
+        if not isinstance(choice, dict) or set(choice) != _INTERFACE_TYPE_CHOICE_KEYS:
+            raise ValueError(f"interface_type.choices[{index + 1}]字段不符合schema")
+        choice_id = _plain_text(
+            choice["id"], f"interface_type.choices[{index + 1}].id")
+        label = _plain_text(
+            choice["label"], f"interface_type.choices[{index + 1}].label")
+        if (choice_id != _INTERFACE_TYPE_IDS[index]
+                or label != _INTERFACE_TYPE_LABELS[index]
+                or len(label) > _LABEL_MAX_CHARACTERS):
+            raise ValueError("interface_type choices必须按固定服务ID与标签顺序排列")
+        normalized_interface_type_choices.append({"id": choice_id, "label": label})
+
+    if len({option_id, enabled_id, ignore_self_id, timeout_id, interface_type_id}) != 5:
         raise ValueError("菜单option_id必须互不重复")
     normalized_menu_options = {
         "enabled": {
@@ -152,6 +215,14 @@ def validate_catalogue(value: Any) -> dict[str, Any]:
             "default_index": 2,
             "description": timeout_description,
             "choices": normalized_choices,
+        },
+        "interface_type": {
+            "option_id": interface_type_id,
+            "type": "choice",
+            "label": interface_type_label,
+            "default_index": 1,
+            "description": interface_type_description,
+            "choices": normalized_interface_type_choices,
         },
     }
 
@@ -270,6 +341,9 @@ def c_header_text(catalogue: dict[str, Any] | None = None) -> str:
         f"#define HD2CT_DEFAULT_TIMEOUT_INDEX {source['menu_options']['timeout']['default_index']}u",
         f"#define HD2CT_TIMEOUT_CHOICE_COUNT {len(source['menu_options']['timeout']['choices'])}u",
         f"#define HD2CT_DEFAULT_TIMEOUT_SECONDS {source['menu_options']['timeout']['choices'][source['menu_options']['timeout']['default_index'] - 1]['seconds']}u",
+        f"#define HD2CT_INTERFACE_TYPE_OPTION_ID {_c_string(source['menu_options']['interface_type']['option_id'])}",
+        f"#define HD2CT_INTERFACE_TYPE_COUNT {len(source['menu_options']['interface_type']['choices'])}u",
+        f"#define HD2CT_INTERFACE_TYPE_DEFAULT {source['menu_options']['interface_type']['default_index']}u",
         "",
         "static const uint32_t g_hd2ct_timeout_seconds[HD2CT_TIMEOUT_CHOICE_COUNT] = {",
         "    " + ", ".join(

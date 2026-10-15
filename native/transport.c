@@ -108,6 +108,37 @@ static void hd2ct_free_url_parts(HD2CT_UrlParts *parts)
     }
 }
 
+static int hd2ct_append_request_query(HD2CT_UrlParts *url_parts,
+                                      const char *query, size_t query_capacity)
+{
+    size_t query_length = hd2ct_bounded_length(query, query_capacity - 1u);
+    size_t path_length;
+    size_t i;
+    size_t path_capacity = sizeof(url_parts->path) / sizeof(url_parts->path[0]);
+    if (query_length > query_capacity - 1u) return 0;
+    if (query_length == 0u) return 1;
+    if (wcschr(url_parts->path, L'?') != NULL ||
+        wcschr(url_parts->path, L'#') != NULL) {
+        return 0;
+    }
+    for (i = 0; i < query_length; ++i) {
+        unsigned char c = (unsigned char)query[i];
+        if (!((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
+              (c >= '0' && c <= '9') || c == '-' || c == '.' ||
+              c == '_' || c == '~' || c == '=' || c == '&')) {
+            return 0;
+        }
+    }
+    path_length = wcslen(url_parts->path);
+    if (path_length + 1u + query_length >= path_capacity) return 0;
+    url_parts->path[path_length++] = L'?';
+    for (i = 0; i < query_length; ++i) {
+        url_parts->path[path_length++] = (wchar_t)(unsigned char)query[i];
+    }
+    url_parts->path[path_length] = L'\0';
+    return 1;
+}
+
 static void hd2ct_http_provider_request(HINTERNET session,
                                        const HD2CT_WorkerJob *job,
                                        char *result, uint32_t *result_bytes,
@@ -119,8 +150,8 @@ static void hd2ct_http_provider_request(HINTERNET session,
     const HD2CT_Adapter *adapter = hd2ct_adapter_for_id(job->adapter_id);
     HINTERNET connection = NULL;
     HINTERNET request = NULL;
-    wchar_t headers_wide[HD2CT_MAX_KEY + 256u];
-    char headers_utf8[HD2CT_MAX_KEY + 256u];
+    wchar_t headers_wide[HD2CT_MAX_KEY + HD2CT_MAX_REGION + 512u];
+    char headers_utf8[HD2CT_MAX_KEY + HD2CT_MAX_REGION + 512u];
     char *response_body = NULL;
     size_t response_used = 0;
     DWORD status_code = 0;
@@ -152,12 +183,44 @@ static void hd2ct_http_provider_request(HINTERNET session,
         failure_code = "INTERNAL";
         goto cleanup;
     }
-    if (built_request.header_name != NULL && built_request.header_value != NULL) {
+    if ((built_request.header_name == NULL) !=
+            (built_request.header_value == NULL) ||
+        (built_request.header2_name == NULL) !=
+            (built_request.header2_value == NULL) ||
+        !hd2ct_append_request_query(&url_parts, built_request.query,
+                                    sizeof(built_request.query))) {
+        failure_code = "INTERNAL";
+        goto cleanup;
+    }
+    if (built_request.header_name != NULL &&
+        built_request.header2_name != NULL) {
+        int written = snprintf(headers_utf8, sizeof(headers_utf8),
+                               "Content-Type: %s\r\nAccept: application/json\r\n%s: %s%s\r\n%s: %s\r\n",
+                               built_request.content_type, built_request.header_name,
+                               built_request.header_prefix != NULL ? built_request.header_prefix : "",
+                               built_request.header_value, built_request.header2_name,
+                               built_request.header2_value);
+        if (written <= 0 || (size_t)written >= sizeof(headers_utf8)) {
+            failure_code = "INTERNAL";
+            goto cleanup;
+        }
+        headers_utf8_bytes = (size_t)written;
+    } else if (built_request.header_name != NULL) {
         int written = snprintf(headers_utf8, sizeof(headers_utf8),
                                "Content-Type: %s\r\nAccept: application/json\r\n%s: %s%s\r\n",
                                built_request.content_type, built_request.header_name,
                                built_request.header_prefix != NULL ? built_request.header_prefix : "",
                                built_request.header_value);
+        if (written <= 0 || (size_t)written >= sizeof(headers_utf8)) {
+            failure_code = "INTERNAL";
+            goto cleanup;
+        }
+        headers_utf8_bytes = (size_t)written;
+    } else if (built_request.header2_name != NULL) {
+        int written = snprintf(headers_utf8, sizeof(headers_utf8),
+                               "Content-Type: %s\r\nAccept: application/json\r\n%s: %s\r\n",
+                               built_request.content_type, built_request.header2_name,
+                               built_request.header2_value);
         if (written <= 0 || (size_t)written >= sizeof(headers_utf8)) {
             failure_code = "INTERNAL";
             goto cleanup;

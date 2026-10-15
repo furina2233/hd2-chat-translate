@@ -32,7 +32,7 @@ end
 local function localized_text(key, index, seconds)
     local locale = current_locale()
     local value
-    if key == "target_language_choices" then
+    if key == "target_language_choices" or key == "interface_type_choices" then
         local choices = rawget(locale, key)
         if type(choices) == "table" then value = rawget(choices, index) end
     else
@@ -40,7 +40,7 @@ local function localized_text(key, index, seconds)
     end
     if type(value) ~= "string" then
         locale = rawget(menu_locales, "en")
-        if key == "target_language_choices" then
+        if key == "target_language_choices" or key == "interface_type_choices" then
             value = rawget(rawget(locale, key), index)
         else
             value = rawget(locale, key)
@@ -70,6 +70,11 @@ local function new_registration_step()
     local timeout_choices = {}
     for index, choice in ipairs(catalogue.menu_options.timeout.choices) do
         timeout_choices[index] = text_callback("timeout_choice_format", nil, choice.seconds)
+    end
+
+    local interface_type_choices = {}
+    for index in ipairs(catalogue.menu_options.interface_type.choices) do
+        interface_type_choices[index] = text_callback("interface_type_choices", index)
     end
 
     local specs = {
@@ -117,6 +122,18 @@ local function new_registration_step()
                 default = catalogue.menu_options.timeout.default_index,
                 choices = timeout_choices,
                 description = text_callback("timeout_description"),
+            },
+        },
+        {
+            option_id = catalogue.menu_options.interface_type.option_id,
+            spec = {
+                type = catalogue.menu_options.interface_type.type,
+                label = text_callback("interface_type_label"),
+                mod = "HD2 Chat Translate",
+                mod_id = catalogue.mod_id,
+                default = catalogue.menu_options.interface_type.default_index,
+                choices = interface_type_choices,
+                description = text_callback("interface_type_description"),
             },
         },
     }
