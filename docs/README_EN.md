@@ -51,6 +51,7 @@ You can make other adjustments in the settings page:
 | Do not translate my messages | When enabled, messages sent by you will not be translated |
 | Timeout | Request timeout duration |
 | Interface type | Type of translation service interface |
+| Translate enemy names colloquially | Only applies to AI translation when the target language is Chinese; translates enemy names colloquially |
 
 Notes:
 
