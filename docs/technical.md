@@ -9,7 +9,7 @@
 - [game/chat_translate_core.lua](../game/chat_translate_core.lua) 管理新消息、请求队列、响应、过期和回写状态。
 - [game/research/chat_observe_core.lua](../game/research/chat_observe_core.lua) 提供观察诊断状态机；正式翻译模式不会实例化或推进该模块。
 - [game/chat_http_native.lua](../game/chat_http_native.lua) 校验并加载随包嵌入的原生 DLL。
-- [game/settings.lua](../game/settings.lua) 向 Mod Options Menu 注册目标语言、启用、自己消息过滤、请求超时和接口类型选项，不读取服务凭据。
+- [game/settings.lua](../game/settings.lua) 向 Mod Options Menu 注册目标语言、启用、自己消息过滤、敌人俗称、请求超时和接口类型选项，不读取服务凭据。
 - [native/client.c](../native/client.c) 管理公开 ABI、后台线程、队列、缓存与限流；原生客户端各模块共同链接为一个 DLL。
 - [tools/build_package.py](../tools/build_package.py) 将 Lua addon 和原生模块构建为含前置或需单独安装前置的 Arsenal 安装包。
 
@@ -68,13 +68,15 @@
 
 固定端点分别为 Google `https://translation.googleapis.com/language/translate/v2`、百度 `https://fanyi-api.baidu.com/api/trans/vip/translate`、有道 `https://openapi.youdao.com/api`、Bing 中国区 `https://api.translator.azure.cn/translate`、Bing 全球 `https://api.cognitive.microsofttranslator.com/translate`。不按 URL 关键词或模型名推断服务，不支持覆盖机器翻译端点。模型名最多256字节，密钥与应用 ID 各最多4096字节，AI URL 最多2048字节。旧变量 HD2CT_ENABLED 与 HD2CT_TIMEOUT_SECONDS 不读取。配置错误只影响当前任务，不阻止后续通过 APPLY 切换服务。
 
-后台 worker 每次开始处理任务时，从 `%LOCALAPPDATA%\CowboyBingus\Helldivers2\Logs\ModOptionsMenu.values` 的同一份 primary/backup 文件快照读取本插件的目标语言、启用状态、自己消息过滤状态、超时与接口类型。缺失或无效时分别回退到简体中文、开启、开启、20秒和免费版；启用及自己消息过滤值只接受小写 `true`/`false`，choice 值是1起始的索引。可读且有记录的 primary 中若缺少某项或该项值无效，不从旧 backup 覆盖；primary 不可读、损坏或没有有效记录时才尝试 backup。提交、轮询和游戏线程不做该文件 I/O。
+后台 worker 每次开始处理任务时，从 `%LOCALAPPDATA%\CowboyBingus\Helldivers2\Logs\ModOptionsMenu.values` 的同一份 primary/backup 文件快照读取本插件的目标语言、启用状态、自己消息过滤、敌人俗称、超时与接口类型。缺失或无效时分别回退到简体中文、开启、开启、开启、20秒和免费版；启用、自己消息过滤及敌人俗称值只接受小写 `true`/`false`，choice 值是1起始的索引。可读且有记录的 primary 中若缺少某项或该项值无效，不从旧 backup 覆盖；primary 不可读、损坏或没有有效记录时才尝试 backup。提交、轮询和游戏线程不做该文件 I/O。
 
 普通适配器要求 HTTPS，自定义地址只对 localhost、127.0.0.0/8 和 ::1 允许 HTTP；Bing 网页使用固定 HTTPS 域名。Chat Completions 将无路径或根路径补为 `/chat/completions`；对于以完整路径段 `/v1` 结尾的地址，去掉可选尾斜杠后追加 `/chat/completions`，因此 `/proxy/v1` 和 `/proxy/v1/` 都得到 `/proxy/v1/chat/completions`。Anthropic 将无路径或根路径补为 `/v1/messages`；对于以完整路径段 `/v1` 结尾的地址，去掉可选尾斜杠后追加 `/messages`，因此 `/proxy/v1` 和 `/proxy/v1/` 都得到 `/proxy/v1/messages`。其他自定义路径和完整端点按输入原样保留，需填写完整端点。例如智谱 GLM 应填写完整地址 `https://open.bigmodel.cn/api/paas/v4/chat/completions`；`/api/paas/v4/` 会原样保留，不会自动补全端点。拒绝配置 URL 中的凭据、查询、片段、反斜杠、空白和控制字符。Bing 官方的 api-version/to 查询由适配器生成。普通服务禁用重定向、cookies 和自动认证；Bing 网页使用独立 Cookie 会话。
 
 AI 适配器使用 OpenAI-compatible Chat Completions 请求，只发送 `model`、`messages` 和 `response_format: {"type":"json_object"}`。请求不显式设置采样或思考参数，也不发送 `stream`；模型使用服务端默认策略及非流式默认行为。端点需同时实现兼容的 Chat Completions 与 JSON mode；供应商原生 API 不一定支持这两者。JSON mode 保证输出是合法 JSON 语法，不保证对象字段结构；提示词要求只返回 `is_target_language`（布尔值）和 `translation`（字符串），客户端再严格校验字段、类型、重复字段和额外字段。[DeepSeek Chat Completions 文档](https://api-docs.deepseek.com/api/create-chat-completion/)；[通义千问结构化输出文档](https://help.aliyun.com/zh/model-studio/qwen-structured-output)。完整简体中文请求示例见 [ai-request-example.json](ai-request-example.json)。
 
-两种 AI 协议共用 [ai_common.c](../native/adapter/ai_common.c) 中的中文提示词和严格译文校验。系统提示词由通用部分和简体中文专属术语部分组成。通用部分填入目标语言并要求只翻译待处理聊天文本；仅 `zh_cn` 追加网络缩写、敌名和游戏术语对照，例如 Charger=牛、Spore Charger=孢子牛。繁体中文及其他目标语言不追加该段。
+两种 AI 协议共用 [ai_common.c](../native/adapter/ai_common.c) 中的中文提示词和严格译文校验。系统提示词由通用部分与简体中文专属规则组成。通用部分填入目标语言并要求只翻译待处理聊天文本；仅 `zh_cn` 追加网络缩写和游戏术语对照，例如 `lol=哈哈`、`reinforce=增援`。默认开启的 `hd2chattranslate.enemy_slang` 选项控制是否额外追加敌人俗称对照，例如 Charger=牛、Spore Charger=孢子牛；关闭时保留网络缩写和游戏术语。该选项只影响 Chat Completions 和 Anthropic 的简体中文目标，繁体中文及其他目标不追加中文规则，机器翻译也不受影响。
+
+AI 缓存指纹包含生成后的完整系统提示词，因此简体中文目标下开启和关闭敌人俗称会使用不同缓存；其他目标的提示词不变，可继续共用原缓存。机器翻译不生成 AI 系统提示词，该设置不会改变其缓存配置。
 
 Anthropic 使用 Messages API，请求头为 `x-api-key` 与 `anthropic-version: 2023-06-01`，请求体包含 `model`、`max_tokens: 4096`、`system` 和单条 user `messages`，不发送 OpenAI 的 response_format。响应要求 assistant message，拼接 text 内容块后校验相同的译文 JSON；拒绝工具或其他非文本块、拒绝标记、截断及不支持的结束原因。仅接受完整的 end_turn 或 stop_sequence 结果，不执行工具、不续写。[Anthropic Messages API](https://platform.claude.com/docs/en/api/messages/create)、[结束原因说明](https://platform.claude.com/docs/en/build-with-claude/handling-stop-reasons)。
 
@@ -122,15 +124,15 @@ Bing 国内版使用 [Azure 中国区端点](https://learn.microsoft.com/en-us/a
 
 ## 游戏内设置
 
-菜单使用单独安装的 [Mod Options Menu v1.2](https://github.com/CowboyBingus/ModOptionsMenu/releases/tag/v1.2) 原生 MODS 页、toggle/choice 类型和 APPLY 保存行为。五个选项 ID 分别为 `hd2chattranslate.target_language`、`hd2chattranslate.enabled`、`hd2chattranslate.ignore_self`、`hd2chattranslate.timeout`、`hd2chattranslate.interface_type`，共用 mod_id `hd2chattranslate`。默认值分别为索引1（简体中文）、true、true、索引2（20秒）、索引1（免费版）。接口1至8依次为免费版、Chat Completions、Anthropic、百度、有道、Azure 中国区、Azure 全球、Google。见[设置说明](settings.md)。
+菜单使用单独安装的 [Mod Options Menu v1.2](https://github.com/CowboyBingus/ModOptionsMenu/releases/tag/v1.2) 原生 MODS 页、toggle/choice 类型和 APPLY 保存行为。六个选项 ID 分别为 `hd2chattranslate.target_language`、`hd2chattranslate.enabled`、`hd2chattranslate.ignore_self`、`hd2chattranslate.enemy_slang`、`hd2chattranslate.timeout`、`hd2chattranslate.interface_type`，共用 mod_id `hd2chattranslate`。默认值分别为索引1（简体中文）、true、true、true、索引2（20秒）、索引1（免费版）。接口1至8依次为免费版、Chat Completions、Anthropic、百度、有道、Azure 中国区、Azure 全球、Google。见[设置说明](settings.md)。
 
 菜单文本由[resources/menu_locales.json](../resources/menu_locales.json)提供15种游戏UI语言的完整字符串；[tools/scripts/menu_locales.py](../tools/scripts/menu_locales.py)在构建时严格校验locale集合、字段、长度和超时占位符。打包器将一次读取的本地化快照编码进设置Lua模块。每个展示回调只用 rawget 读取 `_G.BingusTranslations` 的 version 与 canonical `game_language`，按精确locale、基础语言、英语的顺序选择文本；未知或无效注册表安全回退英语。回调不创建或修改注册表，也不读取游戏内存或Steam设置。MOM在每次打开ESC菜单时更新语言并重新求值函数文本，因此游戏语言变更在重新打开菜单后生效；游戏运行期间不读取语言文件。
 
-[resources/target_languages.json](../resources/target_languages.json) 的 schema 2 是五项菜单定义、AI 目标语言与机器翻译语言码的共同来源。[tools/scripts/target_languages.py](../tools/scripts/target_languages.py) 校验目录并在原生构建目录生成 C 表头，包含选项 ID、默认值和超时映射；打包时从同一目录生成 Lua 菜单项。语言及接口类型保存值是从1开始的索引，已有选择顺序必须保持稳定。构建 metadata 的 `target_languages_sha256` 覆盖整个目录，安装包构建器拒绝 DLL 与菜单目录不一致的组合。
+[resources/target_languages.json](../resources/target_languages.json) 的 schema 2 是六项菜单定义、AI 目标语言与机器翻译语言码的共同来源。[tools/scripts/target_languages.py](../tools/scripts/target_languages.py) 校验目录并在原生构建目录生成 C 表头，包含选项 ID、默认值和超时映射；打包时从同一目录生成 Lua 菜单项。语言及接口类型保存值是从1开始的索引，已有选择顺序必须保持稳定。构建 metadata 的 `target_languages_sha256` 覆盖整个目录，安装包构建器拒绝 DLL 与菜单目录不一致的组合。
 
-C 在后台 worker 开始处理任务时读取 `%LOCALAPPDATA%\CowboyBingus\Helldivers2\Logs\ModOptionsMenu.values`，不在 Submit、Poll 或游戏更新帧中执行设置文件 I/O。只校验本插件的选项值；主文件缺失、不可读或没有制表符分隔记录时尝试 `.bak`，主文件已有记录而本插件项缺失或无效时直接使用默认中文。其他模组的开关、滑块等值不会导致读取旧备份。读取上限为 512 KiB，拒绝非普通文件与 reparse point，并允许菜单原子替换文件。此路径对应随包 loader 的默认日志目录；不支持其他 loader 自定义的日志目录。
+C 在后台 worker 开始处理任务时读取 `%LOCALAPPDATA%\CowboyBingus\Helldivers2\Logs\ModOptionsMenu.values`，不在 Submit、Poll 或游戏更新帧中执行设置文件 I/O。只校验本插件的选项值；主文件缺失、不可读或没有制表符分隔记录时尝试 `.bak`，主文件已有记录而本插件项缺失或无效时使用该项默认值，不从旧备份覆盖。其他模组的开关、滑块等值不会导致读取旧备份。读取上限为 512 KiB，拒绝非普通文件与 reparse point，并允许菜单原子替换文件。此路径对应随包 loader 的默认日志目录；不支持其他 loader 自定义的日志目录。
 
-目标语言、启用状态、自己消息过滤、超时、接口类型及其有效配置在该任务内保持不变，已开始的请求不会因 APPLY 改变，后续开始处理的任务使用新选择；缓存按语言及服务配置隔离。Lua 设置模块不读取已应用值或服务凭据；它只为菜单展示读取上述本地化注册表。公开 C ABI 仍只有提交、轮询、取消三个函数。
+目标语言、启用状态、自己消息过滤、敌人俗称、超时、接口类型及其有效配置在该任务内保持不变，已开始的请求不会因 APPLY 改变，后续开始处理的任务使用新选择；缓存按语言及服务配置隔离。Lua 设置模块不读取已应用值或服务凭据；它只为菜单展示读取上述本地化注册表。公开 C ABI 仍只有提交、轮询、取消三个函数。
 
 ## 调度、队列与数据上限
 

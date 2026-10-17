@@ -11,13 +11,17 @@ static const char HD2CT_GENERAL_PROMPT[] =
 
 static const char HD2CT_CHINESE_PROMPT[] =
     "结合上下文自然翻译常见英文网络用语、聊天缩写和表情，"
-    "例如lol=哈哈、brb=马上回来、idk=不知道。"
+    "例如lol=哈哈、brb=马上回来、idk=不知道。";
+
+static const char HD2CT_ENEMY_SLANG_PROMPT[] =
     "以下为游戏内敌人的口语表达："
     "Charger=牛；Spore Charger=孢子牛；Impaler=穿刺牛；Bile Titan=泰坦；Hive Lord=霸王虫；"
     "Dragonroach/Shrieker=飞龙；Stalker=隐身虫；Alpha Commander=指挥官；"
     "Warrior及其类型/变体=武斗虫；Bile Spewer=绿胖；Nursing Spewer=黄胖；"
     "Factory Strider=移动工厂；Hulk及其类型/变体=无畏；Scout Strider及其类型/变体=小双足；"
-    "War Strider=大双足；Harvester=三足；Fleshmob=肉瘤体。完整特定名称优先，常规复数或同类变体沿用译名。"
+    "War Strider=大双足；Harvester=三足；Fleshmob=肉瘤体。完整特定名称优先，常规复数或同类变体沿用译名。";
+
+static const char HD2CT_CHINESE_TERMINOLOGY_PROMPT[] =
     "术语：reinforce=增援；extract=撤离；resupply=补给；stratagem=战备。";
 
 int hd2ct_make_ai_system_prompt(const HD2CT_WorkerJob *job, char *output,
@@ -34,6 +38,18 @@ int hd2ct_make_ai_system_prompt(const HD2CT_WorkerJob *job, char *output,
     if (strcmp(target->id, "zh_cn") == 0) {
         size_t remaining = output_capacity - used;
         written = snprintf(output + used, remaining, "%s", HD2CT_CHINESE_PROMPT);
+        if (written <= 0 || (size_t)written >= remaining) return 0;
+        used += (size_t)written;
+        if (job->enemy_slang != 0u) {
+            remaining = output_capacity - used;
+            written = snprintf(output + used, remaining, "%s",
+                               HD2CT_ENEMY_SLANG_PROMPT);
+            if (written <= 0 || (size_t)written >= remaining) return 0;
+            used += (size_t)written;
+        }
+        remaining = output_capacity - used;
+        written = snprintf(output + used, remaining, "%s",
+                           HD2CT_CHINESE_TERMINOLOGY_PROMPT);
         if (written <= 0 || (size_t)written >= remaining) return 0;
     }
     return 1;

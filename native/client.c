@@ -390,6 +390,7 @@ static int hd2ct_set_job_cache_fingerprint(HD2CT_WorkerJob *job)
     size_t field_lengths[8];
     const char *parts[16];
     size_t part_lengths[16];
+    char ai_system_prompt[2048];
     size_t field_count = 0u;
     size_t part_count = 0u;
     size_t field_index;
@@ -402,6 +403,7 @@ static int hd2ct_set_job_cache_fingerprint(HD2CT_WorkerJob *job)
     memset(parts, 0, sizeof(parts));
     memset(part_lengths, 0, sizeof(part_lengths));
     memset(digest_hex, 0, sizeof(digest_hex));
+    memset(ai_system_prompt, 0, sizeof(ai_system_prompt));
     for (i = 0; i < 2u; ++i) {
         uint32_t value = i == 0u ? job->adapter_id : job->interface_type;
         numeric_fields[i][0] = (unsigned char)(value & 0xffu);
@@ -422,6 +424,12 @@ static int hd2ct_set_job_cache_fingerprint(HD2CT_WorkerJob *job)
         field_lengths[field_count++] = strlen(job->model);
         fields[field_count] = job->api_key;
         field_lengths[field_count++] = strlen(job->api_key);
+        if (!hd2ct_make_ai_system_prompt(
+                job, ai_system_prompt, sizeof(ai_system_prompt))) {
+            goto fail;
+        }
+        fields[field_count] = ai_system_prompt;
+        field_lengths[field_count++] = strlen(ai_system_prompt);
         break;
     case HD2CT_ADAPTER_BAIDU:
     case HD2CT_ADAPTER_YOUDAO:
@@ -470,6 +478,7 @@ static int hd2ct_set_job_cache_fingerprint(HD2CT_WorkerJob *job)
     SecureZeroMemory(parts, sizeof(parts));
     SecureZeroMemory(part_lengths, sizeof(part_lengths));
     SecureZeroMemory(digest_hex, sizeof(digest_hex));
+    SecureZeroMemory(ai_system_prompt, sizeof(ai_system_prompt));
     return 1;
 
 fail:
@@ -482,6 +491,7 @@ fail:
     SecureZeroMemory(parts, sizeof(parts));
     SecureZeroMemory(part_lengths, sizeof(part_lengths));
     SecureZeroMemory(digest_hex, sizeof(digest_hex));
+    SecureZeroMemory(ai_system_prompt, sizeof(ai_system_prompt));
     return 0;
 }
 
@@ -515,6 +525,7 @@ static void hd2ct_process_job(HINTERNET session, HD2CT_BingState *bing_state,
     job->timeout_seconds = settings.timeout_seconds;
     job->menu_enabled = settings.enabled;
     job->ignore_self = settings.ignore_self;
+    job->enemy_slang = settings.enemy_slang;
     if (job->menu_enabled == 0u ||
         (job->ignore_self != 0u && (job->flags & HD2CT_MESSAGE_SELF) != 0u)) {
         hd2ct_complete_job(job, "SKIP\n", 5u, 0, 0);

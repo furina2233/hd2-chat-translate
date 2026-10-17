@@ -102,6 +102,7 @@ typedef struct HD2CT_WorkerJob {
     uint32_t timeout_seconds;
     uint32_t menu_enabled;
     uint32_t ignore_self;
+    uint32_t enemy_slang;
 } HD2CT_WorkerJob;
 
 #define HD2CT_BING_IG_CAPACITY 129u
@@ -143,6 +144,7 @@ typedef struct HD2CT_RuntimeSettings {
     uint32_t timeout_seconds;
     uint32_t enabled;
     uint32_t ignore_self;
+    uint32_t enemy_slang;
 } HD2CT_RuntimeSettings;
 
 typedef struct HD2CT_TargetLanguage {

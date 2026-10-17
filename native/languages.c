@@ -16,6 +16,8 @@ typedef struct HD2CT_ParsedValues {
     uint32_t enabled_valid;
     uint32_t ignore_self;
     uint32_t ignore_self_valid;
+    uint32_t enemy_slang;
+    uint32_t enemy_slang_valid;
     uint32_t timeout_index;
     uint32_t timeout_valid;
     uint32_t interface_type;
@@ -164,6 +166,7 @@ static int hd2ct_parse_values_text(const unsigned char *text, size_t length,
     static const char target_option_id[] = HD2CT_TARGET_LANGUAGE_OPTION_ID;
     static const char enabled_option_id[] = HD2CT_ENABLED_OPTION_ID;
     static const char ignore_self_option_id[] = HD2CT_IGNORE_SELF_OPTION_ID;
+    static const char enemy_slang_option_id[] = HD2CT_ENEMY_SLANG_OPTION_ID;
     static const char timeout_option_id[] = HD2CT_TIMEOUT_OPTION_ID;
     static const char interface_type_option_id[] = HD2CT_INTERFACE_TYPE_OPTION_ID;
     size_t cursor = 0u;
@@ -171,6 +174,7 @@ static int hd2ct_parse_values_text(const unsigned char *text, size_t length,
     parsed->target_language = HD2CT_DEFAULT_TARGET_LANGUAGE;
     parsed->enabled = HD2CT_ENABLED_DEFAULT;
     parsed->ignore_self = HD2CT_IGNORE_SELF_DEFAULT;
+    parsed->enemy_slang = HD2CT_ENEMY_SLANG_DEFAULT;
     parsed->timeout_index = HD2CT_DEFAULT_TIMEOUT_INDEX;
     parsed->interface_type = HD2CT_INTERFACE_TYPE_DEFAULT;
     while (cursor < length) {
@@ -184,6 +188,7 @@ static int hd2ct_parse_values_text(const unsigned char *text, size_t length,
         int target_line;
         int enabled_line;
         int ignore_self_line;
+        int enemy_slang_line;
         int timeout_line;
         int interface_type_line;
         while (cursor < length && text[cursor] != '\r' && text[cursor] != '\n') {
@@ -206,6 +211,9 @@ static int hd2ct_parse_values_text(const unsigned char *text, size_t length,
         ignore_self_line = tab - line_start == sizeof(ignore_self_option_id) - 1u &&
             memcmp(text + line_start, ignore_self_option_id,
                    sizeof(ignore_self_option_id) - 1u) == 0;
+        enemy_slang_line = tab - line_start == sizeof(enemy_slang_option_id) - 1u &&
+            memcmp(text + line_start, enemy_slang_option_id,
+                   sizeof(enemy_slang_option_id) - 1u) == 0;
         timeout_line = tab - line_start == sizeof(timeout_option_id) - 1u &&
             memcmp(text + line_start, timeout_option_id,
                    sizeof(timeout_option_id) - 1u) == 0;
@@ -234,6 +242,10 @@ static int hd2ct_parse_values_text(const unsigned char *text, size_t length,
             parsed->ignore_self = HD2CT_IGNORE_SELF_DEFAULT;
             parsed->ignore_self_valid = !extra_tab && hd2ct_parse_boolean(
                 value, value_length, &parsed->ignore_self);
+        } else if (enemy_slang_line) {
+            parsed->enemy_slang = HD2CT_ENEMY_SLANG_DEFAULT;
+            parsed->enemy_slang_valid = !extra_tab && hd2ct_parse_boolean(
+                value, value_length, &parsed->enemy_slang);
         } else if (timeout_line) {
             parsed->timeout_index = HD2CT_DEFAULT_TIMEOUT_INDEX;
             parsed->timeout_valid = !extra_tab && hd2ct_parse_index(
@@ -271,6 +283,9 @@ static void hd2ct_apply_parsed_values(const HD2CT_ParsedValues *parsed,
     if (parsed->ignore_self_valid != 0u) {
         settings->ignore_self = parsed->ignore_self;
     }
+    if (parsed->enemy_slang_valid != 0u) {
+        settings->enemy_slang = parsed->enemy_slang;
+    }
     if (parsed->timeout_valid != 0u) {
         settings->timeout_seconds =
             g_hd2ct_timeout_seconds[parsed->timeout_index - 1u];
@@ -293,6 +308,7 @@ void hd2ct_read_applied_settings(HD2CT_RuntimeSettings *settings)
     settings->timeout_seconds = HD2CT_DEFAULT_TIMEOUT_SECONDS;
     settings->enabled = HD2CT_ENABLED_DEFAULT;
     settings->ignore_self = HD2CT_IGNORE_SELF_DEFAULT;
+    settings->enemy_slang = HD2CT_ENEMY_SLANG_DEFAULT;
     if (!hd2ct_values_primary_path(path,
                                   sizeof(path) / sizeof(path[0]))) {
         return;

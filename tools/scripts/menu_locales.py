@@ -57,6 +57,8 @@ TEXT_KEYS = (
     "enabled_description",
     "ignore_self_label",
     "ignore_self_description",
+    "enemy_slang_label",
+    "enemy_slang_description",
     "timeout_label",
     "timeout_description",
     "timeout_choice_format",
@@ -65,7 +67,8 @@ TEXT_KEYS = (
 )
 LOCALE_KEYS = frozenset((*TEXT_KEYS, "target_languages", "interface_types"))
 LABEL_KEYS = frozenset((
-    "target_language_label", "enabled_label", "ignore_self_label", "timeout_label",
+    "target_language_label", "enabled_label", "ignore_self_label",
+    "enemy_slang_label", "timeout_label",
     "interface_type_label",
 ))
 DESCRIPTION_KEYS = frozenset(
@@ -73,6 +76,7 @@ DESCRIPTION_KEYS = frozenset(
         "target_language_description",
         "enabled_description",
         "ignore_self_description",
+        "enemy_slang_description",
         "timeout_description",
         "interface_type_description",
     )

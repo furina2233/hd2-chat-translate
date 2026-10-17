@@ -17,9 +17,12 @@ _ROOT_KEYS = {
     "schema_version", "option_id", "mod_id", "default_index", "menu_options", "languages"
 }
 _LANGUAGE_KEYS = {"id", "label", "ai_target", "google", "baidu", "youdao"}
-_MENU_OPTIONS_KEYS = {"enabled", "ignore_self", "timeout", "interface_type"}
+_MENU_OPTIONS_KEYS = {
+    "enabled", "ignore_self", "enemy_slang", "timeout", "interface_type"
+}
 _ENABLED_OPTION_KEYS = {"option_id", "type", "label", "default", "description"}
 _IGNORE_SELF_OPTION_KEYS = {"option_id", "type", "label", "default", "description"}
+_ENEMY_SLANG_OPTION_KEYS = {"option_id", "type", "label", "default", "description"}
 _TIMEOUT_OPTION_KEYS = {
     "option_id", "type", "label", "default_index", "description", "choices"
 }
@@ -90,7 +93,9 @@ def validate_catalogue(value: Any) -> dict[str, Any]:
 
     menu_options = value["menu_options"]
     if not isinstance(menu_options, dict) or set(menu_options) != _MENU_OPTIONS_KEYS:
-        raise ValueError("menu_options必须包含enabled、ignore_self、timeout与interface_type")
+        raise ValueError(
+            "menu_options必须包含enabled、ignore_self、enemy_slang、timeout与interface_type"
+        )
     enabled = menu_options["enabled"]
     if not isinstance(enabled, dict) or set(enabled) != _ENABLED_OPTION_KEYS:
         raise ValueError("enabled菜单项字段不符合schema")
@@ -123,6 +128,27 @@ def validate_catalogue(value: Any) -> dict[str, Any]:
             or type(ignore_self["default"]) is not bool
             or not ignore_self["default"]):
         raise ValueError("ignore_self菜单项必须是默认开启的toggle")
+
+    enemy_slang = menu_options["enemy_slang"]
+    if (not isinstance(enemy_slang, dict)
+            or set(enemy_slang) != _ENEMY_SLANG_OPTION_KEYS):
+        raise ValueError("enemy_slang菜单项字段不符合schema")
+    enemy_slang_id = _plain_text(
+        enemy_slang["option_id"], "menu_options.enemy_slang.option_id")
+    if (not _OPTION_ID.fullmatch(enemy_slang_id)
+            or enemy_slang_id != "hd2chattranslate.enemy_slang"):
+        raise ValueError("enemy_slang菜单项option_id格式无效")
+    enemy_slang_label = _plain_text(
+        enemy_slang["label"], "menu_options.enemy_slang.label")
+    if (enemy_slang_label != "将敌人翻译为口语"
+            or len(enemy_slang_label) > _LABEL_MAX_CHARACTERS):
+        raise ValueError("enemy_slang菜单项label不符合固定标签")
+    enemy_slang_description = _plain_text(
+        enemy_slang["description"], "menu_options.enemy_slang.description")
+    if (enemy_slang["type"] != "toggle"
+            or type(enemy_slang["default"]) is not bool
+            or not enemy_slang["default"]):
+        raise ValueError("enemy_slang菜单项必须是默认开启的toggle")
 
     timeout = menu_options["timeout"]
     if not isinstance(timeout, dict) or set(timeout) != _TIMEOUT_OPTION_KEYS:
@@ -191,7 +217,8 @@ def validate_catalogue(value: Any) -> dict[str, Any]:
             raise ValueError("interface_type choices必须按固定服务ID与标签顺序排列")
         normalized_interface_type_choices.append({"id": choice_id, "label": label})
 
-    if len({option_id, enabled_id, ignore_self_id, timeout_id, interface_type_id}) != 5:
+    if len({option_id, enabled_id, ignore_self_id, enemy_slang_id,
+            timeout_id, interface_type_id}) != 6:
         raise ValueError("菜单option_id必须互不重复")
     normalized_menu_options = {
         "enabled": {
@@ -207,6 +234,13 @@ def validate_catalogue(value: Any) -> dict[str, Any]:
             "label": ignore_self_label,
             "default": True,
             "description": ignore_self_description,
+        },
+        "enemy_slang": {
+            "option_id": enemy_slang_id,
+            "type": "toggle",
+            "label": enemy_slang_label,
+            "default": True,
+            "description": enemy_slang_description,
         },
         "timeout": {
             "option_id": timeout_id,
@@ -337,6 +371,8 @@ def c_header_text(catalogue: dict[str, Any] | None = None) -> str:
         "#define HD2CT_ENABLED_DEFAULT 1u",
         f"#define HD2CT_IGNORE_SELF_OPTION_ID {_c_string(source['menu_options']['ignore_self']['option_id'])}",
         "#define HD2CT_IGNORE_SELF_DEFAULT 1u",
+        f"#define HD2CT_ENEMY_SLANG_OPTION_ID {_c_string(source['menu_options']['enemy_slang']['option_id'])}",
+        "#define HD2CT_ENEMY_SLANG_DEFAULT 1u",
         f"#define HD2CT_TIMEOUT_OPTION_ID {_c_string(source['menu_options']['timeout']['option_id'])}",
         f"#define HD2CT_DEFAULT_TIMEOUT_INDEX {source['menu_options']['timeout']['default_index']}u",
         f"#define HD2CT_TIMEOUT_CHOICE_COUNT {len(source['menu_options']['timeout']['choices'])}u",

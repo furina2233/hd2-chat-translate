@@ -207,6 +207,16 @@ def target_language_settings_source(
         "            description = " + _lua_string_literal(ignore_self["description"]) + ",",
         "        },",
     ])
+    enemy_slang = data["menu_options"]["enemy_slang"]
+    lines.extend([
+        "        enemy_slang = {",
+        "            option_id = " + _lua_string_literal(enemy_slang["option_id"]) + ",",
+        "            type = " + _lua_string_literal(enemy_slang["type"]) + ",",
+        "            label = " + _lua_string_literal(enemy_slang["label"]) + ",",
+        "            default = true,",
+        "            description = " + _lua_string_literal(enemy_slang["description"]) + ",",
+        "        },",
+    ])
     timeout = data["menu_options"]["timeout"]
     lines.extend([
         "        timeout = {",

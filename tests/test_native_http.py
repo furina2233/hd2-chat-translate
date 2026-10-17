@@ -27,6 +27,9 @@ from scripts import target_languages
 NATIVE_SOURCES = build_native_http.NATIVE_SOURCES
 TARGET_LANGUAGE_CATALOGUE = target_languages.load_catalogue()
 INTERFACE_OPTION_ID = TARGET_LANGUAGE_CATALOGUE["menu_options"]["interface_type"]["option_id"]
+ENEMY_SLANG_OPTION_ID = TARGET_LANGUAGE_CATALOGUE["menu_options"][
+    "enemy_slang"
+]["option_id"]
 CHAT_RESPONSE_FORMAT = {"type": "json_object"}
 MACHINE_ENDPOINTS = {
     4: "https://fanyi-api.baidu.com/api/trans/vip/translate",
@@ -123,6 +126,9 @@ if target_values_path is not None:
     primary = fixture.get("__target_primary")
     if primary is not None:
         Path(target_values_path).write_bytes(primary.encode("utf-8"))
+    backup = fixture.get("__target_backup")
+    if backup is not None:
+        Path(str(target_values_path) + ".bak").write_bytes(backup.encode("utf-8"))
 
 for hive_name, hive_id in (("user", 0), ("machine", 1)):
     for name, value in fixture.get(hive_name, {}).items():
@@ -720,12 +726,14 @@ class NativeHttpWorkerTests(unittest.TestCase):
         enabled: bool = True,
         ignore_self: bool = True,
         target_index: int = 1,
+        enemy_slang: bool = True,
     ) -> str:
         menu = TARGET_LANGUAGE_CATALOGUE["menu_options"]
         values = [
             f"{TARGET_LANGUAGE_CATALOGUE['option_id']}\t{target_index}\n",
             f"{menu['enabled']['option_id']}\t{'true' if enabled else 'false'}\n",
             f"{menu['ignore_self']['option_id']}\t{'true' if ignore_self else 'false'}\n",
+            f"{menu['enemy_slang']['option_id']}\t{'true' if enemy_slang else 'false'}\n",
             f"{menu['timeout']['option_id']}\t1\n",
         ]
         if interface_type is not None:
@@ -782,6 +790,9 @@ class NativeHttpWorkerTests(unittest.TestCase):
         force_bootstrap_failure: bool = False,
         force_worker_failure_at: int = 0,
         timeout: float = 15.0,
+        enemy_slang: bool = True,
+        target_contents: str | None = None,
+        backup_contents: str | None = None,
     ) -> dict:
         with tempfile.TemporaryDirectory(
             prefix="hd2ct-menu-values-", dir=str(NATIVE_TEST_ROOT),
@@ -791,9 +802,13 @@ class NativeHttpWorkerTests(unittest.TestCase):
                 "user": user or {},
                 "machine": machine or {},
                 "__target_values_path": str(values_path),
-                "__target_primary": self.menu_text(
-                    interface_type, enabled, ignore_self, target_index,
+                "__target_primary": (
+                    target_contents if target_contents is not None else self.menu_text(
+                        interface_type, enabled, ignore_self, target_index,
+                        enemy_slang,
+                    )
                 ),
+                "__target_backup": backup_contents,
                 "__force_bootstrap_create_failure": force_bootstrap_failure,
                 "__force_worker_create_failure_at": force_worker_failure_at,
             }
@@ -1200,6 +1215,18 @@ class NativeHttpWorkerTests(unittest.TestCase):
             "model", "messages", "response_format",
         })
         self.assertEqual(self.state.payloads[0]["response_format"], CHAT_RESPONSE_FORMAT)
+        chat_system_prompt = self.state.payloads[0]["messages"][0]["content"]
+        self.assertIn("lol=哈哈", chat_system_prompt)
+        self.assertIn("Charger=牛", chat_system_prompt)
+        self.assertIn("reinforce=增援", chat_system_prompt)
+        self.assertLess(len(chat_system_prompt.encode("utf-8")), 2048)
+        request_example = json.loads(
+            (ROOT / "docs" / "ai-request-example.json").read_text(encoding="utf-8")
+        )
+        self.assertEqual(
+            chat_system_prompt,
+            request_example["messages"][0]["content"],
+        )
         self.assertEqual(self.state.payloads[0]["messages"][1], {
             "role": "user", "content": source,
         })
@@ -1305,6 +1332,147 @@ class NativeHttpWorkerTests(unittest.TestCase):
                                  "ERR\n" + expected_code)
                 self.assertNotIn(response.decode("utf-8", errors="ignore"),
                                  json.dumps(failure))
+
+        menu_without_enemy_slang = "".join(
+            line for line in self.menu_text(2).splitlines(keepends=True)
+            if not line.startswith(ENEMY_SLANG_OPTION_ID + "\t")
+        )
+
+        def menu_with_enemy_slang(*values: str) -> str:
+            return menu_without_enemy_slang + "".join(
+                f"{ENEMY_SLANG_OPTION_ID}\t{value}\n" for value in values
+            )
+
+        self.state.clear()
+        self.state.responses_by_path["/toggle/chat"] = chat_response(
+            "Toggle chat translation",
+        )
+        chat_toggle_actions = self.submit_wait_actions("enemy-chat-on", source)
+        for token, contents in (
+            ("enemy-chat-off", self.menu_text(2, enemy_slang=False)),
+            ("enemy-chat-invalid", menu_with_enemy_slang("invalid")),
+            ("enemy-chat-duplicate-on", menu_with_enemy_slang("false", "true")),
+            ("enemy-chat-duplicate-off", menu_with_enemy_slang("true", "false")),
+            ("enemy-chat-missing", menu_without_enemy_slang),
+            ("enemy-chat-backup", "unparseable primary"),
+        ):
+            chat_toggle_actions.extend([
+                {"op": "target_file", "contents": contents},
+                *self.submit_wait_actions(token, source),
+            ])
+        chat_toggle = self.run_worker(
+            chat_toggle_actions,
+            user={
+                "HD2CT_API_URL": self.url + "/toggle/chat",
+                "HD2CT_MODEL": "fixture-model",
+                "HD2CT_API_KEY": "fake-api-key",
+            },
+            interface_type=2,
+            target_contents=self.menu_text(2, enemy_slang=True),
+            backup_contents=self.menu_text(2, enemy_slang=False),
+        )
+        self.assertEqual(chat_toggle["cache_count"], 2)
+        self.assertEqual(self.state.paths, ["/toggle/chat", "/toggle/chat"])
+        self.assertEqual(len(self.state.payloads), 2)
+        chat_on_prompt = self.state.payloads[0]["messages"][0]["content"]
+        chat_off_prompt = self.state.payloads[1]["messages"][0]["content"]
+        self.assertIn("Charger=牛", chat_on_prompt)
+        self.assertNotIn("Charger=牛", chat_off_prompt)
+        for retained_rule in ("lol=哈哈", "brb=马上回来", "idk=不知道", "reinforce=增援"):
+            self.assertIn(retained_rule, chat_off_prompt)
+        self.assertEqual(
+            [item["result"] for item in chat_toggle["actions"] if "result" in item],
+            ["OK\nToggle chat translation"] * 7,
+        )
+
+        self.state.clear()
+        anthropic_path = "/toggle/anthropic/v1/messages"
+        self.state.responses_by_path[anthropic_path] = anthropic_response([
+            result_content("Toggle Anthropic translation"),
+        ])
+        anthropic_toggle_actions = self.submit_wait_actions(
+            "enemy-anthropic-on", source,
+        )
+        anthropic_toggle_actions.extend([
+            {"op": "target_file", "contents": self.menu_text(3, enemy_slang=False)},
+            *self.submit_wait_actions("enemy-anthropic-off", source),
+            {"op": "target_file", "contents": self.menu_text(3, enemy_slang=True)},
+            *self.submit_wait_actions("enemy-anthropic-on-cache", source),
+        ])
+        anthropic_toggle = self.run_worker(
+            anthropic_toggle_actions,
+            user={
+                "HD2CT_API_URL": self.url + anthropic_path,
+                "HD2CT_MODEL": "fixture-model",
+                "HD2CT_API_KEY": "fake-api-key",
+            },
+            interface_type=3,
+        )
+        self.assertEqual(anthropic_toggle["cache_count"], 2)
+        self.assertEqual(self.state.paths, [anthropic_path, anthropic_path])
+        anthropic_on_prompt = self.state.payloads[0]["system"]
+        anthropic_off_prompt = self.state.payloads[1]["system"]
+        self.assertIn("Charger=牛", anthropic_on_prompt)
+        self.assertIn("lol=哈哈", anthropic_off_prompt)
+        self.assertIn("reinforce=增援", anthropic_off_prompt)
+        self.assertNotIn("Charger=牛", anthropic_off_prompt)
+
+        for target_index, target_name in ((2, "繁體中文"), (3, "英语")):
+            with self.subTest(target_language=target_name):
+                self.state.clear()
+                self.state.responses_by_path["/toggle/nonchinese"] = chat_response(
+                    "Non-Chinese target translation",
+                )
+                nonchinese_actions = self.submit_wait_actions(
+                    f"enemy-disabled-target-{target_index}", source,
+                )
+                nonchinese_actions.extend([
+                    {
+                        "op": "target_file",
+                        "contents": self.menu_text(
+                            2, target_index=target_index, enemy_slang=False,
+                        ),
+                    },
+                    *self.submit_wait_actions(
+                        f"enemy-disabled-target-cache-{target_index}", source,
+                    ),
+                ])
+                nonchinese = self.run_worker(
+                    nonchinese_actions,
+                    user={
+                        "HD2CT_API_URL": self.url + "/toggle/nonchinese",
+                        "HD2CT_MODEL": "fixture-model",
+                        "HD2CT_API_KEY": "fake-api-key",
+                    },
+                    interface_type=2,
+                    target_index=target_index,
+                    enemy_slang=True,
+                )
+                self.assertEqual(nonchinese["cache_count"], 1)
+                self.assertEqual(len(self.state.payloads), 1)
+                target_prompt = self.state.payloads[0]["messages"][0]["content"]
+                self.assertIn("目标语言为" + target_name, target_prompt)
+                for chinese_rule in ("lol=哈哈", "Charger=牛", "reinforce=增援"):
+                    self.assertNotIn(chinese_rule, target_prompt)
+
+        self.state.clear()
+        machine_endpoint = "/fixture/machine-8/language/translate/v2"
+        self.state.responses_by_path[machine_endpoint] = google_response(
+            "Google translation",
+        )
+        machine_actions = self.endpoint_setup_actions()
+        machine_actions.extend(self.submit_wait_actions("enemy-machine-on", source))
+        machine_actions.extend([
+            {"op": "target_file", "contents": self.menu_text(8, enemy_slang=False)},
+            *self.submit_wait_actions("enemy-machine-off", source),
+        ])
+        machine_toggle = self.run_worker(
+            machine_actions,
+            user={"HD2CT_API_KEY": "fake-api-key"},
+            interface_type=8,
+        )
+        self.assertEqual(machine_toggle["cache_count"], 1)
+        self.assertEqual(self.state.paths, [machine_endpoint])
 
     def test_free_defaults_skips_and_async_worker_lifecycle(self) -> None:
         free_source = "Extraction point is clear."

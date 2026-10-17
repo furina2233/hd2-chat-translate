@@ -504,6 +504,7 @@ class StandaloneBuilderTests(unittest.TestCase):
         self.assertIn(b"local TRANSLATE_ENABLED = true", entry)
         self.assertIn(b"local OBSERVE_ENABLED = false", entry)
         self.assertIn("不翻译自己说的话".encode("utf-8"), entry)
+        self.assertIn("将敌人翻译为口语".encode("utf-8"), entry)
 
         metadata = json.loads(fake_metadata(dll))
         builder.validate_native_dll(dll, json.dumps(metadata).encode("utf-8"))
@@ -679,6 +680,12 @@ class StandaloneBuilderTests(unittest.TestCase):
             expected_label = builder._lua_string_literal(
                 localizations["locales"]["zh-Hans"]["target_language_label"]
             )
+            expected_enemy_slang_label = builder._lua_string_literal(
+                localizations["locales"]["zh-Hans"]["enemy_slang_label"]
+            )
+            expected_enemy_slang_description = builder._lua_string_literal(
+                localizations["locales"]["zh-Hans"]["enemy_slang_description"]
+            )
             settings_script = (
                 "local module = assert(loadstring("
                 + delimiter + settings_source + closing + "))()\n"
@@ -689,9 +696,15 @@ class StandaloneBuilderTests(unittest.TestCase):
                 "assert(step(1000) == true)\n"
                 "local language = saved['hd2chattranslate.target_language']\n"
                 "local interface = saved['hd2chattranslate.interface_type']\n"
+                "local enemy_slang = saved['hd2chattranslate.enemy_slang']\n"
+                "local option_count = 0\n"
+                "for _ in pairs(saved) do option_count = option_count + 1 end\n"
                 "assert(language and interface and #interface.choices == 8)\n"
+                "assert(enemy_slang and enemy_slang.default == true and option_count == 6)\n"
                 "_G.BingusTranslations = {version = 1, game_language = 'zh-Hans'}\n"
                 "assert(language.label() == " + expected_label + ")\n"
+                "assert(enemy_slang.label() == " + expected_enemy_slang_label + ")\n"
+                "assert(enemy_slang.description() == " + expected_enemy_slang_description + ")\n"
                 "RESULT = 'UTF-8 menu settings ok'"
             )
             self.assertEqual(self.lua.run(settings_script), "UTF-8 menu settings ok")

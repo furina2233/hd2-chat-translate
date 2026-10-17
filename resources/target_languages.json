@@ -18,6 +18,13 @@
       "default": true,
       "description": "开启后不翻译识别为自己发送的消息；无法确认发送者时照常翻译。"
     },
+    "enemy_slang": {
+      "option_id": "hd2chattranslate.enemy_slang",
+      "type": "toggle",
+      "label": "将敌人翻译为口语",
+      "default": true,
+      "description": "仅使用AI翻译且目标语言为中文时可用，启用后会将游戏内敌人名字翻译为口语，会增加token消耗。"
+    },
     "timeout": {
       "option_id": "hd2chattranslate.timeout",
       "type": "choice",

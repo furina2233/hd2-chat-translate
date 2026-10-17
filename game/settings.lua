@@ -113,6 +113,17 @@ local function new_registration_step()
             },
         },
         {
+            option_id = catalogue.menu_options.enemy_slang.option_id,
+            spec = {
+                type = catalogue.menu_options.enemy_slang.type,
+                label = text_callback("enemy_slang_label"),
+                mod = "HD2 Chat Translate",
+                mod_id = catalogue.mod_id,
+                default = catalogue.menu_options.enemy_slang.default,
+                description = text_callback("enemy_slang_description"),
+            },
+        },
+        {
             option_id = catalogue.menu_options.timeout.option_id,
             spec = {
                 type = catalogue.menu_options.timeout.type,
