@@ -1108,7 +1108,11 @@ class NativeHttpWorkerTests(unittest.TestCase):
             (base + "/v1/", 8, base + "/v1/messages"),
             (base + "/proxy/v1", 8, base + "/proxy/v1/messages"),
             (base + "/proxy/v1/", 8, base + "/proxy/v1/messages"),
+            (base + "/api/anthropic", 8, base + "/api/anthropic"),
+            (base + "/api/anthropic/", 8, base + "/api/anthropic/"),
             (base + "/api/paas/v4/", 8, base + "/api/paas/v4/"),
+            (base + "/v1beta", 8, base + "/v1beta"),
+            (base + "/v1/messages", 8, base + "/v1/messages"),
             (base + "/proxy/v10", 8, base + "/proxy/v10"),
             (base + "/proxy/v1/messages", 8, base + "/proxy/v1/messages"),
         )
@@ -1134,6 +1138,20 @@ class NativeHttpWorkerTests(unittest.TestCase):
             },
         ])
 
+        anthropic_expanded_input = base + "/proxy/v1/"
+        anthropic_expanded_expected = base + "/proxy/v1/messages"
+        anthropic_output_capacity = len(anthropic_expanded_expected.encode("utf-8")) + 1
+        normalization_actions.extend([
+            {
+                "op": "normalize_url", "url": anthropic_expanded_input,
+                "adapter_id": 8, "capacity": anthropic_output_capacity,
+            },
+            {
+                "op": "normalize_url", "url": anthropic_expanded_input,
+                "adapter_id": 8, "capacity": anthropic_output_capacity - 1,
+            },
+        ])
+
         maximum_url_prefix = "https://api.example.invalid/"
         maximum_url = maximum_url_prefix + "x" * (2048 - len(maximum_url_prefix))
         self.assertEqual(len(maximum_url.encode("utf-8")), 2048)
@@ -1151,7 +1169,9 @@ class NativeHttpWorkerTests(unittest.TestCase):
         expected_normalized = [
             (1, expected) for _input_url, _adapter_id, expected in normalization_cases
         ] + [
-            (1, expanded_expected), (0, ""), (1, maximum_url), (0, ""),
+            (1, expanded_expected), (0, ""),
+            (1, anthropic_expanded_expected), (0, ""),
+            (1, maximum_url), (0, ""),
         ]
         self.assertEqual(
             [
@@ -1217,6 +1237,49 @@ class NativeHttpWorkerTests(unittest.TestCase):
         self.assertEqual(anthropic_headers.get("x-api-key"), "fake-api-key")
         self.assertEqual(anthropic_headers.get("anthropic-version"), "2023-06-01")
         self.assertNotIn("authorization", anthropic_headers)
+
+        anthropic_worker_cases = (
+            ("root", self.url, "/v1/messages",
+             "Root and version endpoint translation"),
+            ("v1-slash", self.url + "/v1/", "/v1/messages",
+             "Root and version endpoint translation"),
+            ("proxy-v1-slash", self.url + "/proxy/v1/",
+             "/proxy/v1/messages", "Proxy endpoint translation"),
+        )
+        self.state.clear()
+        anthropic_worker_actions = []
+        for index, (name, api_url, expected_path, translation) in enumerate(
+            anthropic_worker_cases,
+        ):
+            self.state.responses_by_path[expected_path] = anthropic_response([
+                result_content(translation),
+            ])
+            if index != 0:
+                anthropic_worker_actions.append({
+                    "op": "registry_set", "name": "HD2CT_API_URL",
+                    "value": api_url,
+                })
+            anthropic_worker_actions.extend(self.submit_wait_actions(
+                f"anthropic-normalized-{name}", source + name,
+            ))
+        anthropic_worker_user = dict(user)
+        anthropic_worker_user["HD2CT_API_URL"] = self.url
+        anthropic_worker_result = self.run_worker(
+            anthropic_worker_actions, user=anthropic_worker_user,
+            interface_type=3, target_index=2,
+        )
+        self.assertEqual(self.state.paths, [
+            expected_path for _name, _api_url, expected_path, _translation
+            in anthropic_worker_cases
+        ])
+        self.assertEqual([
+            item["result"] for item in anthropic_worker_result["actions"]
+            if "result" in item
+        ], [
+            "OK\n" + translation
+            for _name, _api_url, _expected_path, translation
+            in anthropic_worker_cases
+        ])
 
         for name, interface_type, url, status, response, expected_code in (
             ("chat-http-error", 2, "/custom/chat/failure", 401,
