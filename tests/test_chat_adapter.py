@@ -1169,6 +1169,121 @@ end
 '''
 
 
+OBSERVER_SPAN_CHECKS = r'''
+;(function()
+    local span_region = add_region(0x7000000, 65536, 0x7000000, 0x20000, 0x04)
+    span_region.data[0] = string.byte("A")
+    reset_counters(); observer_read_budget = 0
+    local ordinary_value, ordinary_reason = observer_read(0x7000000, 4097)
+    assert(ordinary_value == nil and ordinary_reason == "invalid_length"
+        and query_calls == 0 and read_calls == 0 and observer_read_budget == 0,
+        "ordinary observer_read accepted more than 4096 bytes")
+    local oversized_span, oversized_span_reason = observer_read_span(0x7000000, 65537)
+    assert(oversized_span == nil and oversized_span_reason == "invalid_length"
+        and query_calls == 0 and read_calls == 0 and observer_read_budget == 0,
+        "observer_read_span accepted more than 65536 bytes")
+    local long_span = observer_read_span(0x7000000, 65536)
+    assert(long_span and #long_span == 65536 and long_span:byte(1) == string.byte("A")
+        and query_calls == 2 and read_calls == 1 and observer_read_budget == 65536,
+        "64KiB same-region span did not use two queries and one RPM call")
+
+    local saved_ffi_new = ffi.new
+    local span_ffi_new_calls = 0
+    ffi.new = function(...)
+        span_ffi_new_calls = span_ffi_new_calls + 1
+        return saved_ffi_new(...)
+    end
+    assert(observer_read_span(0x7000000, 8192))
+    ffi.new = saved_ffi_new
+    assert(span_ffi_new_calls == 0, "reused span scratch allocated another FFI buffer")
+
+    local adjacent_a = add_region(0x7010000, 4096, 0x7010000, 0x20000, 0x04)
+    local adjacent_b = add_region(0x7011000, 4096, 0x7010000, 0x20000, 0x04)
+    adjacent_a.data[4095] = 0x41
+    adjacent_b.data[0] = 0x42
+    reset_counters(); observer_read_budget = 0
+    local cross_region_span = observer_read_span(0x7010fff, 2)
+    assert(cross_region_span == string.char(0x41, 0x42)
+        and query_calls == 4 and read_calls == 2 and observer_read_budget == 2,
+        "same-allocation span did not split at the VirtualQuery boundary")
+
+    reset_counters(); observer_read_budget = 0
+    local cross_allocation_span, allocation_reason = observer_read_span(0x30ff0, 32)
+    assert(cross_allocation_span == nil and allocation_reason == "allocation_changed"
+        and query_calls == 3 and read_calls == 1 and observer_read_budget == 32,
+        "span crossed an allocation boundary")
+
+    local reentrant_region = add_region(0x7020000, 65536, 0x7020000, 0x20000, 0x04)
+    reentrant_region.data[0] = string.byte("B")
+    local nested_span, entered_nested_span
+    reset_counters(); observer_read_budget = 0
+    read_mutation = function(address)
+        if address == 0x7000000 and not entered_nested_span then
+            entered_nested_span = true
+            nested_span = observer_read_span(0x7020000, 8192)
+        end
+    end
+    local outer_span = observer_read_span(0x7000000, 8192)
+    read_mutation = nil
+    assert(entered_nested_span and outer_span and outer_span:byte(1) == string.byte("A")
+        and nested_span and nested_span:byte(1) == string.byte("B")
+        and query_calls == 4 and read_calls == 2,
+        "reentrant span read did not preserve independent scratch buffers")
+
+    reset_counters(); observer_read_budget = MAX_OBSERVER_READ - 65535
+    local budget_query_calls, budget_read_calls = query_calls, read_calls
+    local budget_span, budget_reason = observer_read_span(0x7000000, 65536)
+    assert(budget_span == nil and budget_reason == "budget_exhausted"
+        and query_calls == budget_query_calls and read_calls == budget_read_calls
+        and observer_read_budget == MAX_OBSERVER_READ - 65535,
+        "span budget refusal reached the fake kernel")
+
+    reset_counters(); observer_read_budget = 0
+    local _, overflow_reason = observer_read_span(MAX_OBSERVER_ADDRESS - 4, 8)
+    assert(overflow_reason == "pointer_range" and query_calls == 0 and read_calls == 0
+        and observer_read_budget == 8, "span address overflow was accepted")
+
+    reset_counters(); observer_read_budget = 0
+    rpm_short_on_call = 1
+    local short_span, short_span_reason = observer_read_span(0x7000000, 8192)
+    rpm_short_on_call = nil
+    assert(short_span == nil and short_span_reason == "short_read"
+        and query_calls == 2 and read_calls == 1,
+        "short span RPM result was accepted")
+
+    reset_counters(); observer_read_budget = 0
+    rpm_fail_on_call = 1
+    local failed_span, failed_span_reason = observer_read_span(0x7000000, 8192)
+    rpm_fail_on_call = nil
+    assert(failed_span == nil and failed_span_reason == "read_failed"
+        and query_calls == 2 and read_calls == 1,
+        "failed span RPM result was accepted")
+
+    add_region(0x7030000, 65536, 0x7030000, 0x20000, 0x04)
+    reset_counters(); observer_read_budget = 0
+    query_mutation = {call = 2, fn = function(item) item.protect = 0x20 end}
+    local protected_span, protected_span_reason = observer_read_span(0x7030000, 8192)
+    assert(protected_span == nil and protected_span_reason == "protection_denied"
+        and query_calls == 2 and read_calls == 0,
+        "span accepted a protection change between region queries")
+    query_mutation = nil
+
+    add_region(0x7040000, 8192, 0x7040000, 0x20000, 0x104)
+    reset_counters(); observer_read_budget = 0
+    local guarded_span, guarded_reason = observer_read_span(0x7040000, 16)
+    assert(guarded_span == nil and guarded_reason == "protection_denied"
+        and query_calls == 1 and read_calls == 0,
+        "guarded span region was accepted")
+
+    add_region(0x7050000, 8192, 0x7050000, 0x20000, 0x04, 0x2000)
+    reset_counters(); observer_read_budget = 0
+    local uncommitted_span, uncommitted_reason = observer_read_span(0x7050000, 16)
+    assert(uncommitted_span == nil and uncommitted_reason == "not_committed"
+        and query_calls == 1 and read_calls == 0,
+        "uncommitted span region was accepted")
+end)()
+'''
+
 STARTUP_RETENTION_CHECKS = r'''
 local ffi = require("ffi")
 ffi.cdef[[__FFI_DECL__]]
@@ -1509,6 +1624,12 @@ class ChatTranslateAdapterTests(unittest.TestCase):
         adapter_start = source.index("    local function new_observer_scratch()")
         adapter_end = source.index("    local adapter = {\n        hash_file", adapter_start)
         adapter = source[adapter_start:adapter_end]
+        # 独立测试原型通过全局入口访问跨度读取，避免 Lua 5.1 的200个局部变量上限。
+        adapter = adapter.replace(
+            "    local function observer_read_span(",
+            "    function observer_read_span(",
+            1,
+        )
         setter_start = adapter.index("    local function observer_translate_setter(")
         setter_end = adapter.index("    local function observer_translate_read_slot(", setter_start)
         adapter = adapter[:setter_start] + TRANSLATE_SETTER_SPY + adapter[setter_end:]
@@ -1519,6 +1640,7 @@ local translate_core = dofile([[TRANSLATE_CORE_PATH]])
 local STANDALONE_ENABLED = false
 local native_transport_api
 local TRANSLATE_ENABLED = false
+MAX_OBSERVER_SPAN = 64 * 1024
 local FULL_APPLY_READ_RESERVE = __FULL_APPLY_READ_RESERVE__
 local DISPLAY_TEST_ENABLED = false
 local observer_display_native_gate = false
@@ -1639,7 +1761,14 @@ end
             'pack32(key) .. pack32(0) .. pack64(value)',
             'pack32(key) .. pack32(matching_indices[index] and 1 or 0) .. pack64(value)',
         )
-        checks = "local function run_translate_checks()\n" + widget_fixture + "\n" + TRANSLATE_ADAPTER_CHECKS + "\nend\nrun_translate_checks()"
+        checks = (
+            "local function run_translate_checks()\n"
+            + widget_fixture
+            + "\n"
+            + TRANSLATE_ADAPTER_CHECKS
+            + "\nend\nrun_translate_checks()\n"
+            + OBSERVER_SPAN_CHECKS
+        )
         script = script.replace('RESULT = "adapter fake-kernel mocks ok"', checks, 1)
         try:
             raw_result = self.lua.run(script)

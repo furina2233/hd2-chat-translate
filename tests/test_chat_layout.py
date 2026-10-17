@@ -267,6 +267,7 @@ local function reset_case(config)
         verified = config.verified ~= false,
         gap = config.gap == nil and 5 or config.gap,
         read = read_bytes,
+        read_span = read_bytes,
         query = query,
         same_region = same_region,
         region_allowed = function(item)
@@ -458,16 +459,33 @@ local function expect_failure_diagnostic(config, expected_status, expected_code,
     return stats
 end
 
--- 三个纯读取批次各自重新合并查询；跨allocation时回退到原逐行验证。
+-- prepare保留两轮新鲜权限检查，几何快照在prepare、setter前和measure后各自读取。
 reset_case({head = 0, count = 3})
 local query_start = query_calls
 local batched_status, batched_snapshot = translate_layout.instance.prepare(context, target_row)
-assert(batched_status == "ready" and query_calls - query_start == 4,
-    "prepare did not use fresh merged queries for both read batches")
+assert(batched_status == "ready" and query_calls - query_start == 4
+    and geometry_read_calls == 1 and geometry_read_bytes == 2 * 0x3D8 + 20,
+    "prepare did not keep both permission checks and one merged geometry span: "
+        .. (query_calls - query_start) .. "/" .. geometry_read_calls .. "/" .. geometry_read_bytes)
 query_start = query_calls
 assert(translate_layout.instance.verify_prepared(batched_snapshot) == "ready"
-    and query_calls - query_start == 2,
+    and query_calls - query_start == 2 and geometry_read_calls == 2,
     "verify_prepared did not issue its own fresh merged query")
+
+reset_case({head = 0, count = 3})
+local second_snapshot_status, second_snapshot = translate_layout.instance.prepare(context, target_row)
+assert(second_snapshot_status == "ready")
+local second_snapshot_drift_hits = 0
+read_mutation = function(address, count)
+    if address == target_row + 0x10 and count == 1 then
+        second_snapshot_drift_hits = second_snapshot_drift_hits + 1
+        write_bytes(target_row + 0x10, float_bytes(33))
+    end
+end
+local second_verify_status = translate_layout.instance.verify_prepared(second_snapshot)
+assert(second_verify_status == "stale" and second_snapshot_drift_hits == 1,
+    "verify_prepared did not reject geometry drift after prepare: "
+        .. tostring(second_verify_status) .. "/" .. second_snapshot_drift_hits .. "/" .. geometry_read_calls)
 
 reset_case({head = 0, count = 3})
 split_address = target_row - 0x3D8
@@ -618,23 +636,39 @@ expect_heartbeat_failure(function()
     write_bytes(current_message.proof.entries_address + 2 * 0x18 + 20, pack32(0xDEADBEEF))
 end, "stale")
 
--- 完整64槽、最大14项map按fake读长计费；四轮geometry各16个请求、单个span不超过4096B。
+-- 完整64槽、最大14项map按fake读长计费；三轮geometry各用一个不超过64KiB的span。
 reset_case({head = 0, count = 64, target_index = 0, entry_budget = 2048,
     measured_height = 40, gap = 5})
 result = apply_text()
 local full_history_budget = observer_read_budget
 assert(result == "called_confirmed" and setter_calls == 1 and measure_calls == 1)
-assert(position_calls == 64 and full_history_budget == 200729,
+assert(position_calls == 64 and full_history_budget == 196557,
     "64-row position/read budget mismatch: " .. position_calls .. "/" .. full_history_budget)
-assert(geometry_read_calls == 64 and geometry_read_bytes == 190208)
-assert(geometry_read_max == 2972 and geometry_read_max <= 4096)
+assert(geometry_read_calls == 3 and geometry_read_bytes == 186036)
+assert(geometry_read_max == 62012 and geometry_read_max <= 65536)
 assert(query_calls <= 1024, "64-row layout exceeded the range-query budget")
-assert(full_history_budget <= MAX_OBSERVER_READ and MAX_OBSERVER_READ - full_history_budget == 61415)
+assert(full_history_budget <= MAX_OBSERVER_READ and MAX_OBSERVER_READ - full_history_budget == 65587)
 local full_history_stats = translate_layout.instance.stats()
 assert(full_history_stats.rows_positioned == 64 and full_history_stats.positions_skipped == 0)
 assert(full_history_stats.position_last_ms == 64 and full_history_stats.position_max_ms == 64)
 assert(read_bytes(manager + 0x13990, 4) == pack32(original_head))
 assert(read_bytes(manager + 0x139C0, 4) == pack32(original_count))
+
+-- 历史环回产生两个物理span，每个span仍只包含同allocation内的连续行。
+reset_case({head = 32, count = 64, target_index = 0})
+local wrapped_status = translate_layout.instance.prepare(context, target_row)
+assert(wrapped_status == "ready" and geometry_read_calls == 2
+    and geometry_read_bytes == 61048 and geometry_read_max == 30524,
+    "ring wrap was merged into a non-contiguous geometry span")
+
+-- allocation边界将64行拆成两个合法span；权限核验与几何读取都不跨归属。
+reset_case({head = 0, count = 64, target_index = 0})
+split_address = manager + 0x4390 + 32 * 0x3D8
+split_allocation = 0x200000
+local allocation_split_status = translate_layout.instance.prepare(context, target_row)
+assert(allocation_split_status == "ready" and geometry_read_calls == 2
+    and geometry_read_bytes == 61048 and geometry_read_max == 30524,
+    "allocation boundary was merged into a geometry span")
 
 -- setter属性未确认时不执行测量/重排，并永久停用后续setter。
 reset_case({measured_height = 40, verify_apply = false})
@@ -812,7 +846,7 @@ RESULT = "chat layout signature gate checks ok"
             "__VERIFY_VALUES__", self.verify_values
         ).replace("__APPLY_FUNCTION__", self.apply).replace(
             "__REPORT_SANITIZER__",
-            "local STANDALONE_ENABLED = false\n" + self.sanitizer,
+            "local STANDALONE_ENABLED = false\nlocal translate_identity = {state = {}}\n" + self.sanitizer,
         )
         self.assertEqual(self.lua.run(script), "chat layout fake-kernel and native-spy checks ok")
 

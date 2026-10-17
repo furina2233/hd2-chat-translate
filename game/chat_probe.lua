@@ -297,6 +297,7 @@ local translate_layout = (function()
     local function new(ffi, options)
         options = type(options) == "table" and options or {}
         local read = options.read
+        local read_span = options.read_span
         local query = options.query
         local same_region = options.same_region
         local region_allowed = options.region_allowed
@@ -400,6 +401,11 @@ local translate_layout = (function()
         local function read_exact(address, length)
             if type(read) ~= "function" then return nil, "read_failed" end
             return read(address, length)
+        end
+
+        local function read_geometry_span(address, length)
+            if type(read_span) == "function" then return read_span(address, length) end
+            return read_exact(address, length)
         end
 
         local function read_history(manager)
@@ -548,14 +554,17 @@ local translate_layout = (function()
 
         local function capture_geometry_rows(rows)
             local geometries = {}
+            local span_limit = type(read_span) == "function" and 64 * 1024 or 4096
             local index = 1
             while index <= #rows do
                 local finish_index = index
                 local allocation_base = rows[index].allocation_base
                 if allocation_base ~= nil then
-                    while finish_index < #rows and finish_index < index + 3
+                    while finish_index < #rows
                         and rows[finish_index].address == rows[finish_index + 1].address + ROW_SIZE
-                        and rows[finish_index + 1].allocation_base == allocation_base do
+                        and rows[finish_index + 1].allocation_base == allocation_base
+                        and rows[index].address - rows[finish_index + 1].address
+                            + ROW_SCALE_OFFSET - ROW_HEIGHT_OFFSET + 4 <= span_limit do
                         finish_index = finish_index + 1
                     end
                 end
@@ -564,8 +573,8 @@ local translate_layout = (function()
                 local low_row = rows[finish_index]
                 local span_length = high_row.address - low_row.address
                     + ROW_SCALE_OFFSET - ROW_HEIGHT_OFFSET + 4
-                if span_length < 1 or span_length > 4096 then return nil, "read_failed", 5 end
-                local bytes, reason = read_exact(low_row.address + ROW_HEIGHT_OFFSET, span_length)
+                if span_length < 1 or span_length > span_limit then return nil, "read_failed", 5 end
+                local bytes, reason = read_geometry_span(low_row.address + ROW_HEIGHT_OFFSET, span_length)
                 if not bytes then return nil, read_status(reason), 5 end
                 if #bytes ~= span_length then return nil, "read_failed", 5 end
 
@@ -626,11 +635,6 @@ local translate_layout = (function()
             local status, status_code = check_context_and_history(context, manager, history)
             if status then return fail(status, status_code) end
             if not writable_rows(rows) then return fail("read_failed", 4) end
-            geometries, geometry_error, geometry_code = capture_geometry_rows(rows)
-            if not geometries then return fail(geometry_error, geometry_code) end
-            for index, row in ipairs(rows) do
-                if geometries[index].bytes ~= row.geometry.bytes then return fail("stale", 10) end
-            end
             status, status_code = check_context_and_history(context, manager, history)
             if status then return fail(status, status_code) end
             return "ready", {
@@ -1239,6 +1243,7 @@ local function initialize_probe()
 
     local MAX_OBSERVER_ADDRESS = 0x7fffffffffff
     local MAX_OBSERVER_READ = TRANSLATE_ENABLED and 256 * 1024 or 16 * 1024
+    local MAX_OBSERVER_SPAN = 64 * 1024
     local FULL_APPLY_READ_RESERVE = 224 * 1024
     local OBSERVER_IMAGE_SIZE = expected_image_size
 
@@ -1279,6 +1284,7 @@ local function initialize_probe()
     local function new_observer_scratch()
         return {
             output = ffi.new("HD2Probe_U8[4096]"),
+            span_output = nil,
             bytes_read = ffi.new("HD2Probe_SIZE_T[1]"),
             information = ffi.new("HD2Probe_MEMORY_BASIC_INFORMATION[1]"),
             decode = ffi.new("HD2Probe_SIZE_T[1]"),
@@ -1356,9 +1362,10 @@ local function initialize_probe()
         return false, "allocation_denied"
     end
 
-    local function observer_read_with_scratch(scratch, address, length)
+    local function observer_read_with_scratch(scratch, address, length, length_limit)
+        length_limit = length_limit or 4096
         if type(length) ~= "number" or length ~= length or length ~= math.floor(length)
-            or length < 1 or length > 4096 then
+            or length < 1 or length > length_limit then
             return nil, "invalid_length"
         end
         if length > MAX_OBSERVER_READ - observer_read_budget then
@@ -1374,6 +1381,12 @@ local function initialize_probe()
         local cursor = address
         local first_allocation = nil
         local output = scratch.output
+        if length > 4096 then
+            if scratch.span_output == nil then
+                scratch.span_output = ffi.new("HD2Probe_U8[?]", MAX_OBSERVER_SPAN)
+            end
+            output = scratch.span_output
+        end
         while cursor < finish do
             local region, query_reason = observer_query_address_with_scratch(scratch, cursor)
             if not region then return nil, query_reason end
@@ -1383,8 +1396,7 @@ local function initialize_probe()
             elseif first_allocation ~= region.allocation_base then return nil, "allocation_changed" end
             if region.base > cursor or region.finish <= cursor then return nil, "region_bounds" end
 
-            local page_finish = (math.floor(cursor / 4096) + 1) * 4096
-            local chunk_finish = math.min(finish, region.finish, page_finish)
+            local chunk_finish = math.min(finish, region.finish)
             if chunk_finish <= cursor then return nil, "region_bounds" end
             local verified, verified_reason = observer_query_address_with_scratch(scratch, cursor)
             if not verified then return nil, verified_reason end
@@ -1408,6 +1420,10 @@ local function initialize_probe()
 
     local function observer_read(address, length)
         return with_observer_scratch(observer_read_with_scratch, address, length)
+    end
+
+    local function observer_read_span(address, length)
+        return with_observer_scratch(observer_read_with_scratch, address, length, MAX_OBSERVER_SPAN)
     end
 
     local function observer_read_pointer_with_scratch(scratch, address)
@@ -3283,6 +3299,7 @@ local function initialize_probe()
         observer_translate_prepare_paths()
         translate_layout.instance = translate_layout.new(ffi, {
             read = observer_read,
+            read_span = observer_read_span,
             query = observer_query_address,
             same_region = same_observer_region,
             region_allowed = observer_region_allowed,
