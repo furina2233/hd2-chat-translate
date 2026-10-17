@@ -85,6 +85,10 @@ lib.fixture_GetMachineEndpoint.argtypes = [
 lib.fixture_GetMachineEndpoint.restype = ctypes.c_int
 lib.fixture_SetMachineEndpoint.argtypes = [ctypes.c_uint32, ctypes.c_char_p]
 lib.fixture_SetMachineEndpoint.restype = ctypes.c_int
+lib.fixture_NormalizeUrl.argtypes = [
+    ctypes.c_char_p, ctypes.c_uint32, ctypes.c_void_p, ctypes.c_size_t,
+]
+lib.fixture_NormalizeUrl.restype = ctypes.c_int
 lib.fixture_Initialized.argtypes = []
 lib.fixture_Initialized.restype = ctypes.c_uint32
 lib.fixture_BootstrapCount.argtypes = []
@@ -232,6 +236,17 @@ for action in actions:
             if not resolved or output.value.decode("utf-8") != url:
                 raise RuntimeError("machine endpoint override did not resolve")
         results.append({"accepted": accepted})
+    elif op == "normalize_url":
+        capacity = action["capacity"]
+        output = ctypes.create_string_buffer(capacity)
+        accepted = lib.fixture_NormalizeUrl(
+            action["url"].encode("utf-8"), action["adapter_id"],
+            output, capacity,
+        )
+        results.append({
+            "accepted": accepted,
+            "url": output.value.decode("utf-8"),
+        })
     elif op == "read_counts":
         results.append(registry_counts())
     elif op == "wait_initialized":
@@ -403,6 +418,12 @@ __declspec(dllexport) int __cdecl fixture_SetMachineEndpoint(
     uint32_t interface_type, const char *url)
 {
     return hd2ct_test_set_machine_endpoint(interface_type, url);
+}
+
+__declspec(dllexport) int __cdecl fixture_NormalizeUrl(
+    const char *input, uint32_t adapter_id, char *output, size_t capacity)
+{
+    return hd2ct_normalize_url(input, adapter_id, output, capacity);
 }
 
 __declspec(dllexport) uint32_t __cdecl fixture_Initialized(void)
@@ -1065,6 +1086,81 @@ class NativeHttpWorkerTests(unittest.TestCase):
         self.assertEqual(final_chat_headers.get("authorization"), "Bearer changed-key")
 
     def test_ai_custom_protocols_strict_responses_and_error_redaction(self) -> None:
+        base = "https://api.example.invalid"
+        normalization_cases = (
+            (base, 1, base + "/chat/completions"),
+            (base + "/", 1, base + "/chat/completions"),
+            (base + "/v1", 1, base + "/v1/chat/completions"),
+            (base + "/v1/", 1, base + "/v1/chat/completions"),
+            (base + "/proxy/v1", 1, base + "/proxy/v1/chat/completions"),
+            (base + "/proxy/v1/", 1, base + "/proxy/v1/chat/completions"),
+            (base + "/api/paas/v4/", 1, base + "/api/paas/v4/"),
+            (base + "/api/paas/v4/chat/completions", 1,
+             base + "/api/paas/v4/chat/completions"),
+            (base + "/proxy/v10", 1, base + "/proxy/v10"),
+            (base + "/proxy/v1beta", 1, base + "/proxy/v1beta"),
+            (base + "/custom/chat/path", 1, base + "/custom/chat/path"),
+            (base + "/proxy/v1/chat/completions", 1,
+             base + "/proxy/v1/chat/completions"),
+            (base, 8, base + "/v1/messages"),
+            (base + "/", 8, base + "/v1/messages"),
+            (base + "/v1", 8, base + "/v1/messages"),
+            (base + "/v1/", 8, base + "/v1/messages"),
+            (base + "/proxy/v1", 8, base + "/proxy/v1/messages"),
+            (base + "/proxy/v1/", 8, base + "/proxy/v1/messages"),
+            (base + "/api/paas/v4/", 8, base + "/api/paas/v4/"),
+            (base + "/proxy/v10", 8, base + "/proxy/v10"),
+            (base + "/proxy/v1/messages", 8, base + "/proxy/v1/messages"),
+        )
+        normalization_actions = [
+            {
+                "op": "normalize_url", "url": input_url,
+                "adapter_id": adapter_id, "capacity": 4096,
+            }
+            for input_url, adapter_id, _expected in normalization_cases
+        ]
+
+        expanded_input = base + "/proxy/v1"
+        expanded_expected = base + "/proxy/v1/chat/completions"
+        exact_output_capacity = len(expanded_expected.encode("utf-8")) + 1
+        normalization_actions.extend([
+            {
+                "op": "normalize_url", "url": expanded_input,
+                "adapter_id": 1, "capacity": exact_output_capacity,
+            },
+            {
+                "op": "normalize_url", "url": expanded_input,
+                "adapter_id": 1, "capacity": exact_output_capacity - 1,
+            },
+        ])
+
+        maximum_url_prefix = "https://api.example.invalid/"
+        maximum_url = maximum_url_prefix + "x" * (2048 - len(maximum_url_prefix))
+        self.assertEqual(len(maximum_url.encode("utf-8")), 2048)
+        normalization_actions.extend([
+            {
+                "op": "normalize_url", "url": maximum_url,
+                "adapter_id": 1, "capacity": 2049,
+            },
+            {
+                "op": "normalize_url", "url": maximum_url + "x",
+                "adapter_id": 1, "capacity": 2050,
+            },
+        ])
+        normalization_result = self.run_worker(normalization_actions)
+        expected_normalized = [
+            (1, expected) for _input_url, _adapter_id, expected in normalization_cases
+        ] + [
+            (1, expanded_expected), (0, ""), (1, maximum_url), (0, ""),
+        ]
+        self.assertEqual(
+            [
+                (result["accepted"], result["url"])
+                for result in normalization_result["actions"]
+            ],
+            expected_normalized,
+        )
+
         source = "Hold position."
         user = {
             "HD2CT_API_URL": self.url + "/custom/chat/path",

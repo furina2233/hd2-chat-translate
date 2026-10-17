@@ -51,7 +51,7 @@ AI 仅在简体中文目标下使用中文网络缩写和游戏术语规则；�
 
 必应国内版对应 Azure 中国区官方 API，国际版对应全球 Azure。区域或多服务资源需要填写资源地区 `HD2CT_REGION`，密钥应与所用 Azure 云、资源及地区匹配。
 
-AI 接口使用 `HD2CT_API_URL` 自定义地址。Anthropic 地址可填 `https://api.anthropic.com`、以 `/v1` 结尾的地址或完整 `/v1/messages` 地址。Chat Completions 的地址补全规则及其他协议详见[技术说明](technical.md#配置与-httpjson-协议)。服务配置在后台开始处理每条消息时读取，修改持久环境变量后不必重启游戏；已经开始的请求保留原配置。
+AI 接口使用 `HD2CT_API_URL` 自定义地址。Anthropic 地址可填根地址、以完整路径段 `/v1` 结尾的地址（兼容 `/v1/`，会去掉尾斜杠后追加 `/messages`）或完整 `/v1/messages` 地址；代理等其他自定义路径需填写完整端点。Chat Completions 的地址补全规则及其他协议详见[技术说明](technical.md#配置与-httpjson-协议)。服务配置在后台开始处理每条消息时读取，修改持久环境变量后不必重启游戏；已经开始的请求保留原配置。
 
 ## 保存位置与默认值
 

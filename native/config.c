@@ -49,12 +49,15 @@ int hd2ct_normalize_url(const char *input, uint32_t adapter_id,
     const char *authority_start;
     const char *authority_end;
     const char *path_start;
+    const char *path_suffix = NULL;
     const HD2CT_Adapter *adapter;
     size_t input_length = hd2ct_bounded_length(input, HD2CT_MAX_URL);
     size_t path_length;
+    size_t suffix_length = 0u;
     size_t prefix_length;
     size_t i;
     int wide_length;
+    int path_ends_v1;
     if (input_length > HD2CT_MAX_URL ||
         normalized_capacity <= input_length) {
         return 0;
@@ -91,6 +94,11 @@ int hd2ct_normalize_url(const char *input, uint32_t adapter_id,
     prefix_length = (size_t)(authority_end - input);
     path_start = authority_end;
     path_length = strlen(path_start);
+    path_ends_v1 =
+        (path_length >= 3u &&
+         memcmp(path_start + path_length - 3u, "/v1", 3u) == 0) ||
+        (path_length >= 4u &&
+         memcmp(path_start + path_length - 4u, "/v1/", 4u) == 0);
     wide_length = hd2ct_utf8_to_wide(input, input_length, wide_url,
                                      (int)(sizeof(wide_url) / sizeof(wide_url[0])));
     if (wide_length <= 0) {
@@ -117,23 +125,29 @@ int hd2ct_normalize_url(const char *input, uint32_t adapter_id,
             path_start = adapter->default_path;
             path_length = strlen(path_start);
         }
-    } else if (adapter_id == HD2CT_ADAPTER_ANTHROPIC &&
-               ((path_length == 3u && memcmp(path_start, "/v1", 3u) == 0) ||
-                (path_length == 4u && memcmp(path_start, "/v1/", 4u) == 0))) {
-        path_start = "/v1/messages";
-        path_length = sizeof("/v1/messages") - 1u;
-    } else if (adapter != NULL && adapter->base->ai_v1_completion_path &&
-               ((path_length == 3u && memcmp(path_start, "/v1", 3u) == 0) ||
-                (path_length == 4u && memcmp(path_start, "/v1/", 4u) == 0))) {
-        path_start = "/v1/chat/completions";
-        path_length = sizeof("/v1/chat/completions") - 1u;
+    } else if (path_ends_v1 && adapter_id == HD2CT_ADAPTER_ANTHROPIC) {
+        path_suffix = "/messages";
+        suffix_length = sizeof("/messages") - 1u;
+        if (path_length >= 4u && path_start[path_length - 1u] == '/') {
+            --path_length;
+        }
+    } else if (path_ends_v1 && adapter->base->ai_v1_completion_path) {
+        path_suffix = "/chat/completions";
+        suffix_length = sizeof("/chat/completions") - 1u;
+        if (path_length >= 4u && path_start[path_length - 1u] == '/') {
+            --path_length;
+        }
     }
-    if (prefix_length + path_length + 1u > normalized_capacity) {
+    if (prefix_length + path_length + suffix_length + 1u > normalized_capacity) {
         return 0;
     }
     memcpy(normalized, input, prefix_length);
     memcpy(normalized + prefix_length, path_start, path_length);
-    normalized[prefix_length + path_length] = '\0';
+    if (suffix_length != 0u) {
+        memcpy(normalized + prefix_length + path_length, path_suffix,
+               suffix_length);
+    }
+    normalized[prefix_length + path_length + suffix_length] = '\0';
     return 1;
 }
 
